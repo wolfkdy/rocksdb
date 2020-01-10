@@ -1,7 +1,7 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -9,6 +9,7 @@
 
 #include "db/db_test_util.h"
 #include "db/forward_iterator.h"
+#include "rocksdb/env_encryption.h"
 
 namespace rocksdb {
 
@@ -41,17 +42,32 @@ SpecialEnv::SpecialEnv(Env* base)
   non_writable_count_ = 0;
   table_write_callback_ = nullptr;
 }
+#ifndef ROCKSDB_LITE
+ROT13BlockCipher rot13Cipher_(16);
+#endif  // ROCKSDB_LITE
 
 DBTestBase::DBTestBase(const std::string path)
-    : option_config_(kDefault),
-      mem_env_(!getenv("MEM_ENV") ? nullptr : new MockEnv(Env::Default())),
-      env_(new SpecialEnv(mem_env_ ? mem_env_ : Env::Default())) {
+    : mem_env_(!getenv("MEM_ENV") ? nullptr : new MockEnv(Env::Default())),
+#ifndef ROCKSDB_LITE
+      encrypted_env_(
+          !getenv("ENCRYPTED_ENV")
+              ? nullptr
+              : NewEncryptedEnv(mem_env_ ? mem_env_ : Env::Default(),
+                                new CTREncryptionProvider(rot13Cipher_))),
+#else
+      encrypted_env_(nullptr),
+#endif  // ROCKSDB_LITE
+      env_(new SpecialEnv(encrypted_env_
+                              ? encrypted_env_
+                              : (mem_env_ ? mem_env_ : Env::Default()))),
+      option_config_(kDefault) {
   env_->SetBackgroundThreads(1, Env::LOW);
   env_->SetBackgroundThreads(1, Env::HIGH);
-  dbname_ = test::TmpDir(env_) + path;
+  dbname_ = test::PerThreadDBPath(env_, path);
   alternative_wal_dir_ = dbname_ + "/wal";
   alternative_db_log_dir_ = dbname_ + "/db_log_dir";
   auto options = CurrentOptions();
+  options.env = env_;
   auto delete_options = options;
   delete_options.wal_dir = alternative_wal_dir_;
   EXPECT_OK(DestroyDB(dbname_, delete_options));
@@ -72,7 +88,13 @@ DBTestBase::~DBTestBase() {
   options.db_paths.emplace_back(dbname_ + "_2", 0);
   options.db_paths.emplace_back(dbname_ + "_3", 0);
   options.db_paths.emplace_back(dbname_ + "_4", 0);
-  EXPECT_OK(DestroyDB(dbname_, options));
+  options.env = env_;
+
+  if (getenv("KEEP_DB")) {
+    printf("DB is still at %s\n", dbname_.c_str());
+  } else {
+    EXPECT_OK(DestroyDB(dbname_, options));
+  }
   delete env_;
 }
 
@@ -96,7 +118,8 @@ bool DBTestBase::ShouldSkipOptions(int option_config, int skip_mask) {
 
     if ((skip_mask & kSkipUniversalCompaction) &&
         (option_config == kUniversalCompaction ||
-         option_config == kUniversalCompactionMultiLevel)) {
+         option_config == kUniversalCompactionMultiLevel ||
+         option_config == kUniversalSubcompactions)) {
       return true;
     }
     if ((skip_mask & kSkipMergePut) && option_config == kMergePut) {
@@ -186,6 +209,36 @@ bool DBTestBase::ChangeCompactOptions() {
   }
 }
 
+// Switch between different WAL settings
+bool DBTestBase::ChangeWalOptions() {
+  if (option_config_ == kDefault) {
+    option_config_ = kDBLogDir;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kDBLogDir) {
+    option_config_ = kWalDirAndMmapReads;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kWalDirAndMmapReads) {
+    option_config_ = kRecycleLogFiles;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    Destroy(options);
+    TryReopen(options);
+    return true;
+  } else {
+    return false;
+  }
+}
+
 // Switch between different filter policy
 // Jump from kDefault to kFilter to kFullFilter
 bool DBTestBase::ChangeFilterOptions() {
@@ -193,6 +246,8 @@ bool DBTestBase::ChangeFilterOptions() {
     option_config_ = kFilter;
   } else if (option_config_ == kFilter) {
     option_config_ = kFullFilterWithNewTableReaderForCompactions;
+  } else if (option_config_ == kFullFilterWithNewTableReaderForCompactions) {
+    option_config_ = kPartitionedFilterWithNewTableReaderForCompactions;
   } else {
     return false;
   }
@@ -204,32 +259,86 @@ bool DBTestBase::ChangeFilterOptions() {
   return true;
 }
 
+// Switch between different DB options for file ingestion tests.
+bool DBTestBase::ChangeOptionsForFileIngestionTest() {
+  if (option_config_ == kDefault) {
+    option_config_ = kUniversalCompaction;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kUniversalCompaction) {
+    option_config_ = kUniversalCompactionMultiLevel;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    options.create_if_missing = true;
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kUniversalCompactionMultiLevel) {
+    option_config_ = kLevelSubcompactions;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    assert(options.max_subcompactions > 1);
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kLevelSubcompactions) {
+    option_config_ = kUniversalSubcompactions;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    assert(options.max_subcompactions > 1);
+    TryReopen(options);
+    return true;
+  } else if (option_config_ == kUniversalSubcompactions) {
+    option_config_ = kDirectIO;
+    Destroy(last_options_);
+    auto options = CurrentOptions();
+    TryReopen(options);
+    return true;
+  } else {
+    return false;
+  }
+}
+
 // Return the current option configuration.
 Options DBTestBase::CurrentOptions(
-    const anon::OptionsOverride& options_override) {
+    const anon::OptionsOverride& options_override) const {
+  return GetOptions(option_config_, GetDefaultOptions(), options_override);
+}
+
+Options DBTestBase::CurrentOptions(
+    const Options& default_options,
+    const anon::OptionsOverride& options_override) const {
+  return GetOptions(option_config_, default_options, options_override);
+}
+
+Options DBTestBase::GetDefaultOptions() {
   Options options;
   options.write_buffer_size = 4090 * 4096;
   options.target_file_size_base = 2 * 1024 * 1024;
   options.max_bytes_for_level_base = 10 * 1024 * 1024;
   options.max_open_files = 5000;
-  options.base_background_compactions = -1;
   options.wal_recovery_mode = WALRecoveryMode::kTolerateCorruptedTailRecords;
   options.compaction_pri = CompactionPri::kByCompensatedSize;
-
-  return CurrentOptions(options, options_override);
+  return options;
 }
 
-Options DBTestBase::CurrentOptions(
-    const Options& defaultOptions,
-    const anon::OptionsOverride& options_override) {
+Options DBTestBase::GetOptions(
+    int option_config, const Options& default_options,
+    const anon::OptionsOverride& options_override) const {
   // this redundant copy is to minimize code change w/o having lint error.
-  Options options = defaultOptions;
-  XFUNC_TEST("", "dbtest_options", inplace_options1, GetXFTestOptions,
-             reinterpret_cast<Options*>(&options),
-             options_override.skip_policy);
+  Options options = default_options;
   BlockBasedTableOptions table_options;
   bool set_block_based_table_factory = true;
-  switch (option_config_) {
+#if !defined(OS_MACOSX) && !defined(OS_WIN) && !defined(OS_SOLARIS) && \
+    !defined(OS_AIX)
+  rocksdb::SyncPoint::GetInstance()->ClearCallBack(
+      "NewRandomAccessFile:O_DIRECT");
+  rocksdb::SyncPoint::GetInstance()->ClearCallBack("NewWritableFile:O_DIRECT");
+#endif
+
+  bool can_allow_mmap = IsMemoryMappedAccessSupported();
+  switch (option_config) {
 #ifndef ROCKSDB_LITE
     case kHashSkipList:
       options.prefix_extractor.reset(NewFixedPrefixTransform(1));
@@ -239,14 +348,14 @@ Options DBTestBase::CurrentOptions(
     case kPlainTableFirstBytePrefix:
       options.table_factory.reset(new PlainTableFactory());
       options.prefix_extractor.reset(NewFixedPrefixTransform(1));
-      options.allow_mmap_reads = true;
+      options.allow_mmap_reads = can_allow_mmap;
       options.max_sequential_skip_in_iterations = 999999;
       set_block_based_table_factory = false;
       break;
     case kPlainTableCappedPrefix:
       options.table_factory.reset(new PlainTableFactory());
       options.prefix_extractor.reset(NewCappedPrefixTransform(8));
-      options.allow_mmap_reads = true;
+      options.allow_mmap_reads = can_allow_mmap;
       options.max_sequential_skip_in_iterations = 999999;
       set_block_based_table_factory = false;
       break;
@@ -260,7 +369,7 @@ Options DBTestBase::CurrentOptions(
     case kPlainTableAllBytesPrefix:
       options.table_factory.reset(new PlainTableFactory());
       options.prefix_extractor.reset(NewNoopTransform());
-      options.allow_mmap_reads = true;
+      options.allow_mmap_reads = can_allow_mmap;
       options.max_sequential_skip_in_iterations = 999999;
       set_block_based_table_factory = false;
       break;
@@ -279,6 +388,26 @@ Options DBTestBase::CurrentOptions(
           NewHashCuckooRepFactory(options.write_buffer_size));
       options.allow_concurrent_memtable_write = false;
       break;
+      case kDirectIO: {
+        options.use_direct_reads = true;
+        options.use_direct_io_for_flush_and_compaction = true;
+        options.compaction_readahead_size = 2 * 1024 * 1024;
+  #if !defined(OS_MACOSX) && !defined(OS_WIN) && !defined(OS_SOLARIS) && \
+      !defined(OS_AIX) && !defined(OS_OPENBSD)
+        rocksdb::SyncPoint::GetInstance()->SetCallBack(
+            "NewWritableFile:O_DIRECT", [&](void* arg) {
+              int* val = static_cast<int*>(arg);
+              *val &= ~O_DIRECT;
+            });
+        rocksdb::SyncPoint::GetInstance()->SetCallBack(
+            "NewRandomAccessFile:O_DIRECT", [&](void* arg) {
+              int* val = static_cast<int*>(arg);
+              *val &= ~O_DIRECT;
+            });
+        rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  #endif
+        break;
+      }
 #endif  // ROCKSDB_LITE
     case kMergePut:
       options.merge_operator = MergeOperators::CreatePutOperator();
@@ -288,6 +417,14 @@ Options DBTestBase::CurrentOptions(
       break;
     case kFullFilterWithNewTableReaderForCompactions:
       table_options.filter_policy.reset(NewBloomFilterPolicy(10, false));
+      options.new_table_reader_for_compaction_inputs = true;
+      options.compaction_readahead_size = 10 * 1024 * 1024;
+      break;
+    case kPartitionedFilterWithNewTableReaderForCompactions:
+      table_options.filter_policy.reset(NewBloomFilterPolicy(10, false));
+      table_options.partition_filters = true;
+      table_options.index_type =
+          BlockBasedTableOptions::IndexType::kTwoLevelIndexSearch;
       options.new_table_reader_for_compaction_inputs = true;
       options.compaction_readahead_size = 10 * 1024 * 1024;
       break;
@@ -304,7 +441,7 @@ Options DBTestBase::CurrentOptions(
       options.wal_dir = alternative_wal_dir_;
       // mmap reads should be orthogonal to WalDir setting, so we piggyback to
       // this option config to test mmap reads as well
-      options.allow_mmap_reads = true;
+      options.allow_mmap_reads = can_allow_mmap;
       break;
     case kManifestFileSize:
       options.max_manifest_file_size = 50;  // 50 bytes
@@ -324,7 +461,7 @@ Options DBTestBase::CurrentOptions(
       options.num_levels = 8;
       break;
     case kCompressedBlockCache:
-      options.allow_mmap_writes = true;
+      options.allow_mmap_writes = can_allow_mmap;
       table_options.block_cache_compressed = NewLRUCache(8 * 1024 * 1024);
       break;
     case kInfiniteMaxOpenFiles:
@@ -332,6 +469,10 @@ Options DBTestBase::CurrentOptions(
       break;
     case kxxHashChecksum: {
       table_options.checksum = kxxHash;
+      break;
+    }
+    case kxxHash64Checksum: {
+      table_options.checksum = kxxHash64;
       break;
     }
     case kFIFOCompaction: {
@@ -346,6 +487,23 @@ Options DBTestBase::CurrentOptions(
     case kBlockBasedTableWithWholeKeyHashIndex: {
       table_options.index_type = BlockBasedTableOptions::kHashSearch;
       options.prefix_extractor.reset(NewNoopTransform());
+      break;
+    }
+    case kBlockBasedTableWithPartitionedIndex: {
+      table_options.index_type = BlockBasedTableOptions::kTwoLevelIndexSearch;
+      options.prefix_extractor.reset(NewNoopTransform());
+      break;
+    }
+    case kBlockBasedTableWithPartitionedIndexFormat4: {
+      table_options.format_version = 4;
+      // Format 4 changes the binary index format. Since partitioned index is a
+      // super-set of simple indexes, we are also using kTwoLevelIndexSearch to
+      // test this format.
+      table_options.index_type = BlockBasedTableOptions::kTwoLevelIndexSearch;
+      // The top-level index in partition filters are also affected by format 4.
+      table_options.filter_policy.reset(NewBloomFilterPolicy(10, false));
+      table_options.partition_filters = true;
+      table_options.index_block_restart_interval = 8;
       break;
     }
     case kBlockBasedTableWithIndexRestartInterval: {
@@ -380,6 +538,16 @@ Options DBTestBase::CurrentOptions(
       options.enable_write_thread_adaptive_yield = true;
       break;
     }
+    case kPipelinedWrite: {
+      options.enable_pipelined_write = true;
+      break;
+    }
+    case kConcurrentWALWrites: {
+      // This options optimize 2PC commit path
+      options.two_write_queues = true;
+      options.manual_wal_flush = true;
+      break;
+    }
 
     default:
       break;
@@ -387,6 +555,8 @@ Options DBTestBase::CurrentOptions(
 
   if (options_override.filter_policy) {
     table_options.filter_policy = options_override.filter_policy;
+    table_options.partition_filters = options_override.partition_filters;
+    table_options.metadata_block_size = options_override.metadata_block_size;
   }
   if (set_block_based_table_factory) {
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
@@ -463,9 +633,17 @@ void DBTestBase::DestroyAndReopen(const Options& options) {
   ASSERT_OK(TryReopen(options));
 }
 
-void DBTestBase::Destroy(const Options& options) {
+void DBTestBase::Destroy(const Options& options, bool delete_cf_paths) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  if (delete_cf_paths) {
+    for (size_t i = 0; i < handles_.size(); ++i) {
+      ColumnFamilyDescriptor cfdescriptor;
+      handles_[i]->GetDescriptor(&cfdescriptor);
+      column_families.push_back(cfdescriptor);
+    }
+  }
   Close();
-  ASSERT_OK(DestroyDB(dbname_, options));
+  ASSERT_OK(DestroyDB(dbname_, options, column_families));
 }
 
 Status DBTestBase::ReadOnlyReopen(const Options& options) {
@@ -474,24 +652,24 @@ Status DBTestBase::ReadOnlyReopen(const Options& options) {
 
 Status DBTestBase::TryReopen(const Options& options) {
   Close();
+  last_options_.table_factory.reset();
+  // Note: operator= is an unsafe approach here since it destructs
+  // std::shared_ptr in the same order of their creation, in contrast to
+  // destructors which destructs them in the opposite order of creation. One
+  // particular problme is that the cache destructor might invoke callback
+  // functions that use Option members such as statistics. To work around this
+  // problem, we manually call destructor of table_facotry which eventually
+  // clears the block cache.
   last_options_ = options;
   return DB::Open(options, dbname_, &db_);
 }
 
 bool DBTestBase::IsDirectIOSupported() {
-  EnvOptions env_options;
-  env_options.use_mmap_writes = false;
-  env_options.use_direct_writes = true;
-  std::string tmp = TempFileName(dbname_, 999);
-  Status s;
-  {
-    unique_ptr<WritableFile> file;
-    s = env_->NewWritableFile(tmp, &file, env_options);
-  }
-  if (s.ok()) {
-    s = env_->DeleteFile(tmp);
-  }
-  return s.ok();
+  return test::IsDirectIOSupported(env_, dbname_);
+}
+
+bool DBTestBase::IsMemoryMappedAccessSupported() const {
+  return (!encrypted_env_);
 }
 
 Status DBTestBase::Flush(int cf) {
@@ -500,6 +678,13 @@ Status DBTestBase::Flush(int cf) {
   } else {
     return db_->Flush(FlushOptions(), handles_[cf]);
   }
+}
+
+Status DBTestBase::Flush(const std::vector<int>& cf_ids) {
+  std::vector<ColumnFamilyHandle*> cfhs;
+  std::for_each(cf_ids.begin(), cf_ids.end(),
+                [&cfhs, this](int id) { cfhs.emplace_back(handles_[id]); });
+  return db_->Flush(FlushOptions(), cfhs);
 }
 
 Status DBTestBase::Put(const Slice& k, const Slice& v, WriteOptions wo) {
@@ -544,6 +729,10 @@ Status DBTestBase::SingleDelete(int cf, const std::string& k) {
   return db_->SingleDelete(WriteOptions(), handles_[cf], k);
 }
 
+bool DBTestBase::SetPreserveDeletesSequenceNumber(SequenceNumber sn) {
+  return db_->SetPreserveDeletesSequenceNumber(sn);
+}
+
 std::string DBTestBase::Get(const std::string& k, const Snapshot* snapshot) {
   ReadOptions options;
   options.verify_checksums = true;
@@ -571,6 +760,13 @@ std::string DBTestBase::Get(int cf, const std::string& k,
     result = s.ToString();
   }
   return result;
+}
+
+Status DBTestBase::Get(const std::string& k, PinnableSlice* v) {
+  ReadOptions options;
+  options.verify_checksums = true;
+  Status s = dbfull()->Get(options, dbfull()->DefaultColumnFamily(), k, v);
+  return s;
 }
 
 uint64_t DBTestBase::GetNumSnapshots() {
@@ -618,13 +814,15 @@ std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
   Arena arena;
   auto options = CurrentOptions();
   InternalKeyComparator icmp(options.comparator);
-  RangeDelAggregator range_del_agg(icmp, {} /* snapshots */);
+  ReadRangeDelAggregator range_del_agg(&icmp,
+                                       kMaxSequenceNumber /* upper_bound */);
   ScopedArenaIterator iter;
   if (cf == 0) {
-    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
+                                           kMaxSequenceNumber));
   } else {
-    iter.set(
-        dbfull()->NewInternalIterator(&arena, &range_del_agg, handles_[cf]));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
+                                           kMaxSequenceNumber, handles_[cf]));
   }
   InternalKey target(user_key, kMaxSequenceNumber, kTypeValue);
   iter->Seek(target.Encode());
@@ -733,7 +931,6 @@ size_t DBTestBase::CountLiveFiles() {
   db_->GetLiveFilesMetaData(&metadata);
   return metadata.size();
 }
-#endif  // ROCKSDB_LITE
 
 int DBTestBase::NumTableFilesAtLevel(int level, int cf) {
   std::string property;
@@ -794,6 +991,7 @@ std::string DBTestBase::FilesPerLevel(int cf) {
   result.resize(last_non_zero_offset);
   return result;
 }
+#endif  // !ROCKSDB_LITE
 
 size_t DBTestBase::CountFiles() {
   std::vector<std::string> files;
@@ -863,6 +1061,7 @@ void DBTestBase::MoveFilesToLevel(int level, int cf) {
   }
 }
 
+#ifndef ROCKSDB_LITE
 void DBTestBase::DumpFileCounts(const char* label) {
   fprintf(stderr, "---\n%s:\n", label);
   fprintf(stderr, "maxoverlap: %" PRIu64 "\n",
@@ -874,6 +1073,7 @@ void DBTestBase::DumpFileCounts(const char* label) {
     }
   }
 }
+#endif  // !ROCKSDB_LITE
 
 std::string DBTestBase::DumpSSTableList() {
   std::string property;
@@ -881,9 +1081,9 @@ std::string DBTestBase::DumpSSTableList() {
   return property;
 }
 
-void DBTestBase::GetSstFiles(std::string path,
+void DBTestBase::GetSstFiles(Env* env, std::string path,
                              std::vector<std::string>* files) {
-  env_->GetChildren(path, files);
+  env->GetChildren(path, files);
 
   files->erase(
       std::remove_if(files->begin(), files->end(), [](std::string name) {
@@ -895,7 +1095,7 @@ void DBTestBase::GetSstFiles(std::string path,
 
 int DBTestBase::GetSstFileCount(std::string path) {
   std::vector<std::string> files;
-  GetSstFiles(path, &files);
+  DBTestBase::GetSstFiles(env_, path, &files);
   return static_cast<int>(files.size());
 }
 
@@ -1007,39 +1207,44 @@ UpdateStatus DBTestBase::updateInPlaceSmallerVarintSize(char* prevValue,
   }
 }
 
-UpdateStatus DBTestBase::updateInPlaceLargerSize(char* prevValue,
-                                                 uint32_t* prevSize,
+UpdateStatus DBTestBase::updateInPlaceLargerSize(char* /*prevValue*/,
+                                                 uint32_t* /*prevSize*/,
                                                  Slice delta,
                                                  std::string* newValue) {
   *newValue = std::string(delta.size(), 'c');
   return UpdateStatus::UPDATED;
 }
 
-UpdateStatus DBTestBase::updateInPlaceNoAction(char* prevValue,
-                                               uint32_t* prevSize, Slice delta,
-                                               std::string* newValue) {
+UpdateStatus DBTestBase::updateInPlaceNoAction(char* /*prevValue*/,
+                                               uint32_t* /*prevSize*/,
+                                               Slice /*delta*/,
+                                               std::string* /*newValue*/) {
   return UpdateStatus::UPDATE_FAILED;
 }
 
 // Utility method to test InplaceUpdate
 void DBTestBase::validateNumberOfEntries(int numValues, int cf) {
-  ScopedArenaIterator iter;
   Arena arena;
   auto options = CurrentOptions();
   InternalKeyComparator icmp(options.comparator);
-  RangeDelAggregator range_del_agg(icmp, {} /* snapshots */);
+  ReadRangeDelAggregator range_del_agg(&icmp,
+                                       kMaxSequenceNumber /* upper_bound */);
+  // This should be defined after range_del_agg so that it destructs the
+  // assigned iterator before it range_del_agg is already destructed.
+  ScopedArenaIterator iter;
   if (cf != 0) {
-    iter.set(
-        dbfull()->NewInternalIterator(&arena, &range_del_agg, handles_[cf]));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
+                                           kMaxSequenceNumber, handles_[cf]));
   } else {
-    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg));
+    iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
+                                           kMaxSequenceNumber));
   }
   iter->SeekToFirst();
   ASSERT_EQ(iter->status().ok(), true);
   int seq = numValues;
   while (iter->Valid()) {
     ParsedInternalKey ikey;
-    ikey.sequence = -1;
+    ikey.clear();
     ASSERT_EQ(ParseInternalKey(iter->key(), &ikey), true);
 
     // checks sequence number for updates
@@ -1052,9 +1257,9 @@ void DBTestBase::validateNumberOfEntries(int numValues, int cf) {
 void DBTestBase::CopyFile(const std::string& source,
                           const std::string& destination, uint64_t size) {
   const EnvOptions soptions;
-  unique_ptr<SequentialFile> srcfile;
+  std::unique_ptr<SequentialFile> srcfile;
   ASSERT_OK(env_->NewSequentialFile(source, &srcfile, soptions));
-  unique_ptr<WritableFile> destfile;
+  std::unique_ptr<WritableFile> destfile;
   ASSERT_OK(env_->NewWritableFile(destination, &destfile, soptions));
 
   if (size == 0) {
@@ -1232,8 +1437,10 @@ void DBTestBase::VerifyDBInternal(
     std::vector<std::pair<std::string, std::string>> true_data) {
   Arena arena;
   InternalKeyComparator icmp(last_options_.comparator);
-  RangeDelAggregator range_del_agg(icmp, {});
-  auto iter = dbfull()->NewInternalIterator(&arena, &range_del_agg);
+  ReadRangeDelAggregator range_del_agg(&icmp,
+                                       kMaxSequenceNumber /* upper_bound */);
+  auto iter =
+      dbfull()->NewInternalIterator(&arena, &range_del_agg, kMaxSequenceNumber);
   iter->SeekToFirst();
   for (auto p : true_data) {
     ASSERT_TRUE(iter->Valid());

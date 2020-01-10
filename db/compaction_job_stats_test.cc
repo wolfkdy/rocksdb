@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -23,11 +23,13 @@
 
 #include "db/db_impl.h"
 #include "db/dbformat.h"
-#include "db/filename.h"
 #include "db/job_context.h"
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
+#include "env/mock_env.h"
 #include "memtable/hash_linklist_rep.h"
+#include "monitoring/statistics.h"
+#include "monitoring/thread_status_util.h"
 #include "port/stack_trace.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/compaction_filter.h"
@@ -50,18 +52,15 @@
 #include "table/plain_table_factory.h"
 #include "table/scoped_arena_iterator.h"
 #include "util/compression.h"
+#include "util/filename.h"
 #include "util/hash.h"
 #include "util/logging.h"
-#include "util/mock_env.h"
 #include "util/mutexlock.h"
 #include "util/rate_limiter.h"
-#include "util/statistics.h"
 #include "util/string_util.h"
 #include "util/sync_point.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
-#include "util/thread_status_util.h"
-#include "util/xfunc.h"
 #include "utilities/merge_operators.h"
 
 #if !defined(IOS_CROSS_COMPILE)
@@ -99,7 +98,7 @@ class CompactionJobStatsTest : public testing::Test,
   CompactionJobStatsTest() : env_(Env::Default()) {
     env_->SetBackgroundThreads(1, Env::LOW);
     env_->SetBackgroundThreads(1, Env::HIGH);
-    dbname_ = test::TmpDir(env_) + "/compaction_job_stats_test";
+    dbname_ = test::PerThreadDBPath("compaction_job_stats_test");
     alternative_wal_dir_ = dbname_ + "/wal";
     Options options;
     options.create_if_missing = true;
@@ -427,7 +426,7 @@ class CompactionJobStatsChecker : public EventListener {
   // Once a compaction completed, this function will verify the returned
   // CompactionJobInfo with the oldest CompactionJobInfo added earlier
   // in "expected_stats_" which has not yet being used for verification.
-  virtual void OnCompactionCompleted(DB *db, const CompactionJobInfo& ci) {
+  virtual void OnCompactionCompleted(DB* /*db*/, const CompactionJobInfo& ci) {
     if (verify_next_comp_io_stats_) {
       ASSERT_GT(ci.stats.file_write_nanos, 0);
       ASSERT_GT(ci.stats.file_range_sync_nanos, 0);
@@ -655,7 +654,6 @@ TEST_P(CompactionJobStatsTest, CompactionJobStatsTest) {
   Options options;
   options.listeners.emplace_back(stats_checker);
   options.create_if_missing = true;
-  options.max_background_flushes = 0;
   // just enough setting to hold off auto-compaction.
   options.level0_file_num_compaction_trigger = kTestScale + 1;
   options.num_levels = 3;
@@ -808,7 +806,7 @@ TEST_P(CompactionJobStatsTest, CompactionJobStatsTest) {
     stats_checker->set_verify_next_comp_io_stats(true);
     std::atomic<bool> first_prepare_write(true);
     rocksdb::SyncPoint::GetInstance()->SetCallBack(
-        "WritableFileWriter::Append:BeforePrepareWrite", [&](void* arg) {
+        "WritableFileWriter::Append:BeforePrepareWrite", [&](void* /*arg*/) {
           if (first_prepare_write.load()) {
             options.env->SleepForMicroseconds(3);
             first_prepare_write.store(false);
@@ -817,7 +815,7 @@ TEST_P(CompactionJobStatsTest, CompactionJobStatsTest) {
 
     std::atomic<bool> first_flush(true);
     rocksdb::SyncPoint::GetInstance()->SetCallBack(
-        "WritableFileWriter::Flush:BeforeAppend", [&](void* arg) {
+        "WritableFileWriter::Flush:BeforeAppend", [&](void* /*arg*/) {
           if (first_flush.load()) {
             options.env->SleepForMicroseconds(3);
             first_flush.store(false);
@@ -826,7 +824,7 @@ TEST_P(CompactionJobStatsTest, CompactionJobStatsTest) {
 
     std::atomic<bool> first_sync(true);
     rocksdb::SyncPoint::GetInstance()->SetCallBack(
-        "WritableFileWriter::SyncInternal:0", [&](void* arg) {
+        "WritableFileWriter::SyncInternal:0", [&](void* /*arg*/) {
           if (first_sync.load()) {
             options.env->SleepForMicroseconds(3);
             first_sync.store(false);
@@ -835,7 +833,7 @@ TEST_P(CompactionJobStatsTest, CompactionJobStatsTest) {
 
     std::atomic<bool> first_range_sync(true);
     rocksdb::SyncPoint::GetInstance()->SetCallBack(
-        "WritableFileWriter::RangeSync:0", [&](void* arg) {
+        "WritableFileWriter::RangeSync:0", [&](void* /*arg*/) {
           if (first_range_sync.load()) {
             options.env->SleepForMicroseconds(3);
             first_range_sync.store(false);
@@ -877,7 +875,6 @@ TEST_P(CompactionJobStatsTest, DeletionStatsTest) {
   Options options;
   options.listeners.emplace_back(stats_checker);
   options.create_if_missing = true;
-  options.max_background_flushes = 0;
   options.level0_file_num_compaction_trigger = kTestScale+1;
   options.num_levels = 3;
   options.compression = kNoCompression;
@@ -1037,7 +1034,7 @@ int main(int argc, char** argv) {
 #else
 #include <stdio.h>
 
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
   fprintf(stderr, "SKIPPED, not supported in ROCKSDB_LITE\n");
   return 0;
 }
@@ -1046,5 +1043,5 @@ int main(int argc, char** argv) {
 
 #else
 
-int main(int argc, char** argv) { return 0; }
+int main(int /*argc*/, char** /*argv*/) { return 0; }
 #endif  // !defined(IOS_CROSS_COMPILE)

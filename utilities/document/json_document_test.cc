@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #ifndef ROCKSDB_LITE
 
@@ -249,21 +249,23 @@ TEST_F(JSONDocumentTest, OperatorEqualsTest) {
   ASSERT_TRUE(JSONDocument(static_cast<int64_t>(15)) ==
               JSONDocument(static_cast<int64_t>(15)));
 
-  unique_ptr<JSONDocument> arrayWithInt8Doc(JSONDocument::ParseJSON("[8]"));
+  std::unique_ptr<JSONDocument> arrayWithInt8Doc(
+      JSONDocument::ParseJSON("[8]"));
   ASSERT_TRUE(arrayWithInt8Doc != nullptr);
   ASSERT_TRUE(arrayWithInt8Doc->IsArray());
   ASSERT_TRUE((*arrayWithInt8Doc)[0].IsInt64());
   ASSERT_TRUE((*arrayWithInt8Doc)[0] == JSONDocument(static_cast<int64_t>(8)));
 
-  unique_ptr<JSONDocument> arrayWithInt16Doc(JSONDocument::ParseJSON("[512]"));
+  std::unique_ptr<JSONDocument> arrayWithInt16Doc(
+      JSONDocument::ParseJSON("[512]"));
   ASSERT_TRUE(arrayWithInt16Doc != nullptr);
   ASSERT_TRUE(arrayWithInt16Doc->IsArray());
   ASSERT_TRUE((*arrayWithInt16Doc)[0].IsInt64());
   ASSERT_TRUE((*arrayWithInt16Doc)[0] ==
               JSONDocument(static_cast<int64_t>(512)));
 
-  unique_ptr<JSONDocument> arrayWithInt32Doc(
-    JSONDocument::ParseJSON("[1000000]"));
+  std::unique_ptr<JSONDocument> arrayWithInt32Doc(
+      JSONDocument::ParseJSON("[1000000]"));
   ASSERT_TRUE(arrayWithInt32Doc != nullptr);
   ASSERT_TRUE(arrayWithInt32Doc->IsArray());
   ASSERT_TRUE((*arrayWithInt32Doc)[0].IsInt64());
@@ -277,8 +279,8 @@ TEST_F(JSONDocumentTest, OperatorEqualsTest) {
 }
 
 TEST_F(JSONDocumentTest, JSONDocumentBuilderTest) {
-  unique_ptr<JSONDocument> parsedArray(
-    JSONDocument::ParseJSON("[1, [123, \"a\", \"b\"], {\"b\":\"c\"}]"));
+  std::unique_ptr<JSONDocument> parsedArray(
+      JSONDocument::ParseJSON("[1, [123, \"a\", \"b\"], {\"b\":\"c\"}]"));
   ASSERT_TRUE(parsedArray != nullptr);
 
   JSONDocumentBuilder builder;
@@ -333,7 +335,7 @@ int main(int argc, char** argv) {
 #else
 #include <stdio.h>
 
-int main(int argc, char** argv) {
+int main(int /*argc*/, char** /*argv*/) {
   fprintf(stderr, "SKIPPED as JSONDocument is not supported in ROCKSDB_LITE\n");
   return 0;
 }

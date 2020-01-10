@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -9,32 +9,55 @@
 
 #include "rocksdb/status.h"
 #include <stdio.h>
+#ifdef OS_WIN
+#include <string.h>
+#endif
 #include <cstring>
 #include "port/port.h"
 
-#include "common/common.h"
 namespace rocksdb {
 
 const char* Status::CopyState(const char* state) {
-  char* const result =
-      new char[std::strlen(state) + 1];  // +1 for the null terminator
-  CommonStrCopy(result, std::strlen(state) + 1, state);
+#ifdef OS_WIN
+  const size_t cch = std::strlen(state) + 1;  // +1 for the null terminator
+  char* result = new char[cch];
+  errno_t ret;
+  ret = strncpy_s(result, cch, state, cch - 1);
+  result[cch - 1] = '\0';
+  assert(ret == 0);
   return result;
+#else
+  const size_t cch = std::strlen(state) + 1;  // +1 for the null terminator
+  return std::strncpy(new char[cch], state, cch);
+#endif
 }
 
-Status::Status(Code _code, SubCode _subcode, const Slice& msg, const Slice& msg2)
-    : code_(_code), subcode_(_subcode) {
+static const char* msgs[static_cast<int>(Status::kMaxSubCode)] = {
+    "",                                                   // kNone
+    "Timeout Acquiring Mutex",                            // kMutexTimeout
+    "Timeout waiting to lock key",                        // kLockTimeout
+    "Failed to acquire lock due to max_num_locks limit",  // kLockLimit
+    "No space left on device",                            // kNoSpace
+    "Deadlock",                                           // kDeadlock
+    "Stale file handle",                                  // kStaleFile
+    "Memory limit reached",                               // kMemoryLimit
+    "Space limit reached"                                 // kSpaceLimit
+};
+
+Status::Status(Code _code, SubCode _subcode, const Slice& msg,
+               const Slice& msg2)
+    : code_(_code), subcode_(_subcode), sev_(kNoError) {
   assert(code_ != kOk);
   assert(subcode_ != kMaxSubCode);
   const size_t len1 = msg.size();
   const size_t len2 = msg2.size();
   const size_t size = len1 + (len2 ? (2 + len2) : 0);
   char* const result = new char[size + 1];  // +1 for null terminator
-  CommonMemCopy(result, size + 1, msg.data(), len1);
+  memcpy(result, msg.data(), len1);
   if (len2) {
     result[len1] = ':';
     result[len1 + 1] = ' ';
-    CommonMemCopy(result + len1 + 2, len2, msg2.data(), len2);
+    memcpy(result + len1 + 2, msg2.data(), len2);
   }
   result[size] = '\0';  // null terminator for C style string
   state_ = result;
@@ -47,46 +70,46 @@ std::string Status::ToString() const {
     case kOk:
       return "OK";
     case kNotFound:
-      type = "Rocksdb NotFound: ";
+      type = "NotFound: ";
       break;
     case kCorruption:
-      type = "Rocksdb Corruption: ";
+      type = "Corruption: ";
       break;
     case kNotSupported:
-      type = "Rocksdb Not implemented: ";
+      type = "Not implemented: ";
       break;
     case kInvalidArgument:
-      type = "Rocksdb Invalid argument: ";
+      type = "Invalid argument: ";
       break;
     case kIOError:
-      type = "Rocksdb IO error: ";
+      type = "IO error: ";
       break;
     case kMergeInProgress:
-      type = "Rocksdb Merge in progress: ";
+      type = "Merge in progress: ";
       break;
     case kIncomplete:
-      type = "Rocksdb Result incomplete: ";
+      type = "Result incomplete: ";
       break;
     case kShutdownInProgress:
-      type = "Rocksdb Shutdown in progress: ";
+      type = "Shutdown in progress: ";
       break;
     case kTimedOut:
-      type = "Rocksdb Operation timed out: ";
+      type = "Operation timed out: ";
       break;
     case kAborted:
-      type = "Rocksdb Operation aborted: ";
+      type = "Operation aborted: ";
       break;
     case kBusy:
-      type = "Rocksdb Resource busy: ";
+      type = "Resource busy: ";
       break;
     case kExpired:
-      type = "Rocksdb Operation expired: ";
+      type = "Operation expired: ";
       break;
     case kTryAgain:
-      type = "Rocksdb Operation failed. Try again.: ";
+      type = "Operation failed. Try again.: ";
       break;
     default:
-      CommonSnprintf(tmp, sizeof(tmp), sizeof(tmp)-1, "Rocksdb Unknown code(%d): ",
+      snprintf(tmp, sizeof(tmp), "Unknown code(%d): ",
                static_cast<int>(code()));
       type = tmp;
       break;

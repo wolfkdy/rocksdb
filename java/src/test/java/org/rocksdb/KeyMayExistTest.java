@@ -1,7 +1,7 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 package org.rocksdb;
 
 import org.junit.ClassRule;
@@ -43,39 +43,79 @@ public class KeyMayExistTest {
             isEqualTo(2);
         db.put("key".getBytes(), "value".getBytes());
         // Test without column family
-        StringBuffer retValue = new StringBuffer();
+        StringBuilder retValue = new StringBuilder();
         boolean exists = db.keyMayExist("key".getBytes(), retValue);
         assertThat(exists).isTrue();
         assertThat(retValue.toString()).isEqualTo("value");
 
+        // Slice key
+        StringBuilder builder = new StringBuilder("prefix");
+        int offset = builder.toString().length();
+        builder.append("slice key 0");
+        int len = builder.toString().length() - offset;
+        builder.append("suffix");
+
+        byte[] sliceKey = builder.toString().getBytes();
+        byte[] sliceValue = "slice value 0".getBytes();
+        db.put(sliceKey, offset, len, sliceValue, 0, sliceValue.length);
+
+        retValue = new StringBuilder();
+        exists = db.keyMayExist(sliceKey, offset, len, retValue);
+        assertThat(exists).isTrue();
+        assertThat(retValue.toString().getBytes()).isEqualTo(sliceValue);
+
         // Test without column family but with readOptions
         try (final ReadOptions readOptions = new ReadOptions()) {
-          retValue = new StringBuffer();
+          retValue = new StringBuilder();
           exists = db.keyMayExist(readOptions, "key".getBytes(), retValue);
           assertThat(exists).isTrue();
           assertThat(retValue.toString()).isEqualTo("value");
+
+          retValue = new StringBuilder();
+          exists = db.keyMayExist(readOptions, sliceKey, offset, len, retValue);
+          assertThat(exists).isTrue();
+          assertThat(retValue.toString().getBytes()).isEqualTo(sliceValue);
         }
 
         // Test with column family
-        retValue = new StringBuffer();
+        retValue = new StringBuilder();
         exists = db.keyMayExist(columnFamilyHandleList.get(0), "key".getBytes(),
             retValue);
         assertThat(exists).isTrue();
         assertThat(retValue.toString()).isEqualTo("value");
 
+        // Test slice sky with column family
+        retValue = new StringBuilder();
+        exists = db.keyMayExist(columnFamilyHandleList.get(0), sliceKey, offset, len,
+            retValue);
+        assertThat(exists).isTrue();
+        assertThat(retValue.toString().getBytes()).isEqualTo(sliceValue);
+
         // Test with column family and readOptions
         try (final ReadOptions readOptions = new ReadOptions()) {
-          retValue = new StringBuffer();
+          retValue = new StringBuilder();
           exists = db.keyMayExist(readOptions,
               columnFamilyHandleList.get(0), "key".getBytes(),
               retValue);
           assertThat(exists).isTrue();
           assertThat(retValue.toString()).isEqualTo("value");
+
+          // Test slice key with column family and read options
+          retValue = new StringBuilder();
+          exists = db.keyMayExist(readOptions,
+              columnFamilyHandleList.get(0), sliceKey, offset, len,
+              retValue);
+          assertThat(exists).isTrue();
+          assertThat(retValue.toString().getBytes()).isEqualTo(sliceValue);
         }
 
         // KeyMayExist in CF1 must return false
         assertThat(db.keyMayExist(columnFamilyHandleList.get(1),
             "key".getBytes(), retValue)).isFalse();
+
+        // slice key
+        assertThat(db.keyMayExist(columnFamilyHandleList.get(1),
+           sliceKey, 1, 3, retValue)).isFalse();
       } finally {
         for (final ColumnFamilyHandle columnFamilyHandle :
             columnFamilyHandleList) {

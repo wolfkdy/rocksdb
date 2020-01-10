@@ -1,14 +1,18 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 package org.rocksdb;
 
+import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.ClassRule;
 import org.junit.Rule;
 import org.junit.Test;
+import org.junit.rules.ExpectedException;
 import org.junit.rules.TemporaryFolder;
 
+import java.nio.ByteBuffer;
 import java.util.*;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -53,7 +57,7 @@ public class RocksDBTest {
       } catch (final RocksDBException e) {
         assertThat(e.getStatus().getCode()).isEqualTo(Status.Code.IOError);
         assertThat(e.getStatus().getSubCode()).isEqualTo(Status.SubCode.None);
-        assertThat(e.getStatus().getState()).startsWith("lock ");
+        assertThat(e.getStatus().getState()).contains("lock ");
       }
     }
   }
@@ -68,13 +72,66 @@ public class RocksDBTest {
           "value".getBytes());
       assertThat(db.get("key2".getBytes())).isEqualTo(
           "12345678".getBytes());
+
+
+      // put
+      Segment key3 = sliceSegment("key3");
+      Segment key4 = sliceSegment("key4");
+      Segment value0 = sliceSegment("value 0");
+      Segment value1 = sliceSegment("value 1");
+      db.put(key3.data, key3.offset, key3.len, value0.data, value0.offset, value0.len);
+      db.put(opt, key4.data, key4.offset, key4.len, value1.data, value1.offset, value1.len);
+
+      // compare
+      Assert.assertTrue(value0.isSamePayload(db.get(key3.data, key3.offset, key3.len)));
+      Assert.assertTrue(value1.isSamePayload(db.get(key4.data, key4.offset, key4.len)));
+    }
+  }
+
+  private static Segment sliceSegment(String key) {
+    ByteBuffer rawKey = ByteBuffer.allocate(key.length() + 4);
+    rawKey.put((byte)0);
+    rawKey.put((byte)0);
+    rawKey.put(key.getBytes());
+
+    return new Segment(rawKey.array(), 2, key.length());
+  }
+
+  private static class Segment {
+    final byte[] data;
+    final int offset;
+    final int len;
+
+    public boolean isSamePayload(byte[] value) {
+      if (value == null) {
+        return false;
+      }
+      if (value.length != len) {
+        return false;
+      }
+
+      for (int i = 0; i < value.length; i++) {
+        if (data[i + offset] != value[i]) {
+          return false;
+        }
+      }
+
+      return true;
+    }
+
+    public Segment(byte[] value, int offset, int len) {
+      this.data = value;
+      this.offset = offset;
+      this.len = len;
     }
   }
 
   @Test
   public void write() throws RocksDBException {
-    try (final Options options = new Options().setMergeOperator(
-        new StringAppendOperator()).setCreateIfMissing(true);
+    try (final StringAppendOperator stringAppendOperator = new StringAppendOperator();
+         final Options options = new Options()
+             .setMergeOperator(stringAppendOperator)
+             .setCreateIfMissing(true);
          final RocksDB db = RocksDB.open(options,
              dbFolder.getRoot().getAbsolutePath());
          final WriteOptions opts = new WriteOptions()) {
@@ -141,6 +198,39 @@ public class RocksDBTest {
     }
   }
 
+  @Rule
+  public ExpectedException thrown = ExpectedException.none();
+
+  @Test
+  public void getOutOfArrayMaxSizeValue() throws RocksDBException {
+    final int numberOfValueSplits = 10;
+    final int splitSize = Integer.MAX_VALUE / numberOfValueSplits;
+
+    Runtime runtime = Runtime.getRuntime();
+    long neededMemory = ((long)(splitSize)) * (((long)numberOfValueSplits) + 3);
+    boolean isEnoughMemory = runtime.maxMemory() - runtime.totalMemory() > neededMemory;
+    Assume.assumeTrue(isEnoughMemory);
+
+    final byte[] valueSplit = new byte[splitSize];
+    final byte[] key = "key".getBytes();
+
+    thrown.expect(RocksDBException.class);
+    thrown.expectMessage("Requested array size exceeds VM limit");
+
+    // merge (numberOfValueSplits + 1) valueSplit's to get value size exceeding Integer.MAX_VALUE
+    try (final StringAppendOperator stringAppendOperator = new StringAppendOperator();
+         final Options opt = new Options()
+                 .setCreateIfMissing(true)
+                 .setMergeOperator(stringAppendOperator);
+         final RocksDB db = RocksDB.open(opt, dbFolder.getRoot().getAbsolutePath())) {
+      db.put(key, valueSplit);
+      for (int i = 0; i < numberOfValueSplits; i++) {
+        db.merge(key, valueSplit);
+      }
+      db.get(key);
+    }
+  }
+
   @Test
   public void multiGet() throws RocksDBException, InterruptedException {
     try (final RocksDB db = RocksDB.open(dbFolder.getRoot().getAbsolutePath());
@@ -182,9 +272,10 @@ public class RocksDBTest {
 
   @Test
   public void merge() throws RocksDBException {
-    try (final Options opt = new Options()
-        .setCreateIfMissing(true)
-        .setMergeOperator(new StringAppendOperator());
+    try (final StringAppendOperator stringAppendOperator = new StringAppendOperator();
+         final Options opt = new Options()
+            .setCreateIfMissing(true)
+            .setMergeOperator(stringAppendOperator);
          final WriteOptions wOpt = new WriteOptions();
          final RocksDB db = RocksDB.open(opt,
              dbFolder.getRoot().getAbsolutePath())
@@ -204,6 +295,18 @@ public class RocksDBTest {
       db.merge(wOpt, "key2".getBytes(), "xxxx".getBytes());
       assertThat(db.get("key2".getBytes())).isEqualTo(
           "xxxx".getBytes());
+
+      Segment key3 = sliceSegment("key3");
+      Segment key4 = sliceSegment("key4");
+      Segment value0 = sliceSegment("value 0");
+      Segment value1 = sliceSegment("value 1");
+
+      db.merge(key3.data, key3.offset, key3.len, value0.data, value0.offset, value0.len);
+      db.merge(wOpt, key4.data, key4.offset, key4.len, value1.data, value1.offset, value1.len);
+
+      // compare
+      Assert.assertTrue(value0.isSamePayload(db.get(key3.data, key3.offset, key3.len)));
+      Assert.assertTrue(value1.isSamePayload(db.get(key4.data, key4.offset, key4.len)));
     }
   }
 
@@ -221,6 +324,18 @@ public class RocksDBTest {
       db.delete(wOpt, "key2".getBytes());
       assertThat(db.get("key1".getBytes())).isNull();
       assertThat(db.get("key2".getBytes())).isNull();
+
+
+      Segment key3 = sliceSegment("key3");
+      Segment key4 = sliceSegment("key4");
+      db.put("key3".getBytes(), "key3 value".getBytes());
+      db.put("key4".getBytes(), "key4 value".getBytes());
+
+      db.delete(key3.data, key3.offset, key3.len);
+      db.delete(wOpt, key4.data, key4.offset, key4.len);
+
+      assertThat(db.get("key3".getBytes())).isNull();
+      assertThat(db.get("key4".getBytes())).isNull();
     }
   }
 
@@ -249,6 +364,26 @@ public class RocksDBTest {
       db.singleDelete(wOpt, "key2".getBytes());
       assertThat(db.get("key1".getBytes())).isNull();
       assertThat(db.get("key2".getBytes())).isNull();
+    }
+  }
+
+  @Test
+  public void deleteRange() throws RocksDBException {
+    try (final RocksDB db = RocksDB.open(dbFolder.getRoot().getAbsolutePath());
+         final WriteOptions wOpt = new WriteOptions()) {
+      db.put("key1".getBytes(), "value".getBytes());
+      db.put("key2".getBytes(), "12345678".getBytes());
+      db.put("key3".getBytes(), "abcdefg".getBytes());
+      db.put("key4".getBytes(), "xyz".getBytes());
+      assertThat(db.get("key1".getBytes())).isEqualTo("value".getBytes());
+      assertThat(db.get("key2".getBytes())).isEqualTo("12345678".getBytes());
+      assertThat(db.get("key3".getBytes())).isEqualTo("abcdefg".getBytes());
+      assertThat(db.get("key4".getBytes())).isEqualTo("xyz".getBytes());
+      db.deleteRange("key2".getBytes(), "key4".getBytes());
+      assertThat(db.get("key1".getBytes())).isEqualTo("value".getBytes());
+      assertThat(db.get("key2".getBytes())).isNull();
+      assertThat(db.get("key3".getBytes())).isNull();
+      assertThat(db.get("key4".getBytes())).isEqualTo("xyz".getBytes());
     }
   }
 
@@ -737,6 +872,30 @@ public class RocksDBTest {
             handle.close();
           }
         }
+      }
+    }
+  }
+
+  @Test
+  public void destroyDB() throws RocksDBException {
+    try (final Options options = new Options().setCreateIfMissing(true)) {
+      String dbPath = dbFolder.getRoot().getAbsolutePath();
+      try (final RocksDB db = RocksDB.open(options, dbPath)) {
+        db.put("key1".getBytes(), "value".getBytes());
+      }
+      assertThat(dbFolder.getRoot().exists()).isTrue();
+      RocksDB.destroyDB(dbPath, options);
+      assertThat(dbFolder.getRoot().exists()).isFalse();
+    }
+  }
+
+  @Test(expected = RocksDBException.class)
+  public void destroyDBFailIfOpen() throws RocksDBException {
+    try (final Options options = new Options().setCreateIfMissing(true)) {
+      String dbPath = dbFolder.getRoot().getAbsolutePath();
+      try (final RocksDB db = RocksDB.open(options, dbPath)) {
+        // Fails as the db is open and locked.
+        RocksDB.destroyDB(dbPath, options);
       }
     }
   }

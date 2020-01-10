@@ -1,10 +1,9 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
-#ifndef STORAGE_ROCKSDB_INCLUDE_STATISTICS_H_
-#define STORAGE_ROCKSDB_INCLUDE_STATISTICS_H_
+#pragma once
 
 #include <atomic>
 #include <cstddef>
@@ -21,6 +20,7 @@ namespace rocksdb {
  * Keep adding ticker's here.
  *  1. Any ticker should be added before TICKER_ENUM_MAX.
  *  2. Add a readable string in TickersNameMap below for the newly added ticker.
+ *  3. Add a corresponding enum value to TickerType.java in the java API
  */
 enum Tickers : uint32_t {
   // total block cache misses
@@ -70,8 +70,13 @@ enum Tickers : uint32_t {
   // # of bytes written into cache.
   BLOCK_CACHE_BYTES_WRITE,
 
-  // # of times bloom filter has avoided file reads.
+  // # of times bloom filter has avoided file reads, i.e., negatives.
   BLOOM_FILTER_USEFUL,
+  // # of times bloom FullFilter has not avoided the reads.
+  BLOOM_FILTER_FULL_POSITIVE,
+  // # of times bloom FullFilter has not avoided the reads and data actually
+  // exist.
+  BLOOM_FILTER_FULL_TRUE_POSITIVE,
 
   // # persistent cache hit
   PERSISTENT_CACHE_HIT,
@@ -104,8 +109,11 @@ enum Tickers : uint32_t {
   COMPACTION_KEY_DROP_OBSOLETE,     // The key is obsolete.
   COMPACTION_KEY_DROP_RANGE_DEL,    // key was covered by a range tombstone.
   COMPACTION_KEY_DROP_USER,  // user compaction function has dropped the key.
-
   COMPACTION_RANGE_DEL_DROP_OBSOLETE,  // all keys in range were deleted.
+  // Deletions obsoleted before bottom level due to file gap optimization.
+  COMPACTION_OPTIMIZED_DEL_DROP_OBSOLETE,
+  // If a compaction was cancelled in sfm to prevent ENOSPC
+  COMPACTION_CANCELLED,
 
   // Number of keys written to the database via the Put and Write call's
   NUMBER_KEYS_WRITTEN,
@@ -147,7 +155,8 @@ enum Tickers : uint32_t {
   // Disabled by default. To enable it set stats level to kAll
   DB_MUTEX_WAIT_MICROS,
   RATE_LIMIT_DELAY_MILLIS,
-  NO_ITERATORS,  // number of iterators currently open
+  // DEPRECATED number of iterators currently open
+  NO_ITERATORS,
 
   // Number of MultiGet calls, keys read, and bytes read
   NUMBER_MULTIGET_CALLS,
@@ -174,7 +183,7 @@ enum Tickers : uint32_t {
   GET_UPDATES_SINCE_CALLS,
   BLOCK_CACHE_COMPRESSED_MISS,  // miss in the compressed block cache
   BLOCK_CACHE_COMPRESSED_HIT,   // hit in the compressed block cache
-  // Number of blocks added to comopressed block cache
+  // Number of blocks added to compressed block cache
   BLOCK_CACHE_COMPRESSED_ADD,
   // Number of failures when adding blocks to compressed block cache
   BLOCK_CACHE_COMPRESSED_ADD_FAILURES,
@@ -221,117 +230,116 @@ enum Tickers : uint32_t {
   // Number of refill intervals where rate limiter's bytes are fully consumed.
   NUMBER_RATE_LIMITER_DRAINS,
 
+  // Number of internal keys skipped by Iterator
+  NUMBER_ITER_SKIP,
+
+  // BlobDB specific stats
+  // # of Put/PutTTL/PutUntil to BlobDB.
+  BLOB_DB_NUM_PUT,
+  // # of Write to BlobDB.
+  BLOB_DB_NUM_WRITE,
+  // # of Get to BlobDB.
+  BLOB_DB_NUM_GET,
+  // # of MultiGet to BlobDB.
+  BLOB_DB_NUM_MULTIGET,
+  // # of Seek/SeekToFirst/SeekToLast/SeekForPrev to BlobDB iterator.
+  BLOB_DB_NUM_SEEK,
+  // # of Next to BlobDB iterator.
+  BLOB_DB_NUM_NEXT,
+  // # of Prev to BlobDB iterator.
+  BLOB_DB_NUM_PREV,
+  // # of keys written to BlobDB.
+  BLOB_DB_NUM_KEYS_WRITTEN,
+  // # of keys read from BlobDB.
+  BLOB_DB_NUM_KEYS_READ,
+  // # of bytes (key + value) written to BlobDB.
+  BLOB_DB_BYTES_WRITTEN,
+  // # of bytes (keys + value) read from BlobDB.
+  BLOB_DB_BYTES_READ,
+  // # of keys written by BlobDB as non-TTL inlined value.
+  BLOB_DB_WRITE_INLINED,
+  // # of keys written by BlobDB as TTL inlined value.
+  BLOB_DB_WRITE_INLINED_TTL,
+  // # of keys written by BlobDB as non-TTL blob value.
+  BLOB_DB_WRITE_BLOB,
+  // # of keys written by BlobDB as TTL blob value.
+  BLOB_DB_WRITE_BLOB_TTL,
+  // # of bytes written to blob file.
+  BLOB_DB_BLOB_FILE_BYTES_WRITTEN,
+  // # of bytes read from blob file.
+  BLOB_DB_BLOB_FILE_BYTES_READ,
+  // # of times a blob files being synced.
+  BLOB_DB_BLOB_FILE_SYNCED,
+  // # of blob index evicted from base DB by BlobDB compaction filter because
+  // of expiration.
+  BLOB_DB_BLOB_INDEX_EXPIRED_COUNT,
+  // size of blob index evicted from base DB by BlobDB compaction filter
+  // because of expiration.
+  BLOB_DB_BLOB_INDEX_EXPIRED_SIZE,
+  // # of blob index evicted from base DB by BlobDB compaction filter because
+  // of corresponding file deleted.
+  BLOB_DB_BLOB_INDEX_EVICTED_COUNT,
+  // size of blob index evicted from base DB by BlobDB compaction filter
+  // because of corresponding file deleted.
+  BLOB_DB_BLOB_INDEX_EVICTED_SIZE,
+  // # of blob files being garbage collected.
+  BLOB_DB_GC_NUM_FILES,
+  // # of blob files generated by garbage collection.
+  BLOB_DB_GC_NUM_NEW_FILES,
+  // # of BlobDB garbage collection failures.
+  BLOB_DB_GC_FAILURES,
+  // # of keys drop by BlobDB garbage collection because they had been
+  // overwritten.
+  BLOB_DB_GC_NUM_KEYS_OVERWRITTEN,
+  // # of keys drop by BlobDB garbage collection because of expiration.
+  BLOB_DB_GC_NUM_KEYS_EXPIRED,
+  // # of keys relocated to new blob file by garbage collection.
+  BLOB_DB_GC_NUM_KEYS_RELOCATED,
+  // # of bytes drop by BlobDB garbage collection because they had been
+  // overwritten.
+  BLOB_DB_GC_BYTES_OVERWRITTEN,
+  // # of bytes drop by BlobDB garbage collection because of expiration.
+  BLOB_DB_GC_BYTES_EXPIRED,
+  // # of bytes relocated to new blob file by garbage collection.
+  BLOB_DB_GC_BYTES_RELOCATED,
+  // # of blob files evicted because of BlobDB is full.
+  BLOB_DB_FIFO_NUM_FILES_EVICTED,
+  // # of keys in the blob files evicted because of BlobDB is full.
+  BLOB_DB_FIFO_NUM_KEYS_EVICTED,
+  // # of bytes in the blob files evicted because of BlobDB is full.
+  BLOB_DB_FIFO_BYTES_EVICTED,
+
+  // These coutners indicate a performance issue in WritePrepared transactions.
+  // We should not seem them ticking them much.
+  // # of times prepare_mutex_ is acquired in the fast path.
+  TXN_PREPARE_MUTEX_OVERHEAD,
+  // # of times old_commit_map_mutex_ is acquired in the fast path.
+  TXN_OLD_COMMIT_MAP_MUTEX_OVERHEAD,
+  // # of times we checked a batch for duplicate keys.
+  TXN_DUPLICATE_KEY_OVERHEAD,
+  // # of times snapshot_mutex_ is acquired in the fast path.
+  TXN_SNAPSHOT_MUTEX_OVERHEAD,
+
+  // Number of keys actually found in MultiGet calls (vs number requested by caller)
+  // NUMBER_MULTIGET_KEYS_READ gives the number requested by caller
+  NUMBER_MULTIGET_KEYS_FOUND,
+
+  NO_ITERATOR_CREATED,  // number of iterators created
+  NO_ITERATOR_DELETED,  // number of iterators deleted
   TICKER_ENUM_MAX
 };
 
 // The order of items listed in  Tickers should be the same as
 // the order listed in TickersNameMap
-const std::vector<std::pair<Tickers, std::string>> TickersNameMap = {
-    {BLOCK_CACHE_MISS, "rocksdb.block.cache.miss"},
-    {BLOCK_CACHE_HIT, "rocksdb.block.cache.hit"},
-    {BLOCK_CACHE_ADD, "rocksdb.block.cache.add"},
-    {BLOCK_CACHE_ADD_FAILURES, "rocksdb.block.cache.add.failures"},
-    {BLOCK_CACHE_INDEX_MISS, "rocksdb.block.cache.index.miss"},
-    {BLOCK_CACHE_INDEX_HIT, "rocksdb.block.cache.index.hit"},
-    {BLOCK_CACHE_INDEX_ADD, "rocksdb.block.cache.index.add"},
-    {BLOCK_CACHE_INDEX_BYTES_INSERT, "rocksdb.block.cache.index.bytes.insert"},
-    {BLOCK_CACHE_INDEX_BYTES_EVICT, "rocksdb.block.cache.index.bytes.evict"},
-    {BLOCK_CACHE_FILTER_MISS, "rocksdb.block.cache.filter.miss"},
-    {BLOCK_CACHE_FILTER_HIT, "rocksdb.block.cache.filter.hit"},
-    {BLOCK_CACHE_FILTER_ADD, "rocksdb.block.cache.filter.add"},
-    {BLOCK_CACHE_FILTER_BYTES_INSERT,
-     "rocksdb.block.cache.filter.bytes.insert"},
-    {BLOCK_CACHE_FILTER_BYTES_EVICT, "rocksdb.block.cache.filter.bytes.evict"},
-    {BLOCK_CACHE_DATA_MISS, "rocksdb.block.cache.data.miss"},
-    {BLOCK_CACHE_DATA_HIT, "rocksdb.block.cache.data.hit"},
-    {BLOCK_CACHE_DATA_ADD, "rocksdb.block.cache.data.add"},
-    {BLOCK_CACHE_DATA_BYTES_INSERT, "rocksdb.block.cache.data.bytes.insert"},
-    {BLOCK_CACHE_BYTES_READ, "rocksdb.block.cache.bytes.read"},
-    {BLOCK_CACHE_BYTES_WRITE, "rocksdb.block.cache.bytes.write"},
-    {BLOOM_FILTER_USEFUL, "rocksdb.bloom.filter.useful"},
-    {PERSISTENT_CACHE_HIT, "rocksdb.persistent.cache.hit"},
-    {PERSISTENT_CACHE_MISS, "rocksdb.persistent.cache.miss"},
-    {SIM_BLOCK_CACHE_HIT, "rocksdb.sim.block.cache.hit"},
-    {SIM_BLOCK_CACHE_MISS, "rocksdb.sim.block.cache.miss"},
-    {MEMTABLE_HIT, "rocksdb.memtable.hit"},
-    {MEMTABLE_MISS, "rocksdb.memtable.miss"},
-    {GET_HIT_L0, "rocksdb.l0.hit"},
-    {GET_HIT_L1, "rocksdb.l1.hit"},
-    {GET_HIT_L2_AND_UP, "rocksdb.l2andup.hit"},
-    {COMPACTION_KEY_DROP_NEWER_ENTRY, "rocksdb.compaction.key.drop.new"},
-    {COMPACTION_KEY_DROP_OBSOLETE, "rocksdb.compaction.key.drop.obsolete"},
-    {COMPACTION_KEY_DROP_RANGE_DEL, "rocksdb.compaction.key.drop.range_del"},
-    {COMPACTION_KEY_DROP_USER, "rocksdb.compaction.key.drop.user"},
-    {COMPACTION_RANGE_DEL_DROP_OBSOLETE,
-     "rocksdb.compaction.range_del.drop.obsolete"},
-    {NUMBER_KEYS_WRITTEN, "rocksdb.number.keys.written"},
-    {NUMBER_KEYS_READ, "rocksdb.number.keys.read"},
-    {NUMBER_KEYS_UPDATED, "rocksdb.number.keys.updated"},
-    {BYTES_WRITTEN, "rocksdb.bytes.written"},
-    {BYTES_READ, "rocksdb.bytes.read"},
-    {NUMBER_DB_SEEK, "rocksdb.number.db.seek"},
-    {NUMBER_DB_NEXT, "rocksdb.number.db.next"},
-    {NUMBER_DB_PREV, "rocksdb.number.db.prev"},
-    {NUMBER_DB_SEEK_FOUND, "rocksdb.number.db.seek.found"},
-    {NUMBER_DB_NEXT_FOUND, "rocksdb.number.db.next.found"},
-    {NUMBER_DB_PREV_FOUND, "rocksdb.number.db.prev.found"},
-    {ITER_BYTES_READ, "rocksdb.db.iter.bytes.read"},
-    {NO_FILE_CLOSES, "rocksdb.no.file.closes"},
-    {NO_FILE_OPENS, "rocksdb.no.file.opens"},
-    {NO_FILE_ERRORS, "rocksdb.no.file.errors"},
-    {STALL_L0_SLOWDOWN_MICROS, "rocksdb.l0.slowdown.micros"},
-    {STALL_MEMTABLE_COMPACTION_MICROS, "rocksdb.memtable.compaction.micros"},
-    {STALL_L0_NUM_FILES_MICROS, "rocksdb.l0.num.files.stall.micros"},
-    {STALL_MICROS, "rocksdb.stall.micros"},
-    {DB_MUTEX_WAIT_MICROS, "rocksdb.db.mutex.wait.micros"},
-    {RATE_LIMIT_DELAY_MILLIS, "rocksdb.rate.limit.delay.millis"},
-    {NO_ITERATORS, "rocksdb.num.iterators"},
-    {NUMBER_MULTIGET_CALLS, "rocksdb.number.multiget.get"},
-    {NUMBER_MULTIGET_KEYS_READ, "rocksdb.number.multiget.keys.read"},
-    {NUMBER_MULTIGET_BYTES_READ, "rocksdb.number.multiget.bytes.read"},
-    {NUMBER_FILTERED_DELETES, "rocksdb.number.deletes.filtered"},
-    {NUMBER_MERGE_FAILURES, "rocksdb.number.merge.failures"},
-    {BLOOM_FILTER_PREFIX_CHECKED, "rocksdb.bloom.filter.prefix.checked"},
-    {BLOOM_FILTER_PREFIX_USEFUL, "rocksdb.bloom.filter.prefix.useful"},
-    {NUMBER_OF_RESEEKS_IN_ITERATION, "rocksdb.number.reseeks.iteration"},
-    {GET_UPDATES_SINCE_CALLS, "rocksdb.getupdatessince.calls"},
-    {BLOCK_CACHE_COMPRESSED_MISS, "rocksdb.block.cachecompressed.miss"},
-    {BLOCK_CACHE_COMPRESSED_HIT, "rocksdb.block.cachecompressed.hit"},
-    {BLOCK_CACHE_COMPRESSED_ADD, "rocksdb.block.cachecompressed.add"},
-    {BLOCK_CACHE_COMPRESSED_ADD_FAILURES,
-     "rocksdb.block.cachecompressed.add.failures"},
-    {WAL_FILE_SYNCED, "rocksdb.wal.synced"},
-    {WAL_FILE_BYTES, "rocksdb.wal.bytes"},
-    {WRITE_DONE_BY_SELF, "rocksdb.write.self"},
-    {WRITE_DONE_BY_OTHER, "rocksdb.write.other"},
-    {WRITE_TIMEDOUT, "rocksdb.write.timeout"},
-    {WRITE_WITH_WAL, "rocksdb.write.wal"},
-    {COMPACT_READ_BYTES, "rocksdb.compact.read.bytes"},
-    {COMPACT_WRITE_BYTES, "rocksdb.compact.write.bytes"},
-    {FLUSH_WRITE_BYTES, "rocksdb.flush.write.bytes"},
-    {NUMBER_DIRECT_LOAD_TABLE_PROPERTIES,
-     "rocksdb.number.direct.load.table.properties"},
-    {NUMBER_SUPERVERSION_ACQUIRES, "rocksdb.number.superversion_acquires"},
-    {NUMBER_SUPERVERSION_RELEASES, "rocksdb.number.superversion_releases"},
-    {NUMBER_SUPERVERSION_CLEANUPS, "rocksdb.number.superversion_cleanups"},
-    {NUMBER_BLOCK_COMPRESSED, "rocksdb.number.block.compressed"},
-    {NUMBER_BLOCK_DECOMPRESSED, "rocksdb.number.block.decompressed"},
-    {NUMBER_BLOCK_NOT_COMPRESSED, "rocksdb.number.block.not_compressed"},
-    {MERGE_OPERATION_TOTAL_TIME, "rocksdb.merge.operation.time.nanos"},
-    {FILTER_OPERATION_TOTAL_TIME, "rocksdb.filter.operation.time.nanos"},
-    {ROW_CACHE_HIT, "rocksdb.row.cache.hit"},
-    {ROW_CACHE_MISS, "rocksdb.row.cache.miss"},
-    {READ_AMP_ESTIMATE_USEFUL_BYTES, "rocksdb.read.amp.estimate.useful.bytes"},
-    {READ_AMP_TOTAL_READ_BYTES, "rocksdb.read.amp.total.read.bytes"},
-    {NUMBER_RATE_LIMITER_DRAINS, "rocksdb.number.rate_limiter.drains"},
-};
+extern const std::vector<std::pair<Tickers, std::string>> TickersNameMap;
 
 /**
  * Keep adding histogram's here.
- * Any histogram whould have value less than HISTOGRAM_ENUM_MAX
+ * Any histogram should have value less than HISTOGRAM_ENUM_MAX
  * Add a new Histogram by assigning it the current value of HISTOGRAM_ENUM_MAX
  * Add a string representation in HistogramsNameMap below
  * And increment HISTOGRAM_ENUM_MAX
+ * Add a corresponding enum value to HistogramType.java in the java API
  */
 enum Histograms : uint32_t {
   DB_GET = 0,
@@ -370,42 +378,46 @@ enum Histograms : uint32_t {
   BYTES_DECOMPRESSED,
   COMPRESSION_TIMES_NANOS,
   DECOMPRESSION_TIMES_NANOS,
+  // Number of merge operands passed to the merge operator in user read
+  // requests.
+  READ_NUM_MERGE_OPERANDS,
 
-  HISTOGRAM_ENUM_MAX,  // TODO(ldemailly): enforce HistogramsNameMap match
+  // BlobDB specific stats
+  // Size of keys written to BlobDB.
+  BLOB_DB_KEY_SIZE,
+  // Size of values written to BlobDB.
+  BLOB_DB_VALUE_SIZE,
+  // BlobDB Put/PutWithTTL/PutUntil/Write latency.
+  BLOB_DB_WRITE_MICROS,
+  // BlobDB Get lagency.
+  BLOB_DB_GET_MICROS,
+  // BlobDB MultiGet latency.
+  BLOB_DB_MULTIGET_MICROS,
+  // BlobDB Seek/SeekToFirst/SeekToLast/SeekForPrev latency.
+  BLOB_DB_SEEK_MICROS,
+  // BlobDB Next latency.
+  BLOB_DB_NEXT_MICROS,
+  // BlobDB Prev latency.
+  BLOB_DB_PREV_MICROS,
+  // Blob file write latency.
+  BLOB_DB_BLOB_FILE_WRITE_MICROS,
+  // Blob file read latency.
+  BLOB_DB_BLOB_FILE_READ_MICROS,
+  // Blob file sync latency.
+  BLOB_DB_BLOB_FILE_SYNC_MICROS,
+  // BlobDB garbage collection time.
+  BLOB_DB_GC_MICROS,
+  // BlobDB compression time.
+  BLOB_DB_COMPRESSION_MICROS,
+  // BlobDB decompression time.
+  BLOB_DB_DECOMPRESSION_MICROS,
+  // Time spent flushing memtable to disk
+  FLUSH_TIME,
+
+  HISTOGRAM_ENUM_MAX,
 };
 
-const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap = {
-    {DB_GET, "rocksdb.db.get.micros"},
-    {DB_WRITE, "rocksdb.db.write.micros"},
-    {COMPACTION_TIME, "rocksdb.compaction.times.micros"},
-    {SUBCOMPACTION_SETUP_TIME, "rocksdb.subcompaction.setup.times.micros"},
-    {TABLE_SYNC_MICROS, "rocksdb.table.sync.micros"},
-    {COMPACTION_OUTFILE_SYNC_MICROS, "rocksdb.compaction.outfile.sync.micros"},
-    {WAL_FILE_SYNC_MICROS, "rocksdb.wal.file.sync.micros"},
-    {MANIFEST_FILE_SYNC_MICROS, "rocksdb.manifest.file.sync.micros"},
-    {TABLE_OPEN_IO_MICROS, "rocksdb.table.open.io.micros"},
-    {DB_MULTIGET, "rocksdb.db.multiget.micros"},
-    {READ_BLOCK_COMPACTION_MICROS, "rocksdb.read.block.compaction.micros"},
-    {READ_BLOCK_GET_MICROS, "rocksdb.read.block.get.micros"},
-    {WRITE_RAW_BLOCK_MICROS, "rocksdb.write.raw.block.micros"},
-    {STALL_L0_SLOWDOWN_COUNT, "rocksdb.l0.slowdown.count"},
-    {STALL_MEMTABLE_COMPACTION_COUNT, "rocksdb.memtable.compaction.count"},
-    {STALL_L0_NUM_FILES_COUNT, "rocksdb.num.files.stall.count"},
-    {HARD_RATE_LIMIT_DELAY_COUNT, "rocksdb.hard.rate.limit.delay.count"},
-    {SOFT_RATE_LIMIT_DELAY_COUNT, "rocksdb.soft.rate.limit.delay.count"},
-    {NUM_FILES_IN_SINGLE_COMPACTION, "rocksdb.numfiles.in.singlecompaction"},
-    {DB_SEEK, "rocksdb.db.seek.micros"},
-    {WRITE_STALL, "rocksdb.db.write.stall"},
-    {SST_READ_MICROS, "rocksdb.sst.read.micros"},
-    {NUM_SUBCOMPACTIONS_SCHEDULED, "rocksdb.num.subcompactions.scheduled"},
-    {BYTES_PER_READ, "rocksdb.bytes.per.read"},
-    {BYTES_PER_WRITE, "rocksdb.bytes.per.write"},
-    {BYTES_PER_MULTIGET, "rocksdb.bytes.per.multiget"},
-    {BYTES_COMPRESSED, "rocksdb.bytes.compressed"},
-    {BYTES_DECOMPRESSED, "rocksdb.bytes.decompressed"},
-    {COMPRESSION_TIMES_NANOS, "rocksdb.compression.times.nanos"},
-    {DECOMPRESSION_TIMES_NANOS, "rocksdb.decompression.times.nanos"},
-};
+extern const std::vector<std::pair<Histograms, std::string>> HistogramsNameMap;
 
 struct HistogramData {
   double median;
@@ -416,126 +428,8 @@ struct HistogramData {
   // zero-initialize new members since old Statistics::histogramData()
   // implementations won't write them.
   double max = 0.0;
-  HistogramData(double _median, double _percentile95, double _percentile99, double _average, double _standard_deviation, double _max) :
-            median(_median),
-            percentile95(_percentile95),
-            percentile99(_percentile99),
-            average(_average),
-            standard_deviation(_standard_deviation),
-            max(_max){}
-  HistogramData(){}
-};
-
-enum StreamMetrics : uint32_t
-{
-    STREAM_OPEN_COUNT=0,
-    STREAM_OPEN_COST_AVGTIME,
-    STREAM_CLOSE_COUNT,
-    STREAM_CLOSE_COST_AVGTIME,
-    STREAM_EXIST_COUNT,
-    STREAM_EXIST_COST_AVGTIME,
-    STREAM_SEEK_COUNT,
-    STREAM_SEEK_COST_AVGTIME,
-    STREAM_PREAD_COUNT,
-    STREAM_PREAD_COST_AVGTIME,
-    STREAM_READ_COUNT,
-    STREAM_READ_COST_AVGTIME,
-    STREAM_WRITE_COUNT,
-    STREAM_WRITE_COST_AVGTIME,
-    STREAM_FLUSH_COUNT,
-    STREAM_FLUSH_COST_AVGTIME,
-    STREAM_SYNC_COUNT,
-    STREAM_SYNC_COST_AVGTIME,
-    STREAM_AVAILABLE_COUNT,
-    STREAM_AVAILABLE_COST_AVGTIME,
-    STREAM_DELETE_COUNT,
-    STREAM_DELETE_COST_AVGTIME,
-    STREAM_RENAME_COUNT,
-    STREAM_RENAME_COST_AVGTIME,
-    STREAM_CREATESNAPSHOT_COUNT,
-    STREAM_CREATESNAPSHOT_COST_AVGTIME,
-    STREAM_DELETESNAPSHOT_COUNT,
-    STREAM_DELETESNAPSHOT_COST_AVGTIME,
-    STREAM_CREATEDIRECTORY_COUNT,
-    STREAM_CREATEDIRECTORY_COST_AVGTIME,
-    STREAM_LISTDIRECTORY_COUNT,
-    STREAM_LISTDIRECTORY_COST_AVGTIME,
-    STREAM_GETCONTENTSUMMARY_COUNT,
-    STREAM_GETCONTENTSUMMARY_COST_AVGTIME,
-
-    //STREAM_ CALL PLOG _COUNT STATISTICS
-    PLOG_READSUCCESS_COUNT,
-    PLOG_READFAILED_COUNT,
-    PLOG_READ_COST_AVGTIME,
-    PLOG_GETSUCCESS_COUNT,
-    PLOG_GETFAILED_COUNT,
-    PLOG_GET_COST_AVGTIME,
-    PLOG_SEALSUCCESS_COUNT,
-    PLOG_SEALFAILED_COUNT,
-    PLOG_SEAL_COST_AVGTIME,
-    PLOG_APPENDSUCCESS_COUNT,
-    PLOG_APPENDFAILED_COUNT,
-    PLOG_APPEND_COST_AVGTIME,
-    PLOG_DELETESUCCESS_COUNT,
-    PLOG_DELETEFAILED_COUNT,
-    PLOG_DELETE_COST_AVGTIME,
-    STREAM_METRIC_ENUM_MAX
-};
-	
-
-const std::vector<std::pair<StreamMetrics, std::string>> StreamStatisticsNameMap =
-{
-    {STREAM_OPEN_COUNT, "streamOpenCount"},
-    {STREAM_OPEN_COST_AVGTIME, "streamOpenCostAvgTime"},
-    {STREAM_CLOSE_COUNT, "streamCloseCount"},
-    {STREAM_CLOSE_COST_AVGTIME, "streamCloseCostAvgTime"},
-    {STREAM_EXIST_COUNT, "streamExistCount"},
-    {STREAM_EXIST_COST_AVGTIME, "streamExistCostAvgTime"},
-    {STREAM_SEEK_COUNT, "streamSeekCount"},
-    {STREAM_SEEK_COST_AVGTIME, "streamSeekCostAvgTime"},
-    {STREAM_PREAD_COUNT, "streamPreadCount"},
-    {STREAM_PREAD_COST_AVGTIME, "streamPreadCostAvgTime"},
-    {STREAM_READ_COUNT, "streamReadCount"},
-    {STREAM_READ_COST_AVGTIME, "streamReadCostAvgTime"},
-    {STREAM_WRITE_COUNT, "streamWriteCount"},
-    {STREAM_WRITE_COST_AVGTIME, "streamWriteCostAvgTime"},
-    {STREAM_FLUSH_COUNT, "streamFlushCount"},
-    {STREAM_FLUSH_COST_AVGTIME, "streamFlushCostAvgTime"},
-    {STREAM_SYNC_COUNT, "streamSyncCount"},
-    {STREAM_SYNC_COST_AVGTIME, "streamSyncCostAvgTime"},
-    {STREAM_AVAILABLE_COUNT, "streamAvailableCount"},
-    {STREAM_AVAILABLE_COST_AVGTIME, "streamAvailableCostAvgTime"},
-    {STREAM_DELETE_COUNT, "streamDeleteCount"},
-    {STREAM_DELETE_COST_AVGTIME, "streamDeleteCostAvgTime"},
-    {STREAM_RENAME_COUNT, "streamRenameCount"},
-    {STREAM_RENAME_COST_AVGTIME, "streamRenameCostAvgTime"},
-    {STREAM_CREATESNAPSHOT_COUNT, "streamCreateSnapshotCount"},
-    {STREAM_CREATESNAPSHOT_COST_AVGTIME, "streamCreateSnapshotCostAvgTime"},
-    {STREAM_DELETESNAPSHOT_COUNT, "streamDeleteSnapshotCount"},
-    {STREAM_DELETESNAPSHOT_COST_AVGTIME, "streamDeleteSnapshotCostAvgTime"},
-    {STREAM_CREATEDIRECTORY_COUNT, "streamCreateDirectoryCount"},
-    {STREAM_CREATEDIRECTORY_COST_AVGTIME, "streamCreateDirectoryCostAvgTime"},
-    {STREAM_LISTDIRECTORY_COUNT, "streamListDirectoryCount"},
-    {STREAM_LISTDIRECTORY_COST_AVGTIME, "streamListDirectoryCostAvgTime"},
-    {STREAM_GETCONTENTSUMMARY_COUNT, "streamGetContentSummaryCount"},
-    {STREAM_GETCONTENTSUMMARY_COST_AVGTIME, "streamGetContentSummaryCostAvgTime"},
-
-    //STREAM_ CALL {PLOG_ _COUNT STATISTICS
-    {PLOG_READSUCCESS_COUNT, "plogReadSuccessCount"},
-    {PLOG_READFAILED_COUNT, "plogReadFailedCount"},
-    {PLOG_READ_COST_AVGTIME, "plogReadCostAvgTime"},
-    {PLOG_GETSUCCESS_COUNT, "plogGetSuccessCount"},
-    {PLOG_GETFAILED_COUNT, "plogGetFailedCount"},
-    {PLOG_GET_COST_AVGTIME, "plogGetCostAvgTime"},
-    {PLOG_SEALSUCCESS_COUNT, "plogSealSuccessCount"},
-    {PLOG_SEALFAILED_COUNT, "plogSealFailedCount"},
-    {PLOG_SEAL_COST_AVGTIME, "plogSealCostAvgTime"},
-    {PLOG_APPENDSUCCESS_COUNT, "plogAppendSuccessCount"},
-    {PLOG_APPENDFAILED_COUNT, "plogAppendFailedCount"},
-    {PLOG_APPEND_COST_AVGTIME, "plogAppendCostAvgTime"},
-    {PLOG_DELETESUCCESS_COUNT, "plogDeleteSuccessCount"},
-    {PLOG_DELETEFAILED_COUNT, "plogDeleteFailedCount"},
-    {PLOG_DELETE_COST_AVGTIME, "plogDeleteCostAvgTime"}
+  uint64_t count = 0;
+  uint64_t sum = 0;
 };
 
 enum StatsLevel {
@@ -559,7 +453,7 @@ class Statistics {
   virtual uint64_t getTickerCount(uint32_t tickerType) const = 0;
   virtual void histogramData(uint32_t type,
                              HistogramData* const data) const = 0;
-  virtual std::string getHistogramString(uint32_t type) const { return ""; }
+  virtual std::string getHistogramString(uint32_t /*type*/) const { return ""; }
   virtual void recordTick(uint32_t tickerType, uint64_t count = 0) = 0;
   virtual void setTickerCount(uint32_t tickerType, uint64_t count) = 0;
   virtual uint64_t getAndResetTickerCount(uint32_t tickerType) = 0;
@@ -576,16 +470,11 @@ class Statistics {
     return std::string("ToString(): not implemented");
   }
 
-  virtual std::vector<std::string> ToFormatString() const{
-      return std::vector<std::string>();
-  }
-
   // Override this function to disable particular histogram collection
   virtual bool HistEnabledForType(uint32_t type) const {
     return type < HISTOGRAM_ENUM_MAX;
   }
 
- 
   StatsLevel stats_level_ = kExceptDetailedTimers;
 };
 
@@ -593,6 +482,3 @@ class Statistics {
 std::shared_ptr<Statistics> CreateDBStatistics();
 
 }  // namespace rocksdb
-
-
-#endif  // STORAGE_ROCKSDB_INCLUDE_STATISTICS_H_

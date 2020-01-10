@@ -1,14 +1,17 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/version_set.h"
+#include "db/log_writer.h"
+#include "table/mock_table.h"
 #include "util/logging.h"
+#include "util/string_util.h"
 #include "util/testharness.h"
 #include "util/testutil.h"
 
@@ -76,7 +79,9 @@ class CountingLogger : public Logger {
  public:
   CountingLogger() : log_count(0) {}
   using Logger::Logv;
-  virtual void Logv(const char* format, va_list ap) override { log_count++; }
+  virtual void Logv(const char* /*format*/, va_list /*ap*/) override {
+    log_count++;
+  }
   int log_count;
 };
 
@@ -131,100 +136,39 @@ class VersionStorageInfoTest : public testing::Test {
     f->largest = GetInternalKey(largest, 0);
     f->compensated_file_size = file_size;
     f->refs = 0;
-    f->num_entries = num_entries_;
-    f->num_deletions = num_deletions_;
+    f->num_entries = 0;
+    f->num_deletions = 0;
     vstorage_.AddFile(level, f);
   }
 
-// Memebers and methods for preparing levels file by random.
-  std::vector<uint32_t> keys_;
-  uint32_t keys_num_;
-  uint64_t file_size_;
-  uint32_t key_digits_num_;
-  const uint64_t num_entries_ = 2;
-  const uint64_t num_deletions_ = 1;
-
-  // Get the key string by index.
-  std::string GetKeyStr(const int key_index) {
-    char key_fmt[32] = {0};
-    char key_str[32] = {0};
-    sprintf(key_fmt, "%%0%ud", key_digits_num_); //like "%08d"
-    sprintf(key_str, key_fmt, keys_[key_index]);
-    return std::string(key_str);
-  }
-  std::string GetSmallestKeyStr(const int key_index) {
-    return GetKeyStr(key_index);
-  }
-  std::string GetLargestKeyStr(const int key_index) {
-    char fmt[32] = {0};
-    char key_str[32] = {0};
-    sprintf(fmt, "%%0%ud", key_digits_num_);
-    sprintf(key_str, fmt, (keys_[key_index+1] - 1));
-    return std::string(key_str);
+  void Add(int level, uint32_t file_number, const InternalKey& smallest,
+           const InternalKey& largest, uint64_t file_size = 0) {
+    assert(level < vstorage_.num_levels());
+    FileMetaData* f = new FileMetaData;
+    f->fd = FileDescriptor(file_number, 0, file_size);
+    f->smallest = smallest;
+    f->largest = largest;
+    f->compensated_file_size = file_size;
+    f->refs = 0;
+    f->num_entries = 0;
+    f->num_deletions = 0;
+    vstorage_.AddFile(level, f);
   }
 
-  // Get the split point by size.
-  void GetSplitPointBySize(std::string& split_point,
-                           uint64_t& left_datasize,
-                           uint64_t& left_numrecord,
-                           uint64_t& right_datasize,
-                           uint64_t& right_numrecord) {
-    int split_point_index  = ((keys_num_- 1) / 2);
-    int left_files_num = split_point_index + 1;
-    split_point = GetLargestKeyStr(split_point_index);
-    left_datasize = left_files_num * file_size_;
-    left_numrecord = left_files_num * (num_entries_ - num_deletions_);
-    right_datasize = (keys_num_ - left_files_num) * file_size_;
-    right_numrecord = (keys_num_ - left_files_num) * (num_entries_ - num_deletions_);
-  }
+  std::string GetOverlappingFiles(int level, const InternalKey& begin,
+                                  const InternalKey& end) {
+    std::vector<FileMetaData*> inputs;
+    vstorage_.GetOverlappingInputs(level, &begin, &end, &inputs);
 
-  // Select the split point by random.
-  void SelectSplitPointByRandom(std::string& split_point,
-                                uint64_t& left_datasize,
-                                uint64_t& left_numrecord,
-                                uint64_t& right_datasize,
-                                uint64_t& right_numrecord) {
-    int split_point_index  = rand() % keys_num_;
-    int left_files_num = split_point_index + 1;
-    split_point = GetLargestKeyStr(split_point_index);
-    left_datasize = left_files_num * file_size_;
-    left_numrecord = left_files_num * (num_entries_ - num_deletions_);
-    right_datasize = (keys_num_ - left_files_num) * file_size_;
-    right_numrecord = (keys_num_ - left_files_num) * (num_entries_ - num_deletions_);
-  }
-
-  // Prepare levels file by random.
-  // Can only be called once at initial step in one test case because there is no clearing function.
-  void PrepareLevelsFileByRandom(const uint64_t keys_num, const uint64_t file_size) {
-    uint32_t file_sn = 1;
-    int level = 0;
-
-    // Generate keys in order.
-    srand((unsigned)time(NULL));
-    keys_.reserve(keys_num+1);
-    for (uint32_t i = 0; i < (keys_num+1); i++) {
-      keys_[i] = i*10 + 1;
+    std::string result;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+      if (i > 0) {
+        result += ",";
+      }
+      AppendNumberTo(&result, inputs[i]->fd.GetNumber());
     }
-    keys_num_ = keys_num;
-    file_size_ = file_size;
-
-    // Get the maximum number of digits in a key.
-    uint64_t num = keys_num;
-    key_digits_num_ = 0;
-    while (num > 0) {
-      key_digits_num_++;
-      num = num / 10;
-    }
-    key_digits_num_ += 2;
-
-    // Generate levels file by random.
-    for (uint32_t i = 0; i < keys_num; i++) {
-      level = ((rand() % 3) + 1);
-      Add(level, file_sn, GetSmallestKeyStr(i).c_str(), GetLargestKeyStr(i).c_str(), file_size);
-      file_sn++;
-    }
+    return result;
   }
-
 };
 
 TEST_F(VersionStorageInfoTest, MaxBytesForLevelStatic) {
@@ -256,13 +200,13 @@ TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamic) {
   Add(5, 2U, "3", "4", 550U);
   vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
   ASSERT_EQ(0, logger_->log_count);
-  ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 210U);
+  ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 1000U);
   ASSERT_EQ(vstorage_.base_level(), 4);
 
   Add(4, 3U, "3", "4", 550U);
   vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
   ASSERT_EQ(0, logger_->log_count);
-  ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 210U);
+  ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 1000U);
   ASSERT_EQ(vstorage_.base_level(), 4);
 
   Add(3, 4U, "3", "4", 250U);
@@ -270,7 +214,7 @@ TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamic) {
   vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
   ASSERT_EQ(1, logger_->log_count);
   ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 1005U);
-  ASSERT_EQ(vstorage_.MaxBytesForLevel(3), 201U);
+  ASSERT_EQ(vstorage_.MaxBytesForLevel(3), 1000U);
   ASSERT_EQ(vstorage_.base_level(), 3);
 
   Add(1, 6U, "3", "4", 5U);
@@ -281,7 +225,7 @@ TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamic) {
   ASSERT_GT(vstorage_.MaxBytesForLevel(4), 1005U);
   ASSERT_GT(vstorage_.MaxBytesForLevel(3), 1005U);
   ASSERT_EQ(vstorage_.MaxBytesForLevel(2), 1005U);
-  ASSERT_EQ(vstorage_.MaxBytesForLevel(1), 201U);
+  ASSERT_EQ(vstorage_.MaxBytesForLevel(1), 1000U);
   ASSERT_EQ(vstorage_.base_level(), 1);
 }
 
@@ -319,9 +263,96 @@ TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamicLargeLevel) {
   ASSERT_EQ(vstorage_.MaxBytesForLevel(5), 3000U * kOneGB);
   ASSERT_EQ(vstorage_.MaxBytesForLevel(4), 300U * kOneGB);
   ASSERT_EQ(vstorage_.MaxBytesForLevel(3), 30U * kOneGB);
-  ASSERT_EQ(vstorage_.MaxBytesForLevel(2), 3U * kOneGB);
+  ASSERT_EQ(vstorage_.MaxBytesForLevel(2), 10U * kOneGB);
   ASSERT_EQ(vstorage_.base_level(), 2);
   ASSERT_EQ(0, logger_->log_count);
+}
+
+TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamicWithLargeL0_1) {
+  ioptions_.level_compaction_dynamic_level_bytes = true;
+  mutable_cf_options_.max_bytes_for_level_base = 40000;
+  mutable_cf_options_.max_bytes_for_level_multiplier = 5;
+  mutable_cf_options_.level0_file_num_compaction_trigger = 2;
+
+  Add(0, 1U, "1", "2", 10000U);
+  Add(0, 2U, "1", "2", 10000U);
+  Add(0, 3U, "1", "2", 10000U);
+
+  Add(5, 4U, "1", "2", 1286250U);
+  Add(4, 5U, "1", "2", 200000U);
+  Add(3, 6U, "1", "2", 40000U);
+  Add(2, 7U, "1", "2", 8000U);
+
+  vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
+  ASSERT_EQ(0, logger_->log_count);
+  ASSERT_EQ(2, vstorage_.base_level());
+  // level multiplier should be 3.5
+  ASSERT_EQ(vstorage_.level_multiplier(), 5.0);
+  // Level size should be around 30,000, 105,000, 367,500
+  ASSERT_EQ(40000U, vstorage_.MaxBytesForLevel(2));
+  ASSERT_EQ(51450U, vstorage_.MaxBytesForLevel(3));
+  ASSERT_EQ(257250U, vstorage_.MaxBytesForLevel(4));
+}
+
+TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamicWithLargeL0_2) {
+  ioptions_.level_compaction_dynamic_level_bytes = true;
+  mutable_cf_options_.max_bytes_for_level_base = 10000;
+  mutable_cf_options_.max_bytes_for_level_multiplier = 5;
+  mutable_cf_options_.level0_file_num_compaction_trigger = 2;
+
+  Add(0, 11U, "1", "2", 10000U);
+  Add(0, 12U, "1", "2", 10000U);
+  Add(0, 13U, "1", "2", 10000U);
+
+  Add(5, 4U, "1", "2", 1286250U);
+  Add(4, 5U, "1", "2", 200000U);
+  Add(3, 6U, "1", "2", 40000U);
+  Add(2, 7U, "1", "2", 8000U);
+
+  vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
+  ASSERT_EQ(0, logger_->log_count);
+  ASSERT_EQ(2, vstorage_.base_level());
+  // level multiplier should be 3.5
+  ASSERT_LT(vstorage_.level_multiplier(), 3.6);
+  ASSERT_GT(vstorage_.level_multiplier(), 3.4);
+  // Level size should be around 30,000, 105,000, 367,500
+  ASSERT_EQ(30000U, vstorage_.MaxBytesForLevel(2));
+  ASSERT_LT(vstorage_.MaxBytesForLevel(3), 110000U);
+  ASSERT_GT(vstorage_.MaxBytesForLevel(3), 100000U);
+  ASSERT_LT(vstorage_.MaxBytesForLevel(4), 370000U);
+  ASSERT_GT(vstorage_.MaxBytesForLevel(4), 360000U);
+}
+
+TEST_F(VersionStorageInfoTest, MaxBytesForLevelDynamicWithLargeL0_3) {
+  ioptions_.level_compaction_dynamic_level_bytes = true;
+  mutable_cf_options_.max_bytes_for_level_base = 10000;
+  mutable_cf_options_.max_bytes_for_level_multiplier = 5;
+  mutable_cf_options_.level0_file_num_compaction_trigger = 2;
+
+  Add(0, 11U, "1", "2", 5000U);
+  Add(0, 12U, "1", "2", 5000U);
+  Add(0, 13U, "1", "2", 5000U);
+  Add(0, 14U, "1", "2", 5000U);
+  Add(0, 15U, "1", "2", 5000U);
+  Add(0, 16U, "1", "2", 5000U);
+
+  Add(5, 4U, "1", "2", 1286250U);
+  Add(4, 5U, "1", "2", 200000U);
+  Add(3, 6U, "1", "2", 40000U);
+  Add(2, 7U, "1", "2", 8000U);
+
+  vstorage_.CalculateBaseBytes(ioptions_, mutable_cf_options_);
+  ASSERT_EQ(0, logger_->log_count);
+  ASSERT_EQ(2, vstorage_.base_level());
+  // level multiplier should be 3.5
+  ASSERT_LT(vstorage_.level_multiplier(), 3.6);
+  ASSERT_GT(vstorage_.level_multiplier(), 3.4);
+  // Level size should be around 30,000, 105,000, 367,500
+  ASSERT_EQ(30000U, vstorage_.MaxBytesForLevel(2));
+  ASSERT_LT(vstorage_.MaxBytesForLevel(3), 110000U);
+  ASSERT_GT(vstorage_.MaxBytesForLevel(3), 100000U);
+  ASSERT_LT(vstorage_.MaxBytesForLevel(4), 370000U);
+  ASSERT_GT(vstorage_.MaxBytesForLevel(4), 360000U);
 }
 
 TEST_F(VersionStorageInfoTest, EstimateLiveDataSize) {
@@ -347,337 +378,39 @@ TEST_F(VersionStorageInfoTest, EstimateLiveDataSize2) {
   ASSERT_EQ(4U, vstorage_.EstimateLiveDataSize());
 }
 
-// Test cases for invalid split:
-// 1) No file
-TEST_F(VersionStorageInfoTest, GetSplitPointBySize_NoFile) {
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  uint64_t file_size = 1023;
-  uint32_t file_sn = 1;
-  int level = 0;
+TEST_F(VersionStorageInfoTest, GetOverlappingInputs) {
+  // Two files that overlap at the range deletion tombstone sentinel.
+  Add(1, 1U, {"a", 0, kTypeValue}, {"b", kMaxSequenceNumber, kTypeRangeDeletion}, 1);
+  Add(1, 2U, {"b", 0, kTypeValue}, {"c", 0, kTypeValue}, 1);
+  // Two files that overlap at the same user key.
+  Add(1, 3U, {"d", 0, kTypeValue}, {"e", kMaxSequenceNumber, kTypeValue}, 1);
+  Add(1, 4U, {"e", 0, kTypeValue}, {"f", 0, kTypeValue}, 1);
+  // Two files that do not overlap.
+  Add(1, 5U, {"g", 0, kTypeValue}, {"h", 0, kTypeValue}, 1);
+  Add(1, 6U, {"i", 0, kTypeValue}, {"j", 0, kTypeValue}, 1);
+  vstorage_.UpdateNumNonEmptyLevels();
+  vstorage_.GenerateLevelFilesBrief();
 
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1301", file_size);  file_sn++;
-
-  std::string split_point;
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s = vstorage_.GetSplitPointBySize(nullptr,
-                                           split_point,
-                                           left_datasize,
-                                           left_numrecord,
-                                           right_datasize,
-                                           right_numrecord);
-  ASSERT_EQ(true, s.IsNotSupported());
-  ASSERT_EQ("", split_point);
-  ASSERT_EQ(0, left_datasize);
-  ASSERT_EQ(0, left_numrecord);
-  ASSERT_EQ(0, right_datasize);
-  ASSERT_EQ(0, right_numrecord);
-}
-// 2) Only one file
-TEST_F(VersionStorageInfoTest, GetSplitPointBySize_OnlyOneFile) {
-  uint64_t file_size = 1023;
-  uint32_t file_sn = 1;
-  int level = 0;
-
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1301", file_size);  file_sn++;
-
-  level = 2;
-  Add(level, file_sn, "0100", "0701", file_size);  file_sn++;
-
-  std::string split_point;
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s = vstorage_.GetSplitPointBySize(nullptr,
-                                           split_point,
-                                           left_datasize,
-                                           left_numrecord,
-                                           right_datasize,
-                                           right_numrecord);
-  ASSERT_EQ(true, s.IsNotSupported());
-  ASSERT_EQ("", split_point);
-  ASSERT_EQ(0, left_datasize);
-  ASSERT_EQ(0, left_numrecord);
-  ASSERT_EQ(0, right_datasize);
-  ASSERT_EQ(0, right_numrecord);
-}
-// 3) The total size of all the other files except the largest one is smaller than that of the largest one
-TEST_F(VersionStorageInfoTest, GetSplitPointBySize_NotFound) {
-  uint64_t file_size = 1023;
-  uint32_t file_sn = 1;
-  int level = 0;
-
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1301", file_size);  file_sn++;
-
-  level = 2;
-  Add(level, file_sn, "0100", "0201", 205);  file_sn++;
-  Add(level, file_sn, "0202", "0701", 205);  file_sn++;
-
-  level = 3;
-  Add(level, file_sn, "0000", "0301", 205);  file_sn++;
-  Add(level, file_sn, "0302", "2501", 1027);  file_sn++; // the largest file
-
-  level = 5;
-  Add(level, file_sn, "0302", "1001", 205);  file_sn++;
-  Add(level, file_sn, "1002", "1601", 205);  file_sn++;
-
-  std::string split_point;
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s = vstorage_.GetSplitPointBySize(nullptr,
-                                           split_point,
-                                           left_datasize,
-                                           left_numrecord,
-                                           right_datasize,
-                                           right_numrecord);
-  ASSERT_EQ(true, s.IsNotSupported());
-  ASSERT_EQ("", split_point);
-  ASSERT_EQ(0, left_datasize);
-  ASSERT_EQ(0, left_numrecord);
-  ASSERT_EQ(0, right_datasize);
-  ASSERT_EQ(0, right_numrecord);
+  ASSERT_EQ("1,2", GetOverlappingFiles(
+      1, {"a", 0, kTypeValue}, {"b", 0, kTypeValue}));
+  ASSERT_EQ("1", GetOverlappingFiles(
+      1, {"a", 0, kTypeValue}, {"b", kMaxSequenceNumber, kTypeRangeDeletion}));
+  ASSERT_EQ("2", GetOverlappingFiles(
+      1, {"b", kMaxSequenceNumber, kTypeValue}, {"c", 0, kTypeValue}));
+  ASSERT_EQ("3,4", GetOverlappingFiles(
+      1, {"d", 0, kTypeValue}, {"e", 0, kTypeValue}));
+  ASSERT_EQ("3", GetOverlappingFiles(
+      1, {"d", 0, kTypeValue}, {"e", kMaxSequenceNumber, kTypeRangeDeletion}));
+  ASSERT_EQ("3,4", GetOverlappingFiles(
+      1, {"e", kMaxSequenceNumber, kTypeValue}, {"f", 0, kTypeValue}));
+  ASSERT_EQ("3,4", GetOverlappingFiles(
+      1, {"e", 0, kTypeValue}, {"f", 0, kTypeValue}));
+  ASSERT_EQ("5", GetOverlappingFiles(
+      1, {"g", 0, kTypeValue}, {"h", 0, kTypeValue}));
+  ASSERT_EQ("6", GetOverlappingFiles(
+      1, {"i", 0, kTypeValue}, {"j", 0, kTypeValue}));
 }
 
-// Test cases for valid split:
-// 1) Normal test case with some boundary condition such as duplicate largest key in diffrent files, empty level existed.
-TEST_F(VersionStorageInfoTest, GetSplitPointBySize_Normal) {
-  uint64_t file_size = 1023;
-  uint32_t file_sn = 1;
-  int level = 0;
-
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1301", file_size);  file_sn++;
-
-  level = 2;
-  Add(level, file_sn, "0100", "0701", file_size);  file_sn++; //0701 duplicate largest key in different files
-  Add(level, file_sn, "0702", "1401", file_size);  file_sn++;
-  Add(level, file_sn, "1402", "1501", file_size);  file_sn++; //1501 duplicate largest key in different files
-  Add(level, file_sn, "1502", "1601", file_size);  file_sn++;
-  Add(level, file_sn, "1602", "1701", file_size);  file_sn++;
-
-  level = 3;
-  Add(level, file_sn, "0000", "0301", file_size);  file_sn++;
-  Add(level, file_sn, "0302", "0401", file_size);  file_sn++; //0401 duplicate largest key in different files
-  Add(level, file_sn, "0402", "0701", file_size);  file_sn++; //0701 duplicate largest key in different files
-  Add(level, file_sn, "0702", "0801", file_size);  file_sn++;
-  Add(level, file_sn, "0802", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1201", file_size);  file_sn++; //1201 duplicate largest key in different files
-  Add(level, file_sn, "1202", "1301", file_size);  file_sn++;
-  Add(level, file_sn, "1302", "2001", file_size);  file_sn++;
-  Add(level, file_sn, "2002", "2101", file_size);  file_sn++;
-
-  level = 5;
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0201", file_size);  file_sn++;
-  Add(level, file_sn, "0202", "0401", file_size);  file_sn++; //0401 duplicate largest key in different files
-  Add(level, file_sn, "0402", "0501", file_size);  file_sn++;
-  Add(level, file_sn, "0502", "0601", file_size);  file_sn++;
-  Add(level, file_sn, "0602", "1001", file_size);  file_sn++;
-  Add(level, file_sn, "1002", "1101", file_size);  file_sn++;
-  Add(level, file_sn, "1102", "1201", file_size);  file_sn++; //1201 duplicate largest key in different files
-  Add(level, file_sn, "1202", "1501", file_size);  file_sn++; //1501 duplicate largest key in different files
-  Add(level, file_sn, "1502", "1801", file_size);  file_sn++;
-  Add(level, file_sn, "1802", "1901", file_size);  file_sn++;
-  Add(level, file_sn, "1902", "2201", file_size);  file_sn++;
-  Add(level, file_sn, "2202", "2301", file_size);  file_sn++;
-
-  std::string split_point;
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s = vstorage_.GetSplitPointBySize(nullptr,
-                                           split_point,
-                                           left_datasize,
-                                           left_numrecord,
-                                           right_datasize,
-                                           right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ("1201", split_point);
-  ASSERT_EQ(14322, left_datasize);  // 14*1023
-  ASSERT_EQ(14, left_numrecord);    // 14*(2-1)
-  ASSERT_EQ(13299, right_datasize); // 13*1023
-  ASSERT_EQ(13, right_numrecord);   // 13*(2-1)
-}
-// 2) Test case for random data
-TEST_F(VersionStorageInfoTest, GetSplitPointBySize_RandomData) {
-  // Prepare levels file by random.
-  PrepareLevelsFileByRandom(100000, 1023);
-
-  // Get the expected result.
-  std::string split_point_expected;
-  uint64_t left_datasize_expected = 321;
-  uint64_t left_numrecord_expected = 123;
-  uint64_t right_datasize_expected = 456;;
-  uint64_t right_numrecord_expected = 654;
-  GetSplitPointBySize(split_point_expected,
-                      left_datasize_expected,
-                      left_numrecord_expected,
-                      right_datasize_expected,
-                      right_numrecord_expected);
-
-  //Check result
-  std::string split_point;
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s = vstorage_.GetSplitPointBySize(nullptr,
-                                           split_point,
-                                           left_datasize,
-                                           left_numrecord,
-                                           right_datasize,
-                                           right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ(split_point_expected, split_point);
-  ASSERT_EQ(left_datasize_expected, left_datasize);
-  ASSERT_EQ(left_numrecord_expected, left_numrecord);
-  ASSERT_EQ(right_datasize_expected, right_datasize);
-  ASSERT_EQ(right_numrecord_expected, right_numrecord);
-}
-
-// Test cases for get split information by split point:
-// 1) Normal test case with some boundary condition such as duplicate largest key in diffrent files, empty level existed.
-TEST_F(VersionStorageInfoTest, GetSplitInfoBySplitPoint) {
-  uint64_t file_size = 1023;
-  uint32_t file_sn = 1;
-  int level = 0;
-
-  // GetSplitPointBySize() will ignore all the files at level 0.
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1301", file_size);  file_sn++;
-
-  level = 2;
-  Add(level, file_sn, "0100", "0701", file_size);  file_sn++; //0701 duplicate largest key in different files
-  Add(level, file_sn, "0702", "1401", file_size);  file_sn++;
-  Add(level, file_sn, "1402", "1501", file_size);  file_sn++; //1501 duplicate largest key in different files
-  Add(level, file_sn, "1502", "1601", file_size);  file_sn++;
-  Add(level, file_sn, "1602", "1701", file_size);  file_sn++;
-
-  level = 3;
-  Add(level, file_sn, "0000", "0301", file_size);  file_sn++;
-  Add(level, file_sn, "0302", "0401", file_size);  file_sn++; //0401 duplicate largest key in different files
-  Add(level, file_sn, "0402", "0701", file_size);  file_sn++; //0701 duplicate largest key in different files
-  Add(level, file_sn, "0702", "0801", file_size);  file_sn++;
-  Add(level, file_sn, "0802", "0901", file_size);  file_sn++;
-  Add(level, file_sn, "0902", "1201", file_size);  file_sn++; //1201 duplicate largest key in different files
-  Add(level, file_sn, "1202", "1301", file_size);  file_sn++;
-  Add(level, file_sn, "1302", "2001", file_size);  file_sn++;
-  Add(level, file_sn, "2002", "2101", file_size);  file_sn++;
-
-  level = 5;
-  Add(level, file_sn, "0000", "0101", file_size);  file_sn++;
-  Add(level, file_sn, "0102", "0201", file_size);  file_sn++;
-  Add(level, file_sn, "0202", "0401", file_size);  file_sn++; //0401 duplicate largest key in different files
-  Add(level, file_sn, "0402", "0501", file_size);  file_sn++;
-  Add(level, file_sn, "0502", "0601", file_size);  file_sn++;
-  Add(level, file_sn, "0602", "1001", file_size);  file_sn++;
-  Add(level, file_sn, "1002", "1101", file_size);  file_sn++;
-  Add(level, file_sn, "1102", "1201", file_size);  file_sn++; //1201 duplicate largest key in different files
-  Add(level, file_sn, "1202", "1501", file_size);  file_sn++; //1501 duplicate largest key in different files
-  Add(level, file_sn, "1502", "1801", file_size);  file_sn++;
-  Add(level, file_sn, "1802", "1901", file_size);  file_sn++;
-  Add(level, file_sn, "1902", "2201", file_size);  file_sn++;
-  Add(level, file_sn, "2202", "2301", file_size);  file_sn++;
-
-  std::string split_point = "";
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s;
-
-  split_point = "1200";
-  s = vstorage_.GetSplitInfoBySplitPoint(nullptr,
-                                         split_point,
-                                         left_datasize,
-                                         left_numrecord,
-                                         right_datasize,
-                                         right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ(13299, left_datasize);  // 13*1023
-  ASSERT_EQ(13, left_numrecord);    // 13*(2-1)
-  ASSERT_EQ(14322, right_datasize); // 14*1023
-  ASSERT_EQ(14, right_numrecord);   // 14*(2-1)
-
-  split_point = "1201";
-  s = vstorage_.GetSplitInfoBySplitPoint(nullptr,
-                                         split_point,
-                                         left_datasize,
-                                         left_numrecord,
-                                         right_datasize,
-                                         right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ(15345, left_datasize);  // 15*1023
-  ASSERT_EQ(15, left_numrecord);    // 15*(2-1)
-  ASSERT_EQ(12276, right_datasize); // 12*1023
-  ASSERT_EQ(12, right_numrecord);   // 12*(2-1)
-
-  split_point = "1202";
-  s = vstorage_.GetSplitInfoBySplitPoint(nullptr,
-                                         split_point,
-                                         left_datasize,
-                                         left_numrecord,
-                                         right_datasize,
-                                         right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ(15345, left_datasize);  // 15*1023
-  ASSERT_EQ(15, left_numrecord);    // 15*(2-1)
-  ASSERT_EQ(12276, right_datasize); // 12*1023
-  ASSERT_EQ(12, right_numrecord);   // 12*(2-1)
-}
-// 2) Test case for random data
-TEST_F(VersionStorageInfoTest, GetSplitInfoBySplitPoint_RandomData) {
-  // Prepare levels file by random.
-  PrepareLevelsFileByRandom(100000, 1023);
-
-  // Select split point by random.
-  std::string split_point = "";
-  uint64_t left_datasize_expected = 321;
-  uint64_t left_numrecord_expected = 123;
-  uint64_t right_datasize_expected = 456;;
-  uint64_t right_numrecord_expected = 654;
-  SelectSplitPointByRandom(split_point,
-                           left_datasize_expected,
-                           left_numrecord_expected,
-                           right_datasize_expected,
-                           right_numrecord_expected);
-
-  //Check result
-  uint64_t left_datasize = 321;
-  uint64_t left_numrecord = 123;
-  uint64_t right_datasize = 456;;
-  uint64_t right_numrecord = 654;
-  Status s;
-  s = vstorage_.GetSplitInfoBySplitPoint(nullptr,
-                                         split_point,
-                                         left_datasize,
-                                         left_numrecord,
-                                         right_datasize,
-                                         right_numrecord);
-  ASSERT_EQ(true, s.ok());
-  ASSERT_EQ(left_datasize_expected, left_datasize);
-  ASSERT_EQ(left_numrecord_expected, left_numrecord);
-  ASSERT_EQ(right_datasize_expected, right_datasize);
-  ASSERT_EQ(right_numrecord_expected, right_numrecord);
-}
 
 class FindLevelFileTest : public testing::Test {
  public:
@@ -871,6 +604,493 @@ TEST_F(FindLevelFileTest, LevelOverlappingFiles) {
   ASSERT_TRUE(Overlaps("450", "700"));
   ASSERT_TRUE(Overlaps("600", "700"));
 }
+
+class VersionSetTestBase {
+ public:
+  const static std::string kColumnFamilyName1;
+  const static std::string kColumnFamilyName2;
+  const static std::string kColumnFamilyName3;
+
+  VersionSetTestBase()
+      : env_(Env::Default()),
+        dbname_(test::PerThreadDBPath("version_set_test")),
+        db_options_(),
+        mutable_cf_options_(cf_options_),
+        table_cache_(NewLRUCache(50000, 16)),
+        write_buffer_manager_(db_options_.db_write_buffer_size),
+        versions_(new VersionSet(dbname_, &db_options_, env_options_,
+                                 table_cache_.get(), &write_buffer_manager_,
+                                 &write_controller_)),
+        shutting_down_(false),
+        mock_table_factory_(std::make_shared<mock::MockTableFactory>()) {
+    EXPECT_OK(env_->CreateDirIfMissing(dbname_));
+    db_options_.db_paths.emplace_back(dbname_,
+                                      std::numeric_limits<uint64_t>::max());
+  }
+
+  void PrepareManifest(std::vector<ColumnFamilyDescriptor>* column_families,
+                       SequenceNumber* last_seqno,
+                       std::unique_ptr<log::Writer>* log_writer) {
+    assert(column_families != nullptr);
+    assert(last_seqno != nullptr);
+    assert(log_writer != nullptr);
+    VersionEdit new_db;
+    new_db.SetLogNumber(0);
+    new_db.SetNextFile(2);
+    new_db.SetLastSequence(0);
+
+    const std::vector<std::string> cf_names = {
+        kDefaultColumnFamilyName, kColumnFamilyName1, kColumnFamilyName2,
+        kColumnFamilyName3};
+    const int kInitialNumOfCfs = static_cast<int>(cf_names.size());
+    autovector<VersionEdit> new_cfs;
+    uint64_t last_seq = 1;
+    uint32_t cf_id = 1;
+    for (int i = 1; i != kInitialNumOfCfs; ++i) {
+      VersionEdit new_cf;
+      new_cf.AddColumnFamily(cf_names[i]);
+      new_cf.SetColumnFamily(cf_id++);
+      new_cf.SetLogNumber(0);
+      new_cf.SetNextFile(2);
+      new_cf.SetLastSequence(last_seq++);
+      new_cfs.emplace_back(new_cf);
+    }
+    *last_seqno = last_seq;
+
+    const std::string manifest = DescriptorFileName(dbname_, 1);
+    std::unique_ptr<WritableFile> file;
+    Status s = env_->NewWritableFile(
+        manifest, &file, env_->OptimizeForManifestWrite(env_options_));
+    ASSERT_OK(s);
+    std::unique_ptr<WritableFileWriter> file_writer(
+        new WritableFileWriter(std::move(file), manifest, env_options_));
+    {
+      log_writer->reset(new log::Writer(std::move(file_writer), 0, false));
+      std::string record;
+      new_db.EncodeTo(&record);
+      s = (*log_writer)->AddRecord(record);
+      for (const auto& e : new_cfs) {
+        record.clear();
+        e.EncodeTo(&record);
+        s = (*log_writer)->AddRecord(record);
+        ASSERT_OK(s);
+      }
+    }
+    ASSERT_OK(s);
+
+    cf_options_.table_factory = mock_table_factory_;
+    for (const auto& cf_name : cf_names) {
+      column_families->emplace_back(cf_name, cf_options_);
+    }
+  }
+
+  // Create DB with 3 column families.
+  void NewDB() {
+    std::vector<ColumnFamilyDescriptor> column_families;
+    SequenceNumber last_seqno;
+    std::unique_ptr<log::Writer> log_writer;
+
+    PrepareManifest(&column_families, &last_seqno, &log_writer);
+    log_writer.reset();
+    // Make "CURRENT" file point to the new manifest file.
+    Status s = SetCurrentFile(env_, dbname_, 1, nullptr);
+    ASSERT_OK(s);
+
+    EXPECT_OK(versions_->Recover(column_families, false));
+    EXPECT_EQ(column_families.size(),
+              versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+  }
+
+  Env* env_;
+  const std::string dbname_;
+  EnvOptions env_options_;
+  ImmutableDBOptions db_options_;
+  ColumnFamilyOptions cf_options_;
+  MutableCFOptions mutable_cf_options_;
+  std::shared_ptr<Cache> table_cache_;
+  WriteController write_controller_;
+  WriteBufferManager write_buffer_manager_;
+  std::shared_ptr<VersionSet> versions_;
+  InstrumentedMutex mutex_;
+  std::atomic<bool> shutting_down_;
+  std::shared_ptr<mock::MockTableFactory> mock_table_factory_;
+};
+
+const std::string VersionSetTestBase::kColumnFamilyName1 = "alice";
+const std::string VersionSetTestBase::kColumnFamilyName2 = "bob";
+const std::string VersionSetTestBase::kColumnFamilyName3 = "charles";
+
+class VersionSetTest : public VersionSetTestBase, public testing::Test {
+ public:
+  VersionSetTest() : VersionSetTestBase() {}
+};
+
+TEST_F(VersionSetTest, SameColumnFamilyGroupCommit) {
+  NewDB();
+  const int kGroupSize = 5;
+  autovector<VersionEdit> edits;
+  for (int i = 0; i != kGroupSize; ++i) {
+    edits.emplace_back(VersionEdit());
+  }
+  autovector<ColumnFamilyData*> cfds;
+  autovector<const MutableCFOptions*> all_mutable_cf_options;
+  autovector<autovector<VersionEdit*>> edit_lists;
+  for (int i = 0; i != kGroupSize; ++i) {
+    cfds.emplace_back(versions_->GetColumnFamilySet()->GetDefault());
+    all_mutable_cf_options.emplace_back(&mutable_cf_options_);
+    autovector<VersionEdit*> edit_list;
+    edit_list.emplace_back(&edits[i]);
+    edit_lists.emplace_back(edit_list);
+  }
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  int count = 0;
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::ProcessManifestWrites:SameColumnFamily", [&](void* arg) {
+        uint32_t* cf_id = reinterpret_cast<uint32_t*>(arg);
+        EXPECT_EQ(0, *cf_id);
+        ++count;
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  mutex_.Lock();
+  Status s =
+      versions_->LogAndApply(cfds, all_mutable_cf_options, edit_lists, &mutex_);
+  mutex_.Unlock();
+  EXPECT_OK(s);
+  EXPECT_EQ(kGroupSize - 1, count);
+}
+
+TEST_F(VersionSetTest, HandleValidAtomicGroup) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  SequenceNumber last_seqno;
+  std::unique_ptr<log::Writer> log_writer;
+  PrepareManifest(&column_families, &last_seqno, &log_writer);
+
+  // Append multiple version edits that form an atomic group
+  const int kAtomicGroupSize = 3;
+  std::vector<VersionEdit> edits(kAtomicGroupSize);
+  int remaining = kAtomicGroupSize;
+  for (size_t i = 0; i != edits.size(); ++i) {
+    edits[i].SetLogNumber(0);
+    edits[i].SetNextFile(2);
+    edits[i].MarkAtomicGroup(--remaining);
+    edits[i].SetLastSequence(last_seqno++);
+  }
+  Status s;
+  for (const auto& edit : edits) {
+    std::string record;
+    edit.EncodeTo(&record);
+    s = log_writer->AddRecord(record);
+    ASSERT_OK(s);
+  }
+  log_writer.reset();
+
+  s = SetCurrentFile(env_, dbname_, 1, nullptr);
+  ASSERT_OK(s);
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  bool first_in_atomic_group = false;
+  bool last_in_atomic_group = false;
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:FirstInAtomicGroup", [&](void* arg) {
+        VersionEdit* e = reinterpret_cast<VersionEdit*>(arg);
+        EXPECT_EQ(edits.front().DebugString(),
+                  e->DebugString());  // compare based on value
+        first_in_atomic_group = true;
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:LastInAtomicGroup", [&](void* arg) {
+        VersionEdit* e = reinterpret_cast<VersionEdit*>(arg);
+        EXPECT_EQ(edits.back().DebugString(),
+                  e->DebugString());  // compare based on value
+        EXPECT_TRUE(first_in_atomic_group);
+        last_in_atomic_group = true;
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  EXPECT_OK(versions_->Recover(column_families, false));
+  EXPECT_EQ(column_families.size(),
+            versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+  EXPECT_TRUE(first_in_atomic_group);
+  EXPECT_TRUE(last_in_atomic_group);
+}
+
+TEST_F(VersionSetTest, HandleIncompleteTrailingAtomicGroup) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  SequenceNumber last_seqno;
+  std::unique_ptr<log::Writer> log_writer;
+  PrepareManifest(&column_families, &last_seqno, &log_writer);
+
+  // Append multiple version edits that form an atomic group
+  const int kAtomicGroupSize = 4;
+  const int kNumberOfPersistedVersionEdits = kAtomicGroupSize - 1;
+  std::vector<VersionEdit> edits(kNumberOfPersistedVersionEdits);
+  int remaining = kAtomicGroupSize;
+  for (size_t i = 0; i != edits.size(); ++i) {
+    edits[i].SetLogNumber(0);
+    edits[i].SetNextFile(2);
+    edits[i].MarkAtomicGroup(--remaining);
+    edits[i].SetLastSequence(last_seqno++);
+  }
+  Status s;
+  for (const auto& edit : edits) {
+    std::string record;
+    edit.EncodeTo(&record);
+    s = log_writer->AddRecord(record);
+    ASSERT_OK(s);
+  }
+  log_writer.reset();
+
+  s = SetCurrentFile(env_, dbname_, 1, nullptr);
+  ASSERT_OK(s);
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  bool first_in_atomic_group = false;
+  bool last_in_atomic_group = false;
+  size_t num = 0;
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:FirstInAtomicGroup", [&](void* arg) {
+        VersionEdit* e = reinterpret_cast<VersionEdit*>(arg);
+        EXPECT_EQ(edits.front().DebugString(),
+                  e->DebugString());  // compare based on value
+        first_in_atomic_group = true;
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:LastInAtomicGroup",
+      [&](void* /* arg */) { last_in_atomic_group = true; });
+  SyncPoint::GetInstance()->SetCallBack("VersionSet::Recover:AtomicGroup",
+                                        [&](void* /* arg */) { ++num; });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  EXPECT_OK(versions_->Recover(column_families, false));
+  EXPECT_EQ(column_families.size(),
+            versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+  EXPECT_TRUE(first_in_atomic_group);
+  EXPECT_FALSE(last_in_atomic_group);
+  EXPECT_EQ(kNumberOfPersistedVersionEdits, num);
+}
+
+TEST_F(VersionSetTest, HandleCorruptedAtomicGroup) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  SequenceNumber last_seqno;
+  std::unique_ptr<log::Writer> log_writer;
+  PrepareManifest(&column_families, &last_seqno, &log_writer);
+
+  // Append multiple version edits that form an atomic group
+  const int kAtomicGroupSize = 4;
+  std::vector<VersionEdit> edits(kAtomicGroupSize);
+  int remaining = kAtomicGroupSize;
+  for (size_t i = 0; i != edits.size(); ++i) {
+    edits[i].SetLogNumber(0);
+    edits[i].SetNextFile(2);
+    if (i != (kAtomicGroupSize / 2)) {
+      edits[i].MarkAtomicGroup(--remaining);
+    }
+    edits[i].SetLastSequence(last_seqno++);
+  }
+  Status s;
+  for (const auto& edit : edits) {
+    std::string record;
+    edit.EncodeTo(&record);
+    s = log_writer->AddRecord(record);
+    ASSERT_OK(s);
+  }
+  log_writer.reset();
+
+  s = SetCurrentFile(env_, dbname_, 1, nullptr);
+  ASSERT_OK(s);
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  bool mixed = false;
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:AtomicGroupMixedWithNormalEdits", [&](void* arg) {
+        VersionEdit* e = reinterpret_cast<VersionEdit*>(arg);
+        EXPECT_EQ(edits[kAtomicGroupSize / 2].DebugString(), e->DebugString());
+        mixed = true;
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  EXPECT_NOK(versions_->Recover(column_families, false));
+  EXPECT_EQ(column_families.size(),
+            versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+  EXPECT_TRUE(mixed);
+}
+
+TEST_F(VersionSetTest, HandleIncorrectAtomicGroupSize) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  SequenceNumber last_seqno;
+  std::unique_ptr<log::Writer> log_writer;
+  PrepareManifest(&column_families, &last_seqno, &log_writer);
+
+  // Append multiple version edits that form an atomic group
+  const int kAtomicGroupSize = 4;
+  std::vector<VersionEdit> edits(kAtomicGroupSize);
+  int remaining = kAtomicGroupSize;
+  for (size_t i = 0; i != edits.size(); ++i) {
+    edits[i].SetLogNumber(0);
+    edits[i].SetNextFile(2);
+    if (i != 1) {
+      edits[i].MarkAtomicGroup(--remaining);
+    } else {
+      edits[i].MarkAtomicGroup(remaining--);
+    }
+    edits[i].SetLastSequence(last_seqno++);
+  }
+  Status s;
+  for (const auto& edit : edits) {
+    std::string record;
+    edit.EncodeTo(&record);
+    s = log_writer->AddRecord(record);
+    ASSERT_OK(s);
+  }
+  log_writer.reset();
+
+  s = SetCurrentFile(env_, dbname_, 1, nullptr);
+  ASSERT_OK(s);
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  bool incorrect_group_size = false;
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::Recover:IncorrectAtomicGroupSize", [&](void* arg) {
+        VersionEdit* e = reinterpret_cast<VersionEdit*>(arg);
+        EXPECT_EQ(edits[1].DebugString(), e->DebugString());
+        incorrect_group_size = true;
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  EXPECT_NOK(versions_->Recover(column_families, false));
+  EXPECT_EQ(column_families.size(),
+            versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+  EXPECT_TRUE(incorrect_group_size);
+}
+
+class VersionSetTestDropOneCF : public VersionSetTestBase,
+                                public testing::TestWithParam<std::string> {
+ public:
+  VersionSetTestDropOneCF() : VersionSetTestBase() {}
+};
+
+// This test simulates the following execution sequence
+// Time  thread1                  bg_flush_thr
+//  |                             Prepare version edits (e1,e2,e3) for atomic
+//  |                             flush cf1, cf2, cf3
+//  |    Enqueue e to drop cfi
+//  |    to manifest_writers_
+//  |                             Enqueue (e1,e2,e3) to manifest_writers_
+//  |
+//  |    Apply e,
+//  |    cfi.IsDropped() is true
+//  |                             Apply (e1,e2,e3),
+//  |                             since cfi.IsDropped() == true, we need to
+//  |                             drop ei and write the rest to MANIFEST.
+//  V
+//
+//  Repeat the test for i = 1, 2, 3 to simulate dropping the first, middle and
+//  last column family in an atomic group.
+TEST_P(VersionSetTestDropOneCF, HandleDroppedColumnFamilyInAtomicGroup) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  SequenceNumber last_seqno;
+  std::unique_ptr<log::Writer> log_writer;
+  PrepareManifest(&column_families, &last_seqno, &log_writer);
+  Status s = SetCurrentFile(env_, dbname_, 1, nullptr);
+  ASSERT_OK(s);
+
+  EXPECT_OK(versions_->Recover(column_families, false /* read_only */));
+  EXPECT_EQ(column_families.size(),
+            versions_->GetColumnFamilySet()->NumberOfColumnFamilies());
+
+  const int kAtomicGroupSize = 3;
+  const std::vector<std::string> non_default_cf_names = {
+      kColumnFamilyName1, kColumnFamilyName2, kColumnFamilyName3};
+
+  // Drop one column family
+  VersionEdit drop_cf_edit;
+  drop_cf_edit.DropColumnFamily();
+  const std::string cf_to_drop_name(GetParam());
+  auto cfd_to_drop =
+      versions_->GetColumnFamilySet()->GetColumnFamily(cf_to_drop_name);
+  ASSERT_NE(nullptr, cfd_to_drop);
+  // Increase its refcount because cfd_to_drop is used later, and we need to
+  // prevent it from being deleted.
+  cfd_to_drop->Ref();
+  drop_cf_edit.SetColumnFamily(cfd_to_drop->GetID());
+  mutex_.Lock();
+  s = versions_->LogAndApply(cfd_to_drop,
+                             *cfd_to_drop->GetLatestMutableCFOptions(),
+                             &drop_cf_edit, &mutex_);
+  mutex_.Unlock();
+  ASSERT_OK(s);
+
+  std::vector<VersionEdit> edits(kAtomicGroupSize);
+  uint32_t remaining = kAtomicGroupSize;
+  size_t i = 0;
+  autovector<ColumnFamilyData*> cfds;
+  autovector<const MutableCFOptions*> mutable_cf_options_list;
+  autovector<autovector<VersionEdit*>> edit_lists;
+  for (const auto& cf_name : non_default_cf_names) {
+    auto cfd = (cf_name != cf_to_drop_name)
+                   ? versions_->GetColumnFamilySet()->GetColumnFamily(cf_name)
+                   : cfd_to_drop;
+    ASSERT_NE(nullptr, cfd);
+    cfds.push_back(cfd);
+    mutable_cf_options_list.emplace_back(cfd->GetLatestMutableCFOptions());
+    edits[i].SetColumnFamily(cfd->GetID());
+    edits[i].SetLogNumber(0);
+    edits[i].SetNextFile(2);
+    edits[i].MarkAtomicGroup(--remaining);
+    edits[i].SetLastSequence(last_seqno++);
+    autovector<VersionEdit*> tmp_edits;
+    tmp_edits.push_back(&edits[i]);
+    edit_lists.emplace_back(tmp_edits);
+    ++i;
+  }
+  int called = 0;
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+  SyncPoint::GetInstance()->SetCallBack(
+      "VersionSet::ProcessManifestWrites:CheckOneAtomicGroup", [&](void* arg) {
+        std::vector<VersionEdit*>* tmp_edits =
+            reinterpret_cast<std::vector<VersionEdit*>*>(arg);
+        EXPECT_EQ(kAtomicGroupSize - 1, tmp_edits->size());
+        for (const auto e : *tmp_edits) {
+          bool found = false;
+          for (const auto& e2 : edits) {
+            if (&e2 == e) {
+              found = true;
+              break;
+            }
+          }
+          ASSERT_TRUE(found);
+        }
+        ++called;
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+  mutex_.Lock();
+  s = versions_->LogAndApply(cfds, mutable_cf_options_list, edit_lists,
+                             &mutex_);
+  mutex_.Unlock();
+  ASSERT_OK(s);
+  ASSERT_EQ(1, called);
+  if (cfd_to_drop->Unref()) {
+    delete cfd_to_drop;
+    cfd_to_drop = nullptr;
+  }
+}
+
+INSTANTIATE_TEST_CASE_P(
+    AtomicGroup, VersionSetTestDropOneCF,
+    testing::Values(VersionSetTestBase::kColumnFamilyName1,
+                    VersionSetTestBase::kColumnFamilyName2,
+                    VersionSetTestBase::kColumnFamilyName3));
 
 }  // namespace rocksdb
 

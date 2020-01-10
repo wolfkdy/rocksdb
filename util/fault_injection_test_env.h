@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright 2014 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -11,19 +11,19 @@
 // the last "sync". It then checks for data loss errors by purposely dropping
 // file data (or entire files) not protected by a "sync".
 
-#ifndef UTIL_FAULT_INJECTION_TEST_ENV_H_
-#define UTIL_FAULT_INJECTION_TEST_ENV_H_
+#pragma once
 
 #include <map>
 #include <set>
 #include <string>
 
-#include "db/filename.h"
 #include "db/version_set.h"
+#include "env/mock_env.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
-#include "util/mock_env.h"
+#include "util/filename.h"
 #include "util/mutexlock.h"
+#include "util/random.h"
 
 namespace rocksdb {
 
@@ -56,7 +56,7 @@ struct FileState {
 class TestWritableFile : public WritableFile {
  public:
   explicit TestWritableFile(const std::string& fname,
-                            unique_ptr<WritableFile>&& f,
+                            std::unique_ptr<WritableFile>&& f,
                             FaultInjectionTestEnv* env);
   virtual ~TestWritableFile();
   virtual Status Append(const Slice& data) override;
@@ -67,10 +67,17 @@ class TestWritableFile : public WritableFile {
   virtual Status Flush() override;
   virtual Status Sync() override;
   virtual bool IsSyncThreadSafe() const override { return true; }
+  virtual Status PositionedAppend(const Slice& data,
+                                  uint64_t offset) override {
+    return target_->PositionedAppend(data, offset);
+  }
+  virtual bool use_direct_io() const override {
+    return target_->use_direct_io();
+  };
 
  private:
   FileState state_;
-  unique_ptr<WritableFile> target_;
+  std::unique_ptr<WritableFile> target_;
   bool writable_file_opened_;
   FaultInjectionTestEnv* env_;
 };
@@ -87,7 +94,7 @@ class TestDirectory : public Directory {
  private:
   FaultInjectionTestEnv* env_;
   std::string dirname_;
-  unique_ptr<Directory> dir_;
+  std::unique_ptr<Directory> dir_;
 };
 
 class FaultInjectionTestEnv : public EnvWrapper {
@@ -97,16 +104,34 @@ class FaultInjectionTestEnv : public EnvWrapper {
   virtual ~FaultInjectionTestEnv() {}
 
   Status NewDirectory(const std::string& name,
-                      unique_ptr<Directory>* result) override;
+                      std::unique_ptr<Directory>* result) override;
 
   Status NewWritableFile(const std::string& fname,
-                         unique_ptr<WritableFile>* result,
+                         std::unique_ptr<WritableFile>* result,
                          const EnvOptions& soptions) override;
+
+  Status ReopenWritableFile(const std::string& fname,
+                            std::unique_ptr<WritableFile>* result,
+                            const EnvOptions& soptions) override;
+
+  Status NewRandomAccessFile(const std::string& fname,
+                             std::unique_ptr<RandomAccessFile>* result,
+                             const EnvOptions& soptions) override;
 
   virtual Status DeleteFile(const std::string& f) override;
 
   virtual Status RenameFile(const std::string& s,
                             const std::string& t) override;
+
+  virtual Status GetFreeSpace(const std::string& path,
+                              uint64_t* disk_free) override {
+    if (!IsFilesystemActive() && error_ == Status::NoSpace()) {
+      *disk_free = 0;
+      return Status::OK();
+    } else {
+      return target()->GetFreeSpace(path, disk_free);
+    }
+  }
 
   void WritableFileClosed(const FileState& state);
 
@@ -137,12 +162,20 @@ class FaultInjectionTestEnv : public EnvWrapper {
     MutexLock l(&mutex_);
     return filesystem_active_;
   }
-  void SetFilesystemActiveNoLock(bool active) { filesystem_active_ = active; }
-  void SetFilesystemActive(bool active) {
+  void SetFilesystemActiveNoLock(bool active,
+      Status error = Status::Corruption("Not active")) {
+    filesystem_active_ = active;
+    if (!active) {
+      error_ = error;
+    }
+  }
+  void SetFilesystemActive(bool active,
+      Status error = Status::Corruption("Not active")) {
     MutexLock l(&mutex_);
-    SetFilesystemActiveNoLock(active);
+    SetFilesystemActiveNoLock(active, error);
   }
   void AssertNoOpenFile() { assert(open_files_.empty()); }
+  Status GetError() { return error_; }
 
  private:
   port::Mutex mutex_;
@@ -151,8 +184,7 @@ class FaultInjectionTestEnv : public EnvWrapper {
   std::unordered_map<std::string, std::set<std::string>>
       dir_to_new_files_since_last_sync_;
   bool filesystem_active_;  // Record flushes, syncs, writes
+  Status error_;
 };
 
 }  // namespace rocksdb
-
-#endif  // UTIL_FAULT_INJECTION_TEST_ENV_H_

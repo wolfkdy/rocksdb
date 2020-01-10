@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
@@ -15,8 +15,8 @@
 #include <algorithm>
 #include <vector>
 
-#include "db/filename.h"
 #include "rocksdb/env.h"
+#include "util/filename.h"
 
 namespace rocksdb {
 
@@ -35,14 +35,14 @@ void DumpDBFileSummary(const ImmutableDBOptions& options,
   uint64_t file_size;
   std::string file_info, wal_info;
 
-  Header(options.info_log, "DB SUMMARY   dbname(%s)\n", dbname.c_str());
+  Header(options.info_log, "DB SUMMARY\n");
   // Get files in dbname dir
   if (!env->GetChildren(dbname, &files).ok()) {
-    Warn(options.info_log,
-          "warning when reading %s dir\n", dbname.c_str());
+    Error(options.info_log,
+          "Error when reading %s dir\n", dbname.c_str());
   }
   std::sort(files.begin(), files.end());
-  for (std::string file : files) {
+  for (const std::string& file : files) {
     if (!ParseFileName(file, &number, &type)) {
       continue;
     }
@@ -79,13 +79,13 @@ void DumpDBFileSummary(const ImmutableDBOptions& options,
   for (auto& db_path : options.db_paths) {
     if (dbname.compare(db_path.path) != 0) {
       if (!env->GetChildren(db_path.path, &files).ok()) {
-        Warn(options.info_log,
-            "Warn when reading %s dir\n",
+        Error(options.info_log,
+            "Error when reading %s dir\n",
             db_path.path.c_str());
         continue;
       }
       std::sort(files.begin(), files.end());
-      for (std::string file : files) {
+      for (const std::string& file : files) {
         if (ParseFileName(file, &number, &type)) {
           if (type == kTableFile && ++file_num < 10) {
             file_info.append(file).append(" ");
@@ -103,13 +103,13 @@ void DumpDBFileSummary(const ImmutableDBOptions& options,
   // Get wal file in wal_dir
   if (dbname.compare(options.wal_dir) != 0) {
     if (!env->GetChildren(options.wal_dir, &files).ok()) {
-      Warn(options.info_log,
-          "Warn when reading %s dir\n",
+      Error(options.info_log,
+          "Error when reading %s dir\n",
           options.wal_dir.c_str());
       return;
     }
     wal_info.clear();
-    for (std::string file : files) {
+    for (const std::string& file : files) {
       if (ParseFileName(file, &number, &type)) {
         if (type == kLogFile) {
           env->GetFileSize(options.wal_dir + "/" + file, &file_size);

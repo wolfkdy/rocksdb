@@ -1,7 +1,7 @@
 // Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-// This source code is licensed under the BSD-style license found in the
-// LICENSE file in the root directory of this source tree. An additional grant
-// of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 package org.rocksdb;
 
@@ -60,8 +60,21 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
       final AbstractComparator<? extends AbstractSlice<?>>
           fallbackIndexComparator, final int reservedBytes,
       final boolean overwriteKey) {
-    super(newWriteBatchWithIndex(fallbackIndexComparator.getNativeHandle(),
-        reservedBytes, overwriteKey));
+    super(newWriteBatchWithIndex(fallbackIndexComparator.nativeHandle_,
+        fallbackIndexComparator.getComparatorType().getValue(), reservedBytes,
+        overwriteKey));
+  }
+
+  /**
+   * <p>Private WriteBatchWithIndex constructor which is used to construct
+   * WriteBatchWithIndex instances from C++ side. As the reference to this
+   * object is also managed from C++ side the handle will be disowned.</p>
+   *
+   * @param nativeHandle address of native instance.
+   */
+  WriteBatchWithIndex(final long nativeHandle) {
+    super(nativeHandle);
+    disOwnNativeHandle();
   }
 
   /**
@@ -100,6 +113,12 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
    * Provides Read-Your-Own-Writes like functionality by
    * creating a new Iterator that will use {@link org.rocksdb.WBWIRocksIterator}
    * as a delta and baseIterator as a base
+   *
+   * Updating write batch with the current key of the iterator is not safe.
+   * We strongly recommand users not to do it. It will invalidate the current
+   * key() and value() of the iterator. This invalidation happens even before
+   * the write batch update finishes. The state may recover after Next() is
+   * called.
    *
    * @param columnFamilyHandle The column family to iterate over
    * @param baseIterator The base iterator,
@@ -144,6 +163,9 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
    * @param options The database options to use
    * @param key The key to read the value for
    *
+   * @return a byte array storing the value associated with the input key if
+   *     any. null if it does not find the specified key.
+   *
    * @throws RocksDBException if the batch does not have enough data to resolve
    * Merge operations, MergeInProgress status may be returned.
    */
@@ -159,6 +181,9 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
    *
    * @param options The database options to use
    * @param key The key to read the value for
+   *
+   * @return a byte array storing the value associated with the input key if
+   *     any. null if it does not find the specified key.
    *
    * @throws RocksDBException if the batch does not have enough data to resolve
    * Merge operations, MergeInProgress status may be returned.
@@ -181,9 +206,13 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
    * (the keys in this batch do not yet belong to any snapshot and will be
    * fetched regardless).
    *
+   * @param db The Rocks database
    * @param columnFamilyHandle The column family to retrieve the value from
    * @param options The read options to use
    * @param key The key to read the value for
+   *
+   * @return a byte array storing the value associated with the input key if
+   *     any. null if it does not find the specified key.
    *
    * @throws RocksDBException if the value for the key cannot be read
    */
@@ -207,8 +236,12 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
    * (the keys in this batch do not yet belong to any snapshot and will be
    * fetched regardless).
    *
+   * @param db The Rocks database
    * @param options The read options to use
    * @param key The key to read the value for
+   *
+   * @return a byte array storing the value associated with the input key if
+   *     any. null if it does not find the specified key.
    *
    * @throws RocksDBException if the value for the key cannot be read
    */
@@ -230,20 +263,35 @@ public class WriteBatchWithIndex extends AbstractWriteBatch {
   @Override final native void merge(final long handle, final byte[] key,
       final int keyLen, final byte[] value, final int valueLen,
       final long cfHandle);
-  @Override final native void remove(final long handle, final byte[] key,
-      final int keyLen);
-  @Override final native void remove(final long handle, final byte[] key,
-      final int keyLen, final long cfHandle);
+  @Override final native void delete(final long handle, final byte[] key,
+      final int keyLen) throws RocksDBException;
+  @Override final native void delete(final long handle, final byte[] key,
+      final int keyLen, final long cfHandle) throws RocksDBException;
+  @Override final native void singleDelete(final long handle, final byte[] key,
+      final int keyLen) throws RocksDBException;
+  @Override final native void singleDelete(final long handle, final byte[] key,
+      final int keyLen, final long cfHandle) throws RocksDBException;
+  @Override
+  final native void deleteRange(final long handle, final byte[] beginKey, final int beginKeyLen,
+      final byte[] endKey, final int endKeyLen);
+  @Override
+  final native void deleteRange(final long handle, final byte[] beginKey, final int beginKeyLen,
+      final byte[] endKey, final int endKeyLen, final long cfHandle);
   @Override final native void putLogData(final long handle, final byte[] blob,
-      final int blobLen);
+      final int blobLen) throws RocksDBException;
   @Override final native void clear0(final long handle);
   @Override final native void setSavePoint0(final long handle);
   @Override final native void rollbackToSavePoint0(final long handle);
+  @Override final native void popSavePoint(final long handle) throws RocksDBException;
+  @Override final native void setMaxBytes(final long nativeHandle,
+      final long maxBytes);
+  @Override final native WriteBatch getWriteBatch(final long handle);
 
   private native static long newWriteBatchWithIndex();
   private native static long newWriteBatchWithIndex(final boolean overwriteKey);
   private native static long newWriteBatchWithIndex(
-      final long fallbackIndexComparatorHandle, final int reservedBytes,
+      final long fallbackIndexComparatorHandle,
+      final byte comparatorType, final int reservedBytes,
       final boolean overwriteKey);
   private native long iterator0(final long handle);
   private native long iterator1(final long handle, final long cfHandle);

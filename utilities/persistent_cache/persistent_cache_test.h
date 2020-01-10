@@ -1,7 +1,7 @@
 //  Copyright (c) 2013, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 //
 // Copyright (c) 2011 The LevelDB Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style license that can be
@@ -21,6 +21,7 @@
 #include "db/db_test_util.h"
 #include "rocksdb/cache.h"
 #include "table/block_builder.h"
+#include "port/port.h"
 #include "util/arena.h"
 #include "util/testharness.h"
 #include "utilities/persistent_cache/volatile_tier_impl.h"
@@ -50,17 +51,17 @@ class PersistentCacheTierTest : public testing::Test {
 
   // create threaded workload
   template <class T>
-  std::list<std::thread> SpawnThreads(const size_t n, const T& fn) {
-    std::list<std::thread> threads;
+  std::list<port::Thread> SpawnThreads(const size_t n, const T& fn) {
+    std::list<port::Thread> threads;
     for (size_t i = 0; i < n; i++) {
-      std::thread th(fn);
+      port::Thread th(fn);
       threads.push_back(std::move(th));
     }
     return threads;
   }
 
   // Wait for threads to join
-  void Join(std::list<std::thread>&& threads) {
+  void Join(std::list<port::Thread>&& threads) {
     for (auto& th : threads) {
       th.join();
     }
@@ -156,7 +157,7 @@ class PersistentCacheTierTest : public testing::Test {
       memset(edata, '0' + (i % 10), sizeof(edata));
       auto k = prefix + PaddedNumber(i, /*count=*/8);
       Slice key(k);
-      unique_ptr<char[]> block;
+      std::unique_ptr<char[]> block;
       size_t block_size;
 
       if (eviction_enabled) {
@@ -209,7 +210,7 @@ class PersistentCacheTierTest : public testing::Test {
   }
 
   const std::string path_;
-  shared_ptr<Logger> log_;
+  std::shared_ptr<Logger> log_;
   std::shared_ptr<PersistentCacheTier> cache_;
   std::atomic<size_t> key_{0};
   size_t max_keys_ = 0;
@@ -232,8 +233,8 @@ class PersistentCacheDBTest : public DBTestBase {
 
   // insert data to table
   void Insert(const Options& options,
-              const BlockBasedTableOptions& table_options, const int num_iter,
-              std::vector<std::string>* values) {
+              const BlockBasedTableOptions& /*table_options*/,
+              const int num_iter, std::vector<std::string>* values) {
     CreateAndReopenWithCF({"pikachu"}, options);
     // default column family doesn't have block cache
     Options no_block_cache_opts;

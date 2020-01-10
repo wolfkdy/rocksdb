@@ -1,7 +1,7 @@
 //  Copyright (c) 2011-present, Facebook, Inc.  All rights reserved.
-//  This source code is licensed under the BSD-style license found in the
-//  LICENSE file in the root directory of this source tree. An additional grant
-//  of patent rights can be found in the PATENTS file in the same directory.
+//  This source code is licensed under both the GPLv2 (found in the
+//  COPYING file in the root directory) and Apache 2.0 License
+//  (found in the LICENSE.Apache file in the root directory).
 
 #include <string>
 #include "db/version_edit.h"
@@ -63,8 +63,8 @@ class VersionBuilderTest : public testing::Test {
     f->fd = FileDescriptor(file_number, path_id, file_size);
     f->smallest = GetInternalKey(smallest, smallest_seq);
     f->largest = GetInternalKey(largest, largest_seq);
-    f->smallest_seqno = smallest_seqno;
-    f->largest_seqno = largest_seqno;
+    f->fd.smallest_seqno = smallest_seqno;
+    f->fd.largest_seqno = largest_seqno;
     f->compensated_file_size = file_size;
     f->refs = 0;
     f->num_entries = num_entries;
@@ -296,84 +296,6 @@ TEST_F(VersionBuilderTest, EstimatedActiveKeys) {
   ASSERT_EQ(vstorage_.GetEstimatedActiveKeys(),
             (kEntriesPerFile - 2 * kDeletionsPerFile) * kNumFiles);
 }
-
-
-// split-feature: support split DB
-// IKeyRangeChecker is used to check if records or key ranges belong to db
-class TestKeyRangeChecker : public IKeyRangeChecker {
-public:
-
-    bool static DoesKeyBelongToChunk(
-          const rocksdb::Slice& key,      // Cannot be empty
-          const rocksdb::Slice& keyLow,   // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& keyHigh) {// Can be empty which represents maximum value of the value space.
-      return (keyLow.compare(key) <= 0) &&
-             (keyHigh.empty() || (keyHigh.compare(key) > 0));
-    }
-    bool static DoesKeyLowBelongToRange(
-          const rocksdb::Slice& low,      // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& keyLow,   // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& keyHigh) {// Can be empty which represents maximum value of the value space.
-      return (keyLow.empty() || ((!low.empty()) && (keyLow.compare(low) <= 0))) &&
-             (keyHigh.empty() || low.empty() || (keyHigh.compare(low) > 0));
-    }
-    bool static DoesKeyHighBelongToRange(
-          const rocksdb::Slice& high,     // Can be empty which represents maximum value of the value space.
-          const rocksdb::Slice& keyLow,   // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& keyHigh) {// Can be empty which represents maximum value of the value space.
-      return (keyLow.empty() || high.empty() || (keyLow.compare(high) <= 0)) &&
-             (keyHigh.empty() || ((!high.empty()) && (keyHigh.compare(high) > 0)));
-    }
-    bool static DoesKeyHighLessThanKeyLow(
-          const rocksdb::Slice& high,     // Can be empty which represents maximum value of the value space.
-          const rocksdb::Slice& low) {    // Can be empty which represents minimum value of the value space.
-      return ((!high.empty()) && (!low.empty()) && (high.compare(low) < 0));
-    }
-    bool static DoesKeyLowGreaterThanOrEqualToKeyHigh(
-          const rocksdb::Slice& low,      // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& high) {   // Can be empty which represents maximum value of the value space.
-      return ((!low.empty()) && (!high.empty()) && (low.compare(high) >= 0));
-    }
-
-    bool DoesRecordBelongToChunk(
-          const rocksdb::Slice& key,      // Cannot be empty
-          const rocksdb::Slice& value) const{
-      return DoesKeyBelongToChunk(key, Slice(key_low_), Slice(key_high_));
-    }
-
-    // Return true if whole or part of the file with a range [keyLow,keyHigh] belongs to
-    // the checker's range [key_low_,key_high_). Otherwise, return false.
-    KeyRangeCheckResult DoesKeyRangeBelongToChunk(
-          const rocksdb::Slice& keyLow,         // Can be empty which represents minimum value of the value space.
-          const rocksdb::Slice& keyHigh) const{ // Can be empty which represents maximum value of the value space.
-      Slice key_low(key_low_);
-      Slice key_high(key_high_);
-      bool flag1, flag2;
-
-      flag1 = DoesKeyLowBelongToRange(keyLow, key_low, key_high);
-      flag2 = DoesKeyHighBelongToRange(keyHigh, key_low, key_high);
-      if (flag1 && flag2) {
-        return KeyRangeCheckResult::RangeContained;
-      }
-      else if (flag1 || flag2) {
-        return KeyRangeCheckResult::RangeOverlap;
-      }
-      else if (DoesKeyHighLessThanKeyLow(keyHigh, key_low)) {
-        return KeyRangeCheckResult::RangeSeparated;
-      }
-      else if (DoesKeyLowGreaterThanOrEqualToKeyHigh(keyLow, key_high)) {
-        return KeyRangeCheckResult::RangeSeparated;
-      }
-      else {
-        return KeyRangeCheckResult::RangeOverlap;
-      }
-    }
-    virtual ~TestKeyRangeChecker() {}
-private:
-    std::string    key_low_;
-    std::string    key_high_;
-
-};
 
 }  // namespace rocksdb
 
