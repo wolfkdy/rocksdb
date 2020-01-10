@@ -131,7 +131,13 @@ Status DBImpl::FlushMemTableToOutputFile(
       GetDataDir(cfd, 0U),
       GetCompressionFlush(*cfd->ioptions(), mutable_cf_options), stats_,
       &event_logger_, mutable_cf_options.report_bg_io_stats,
-      true /* sync_output_directory */, true /* write_manifest */);
+      true /* sync_output_directory */, true /* write_manifest */,
+      &write_thread_, &change_streams_
+#ifdef USE_TIMESTAMPS
+      ,
+      pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+          );
 
   FileMetaData file_meta;
 
@@ -299,6 +305,7 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     all_mutable_cf_options.emplace_back(*cfd->GetLatestMutableCFOptions());
     const MutableCFOptions& mutable_cf_options = all_mutable_cf_options.back();
     const uint64_t* max_memtable_id = &(bg_flush_args[i].max_memtable_id_);
+
     jobs.emplace_back(
         dbname_, cfds[i], immutable_db_options_, mutable_cf_options,
         max_memtable_id, env_options_for_compaction_, versions_.get(), &mutex_,
@@ -306,7 +313,13 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         snapshot_checker, job_context, log_buffer, directories_.GetDbDir(),
         data_dir, GetCompressionFlush(*cfd->ioptions(), mutable_cf_options),
         stats_, &event_logger_, mutable_cf_options.report_bg_io_stats,
-        false /* sync_output_directory */, false /* write_manifest */);
+        false /* sync_output_directory */, false /* write_manifest */,
+        &write_thread_, &change_streams_
+#ifdef USE_TIMESTAMPS
+        ,
+        pin_timestamp_.load()
+#endif
+            );
     jobs.back().PickMemTable();
   }
 
@@ -439,7 +452,8 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     s = InstallMemtableAtomicFlushResults(
         nullptr /* imm_lists */, tmp_cfds, mutable_cf_options_list, mems_list,
         versions_.get(), &mutex_, tmp_file_meta,
-        &job_context->memtables_to_free, directories_.GetDbDir(), log_buffer);
+        &job_context->memtables_to_free, directories_.GetDbDir(), log_buffer,
+        &write_thread_, &change_streams_);
   }
 
   if (s.ok() || s.IsShutdownInProgress()) {
@@ -928,7 +942,7 @@ Status DBImpl::CompactFilesImpl(
       snapshot_checker, table_cache_, &event_logger_,
       c->mutable_cf_options()->paranoid_file_checks,
       c->mutable_cf_options()->report_bg_io_stats, dbname_,
-      nullptr);  // Here we pass a nullptr for CompactionJobStats because
+      nullptr,   // Here we pass a nullptr for CompactionJobStats because
                  // CompactFiles does not trigger OnCompactionCompleted(),
                  // which is the only place where CompactionJobStats is
                  // returned.  The idea of not triggering OnCompationCompleted()
@@ -941,6 +955,12 @@ Status DBImpl::CompactFilesImpl(
                  // support for CompactFiles, we should have CompactFiles API
                  // pass a pointer of CompactionJobStats as the out-value
                  // instead of using EventListener.
+      &write_thread_,
+      &change_streams_
+#ifdef USE_TIMESTAMPS
+      ,pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+  );
 
   // Creating a compaction influences the compaction score because the score
   // takes running compactions into account (by skipping files that are already
@@ -1227,8 +1247,25 @@ Status DBImpl::ReFitLevel(ColumnFamilyData* cfd, int level, int target_level) {
                     "[%s] Apply version edit:\n%s", cfd->GetName().c_str(),
                     edit.DebugString().data());
 
-    status = versions_->LogAndApply(cfd, mutable_cf_options, &edit, &mutex_,
+    {
+      WriteThread::Writer w;
+      // NOTE(deyukong): a write group may have been stalled there and waiting
+      // for compaction bg_cv_, we should set write_thread undelayable to avoid
+      // deadlock
+      bool has_change_stream = change_streams_.size() > 0;
+      if (has_change_stream) {
+        write_thread_.EnterUnbatchedUndelayable(&w, &mutex_);
+      }
+      status = versions_->LogAndApply(cfd, mutable_cf_options, &edit, &mutex_,
                                     directories_.GetDbDir());
+      if (status.ok()) {
+        std::for_each(change_streams_.begin(), change_streams_.end(),
+          [&](CSP& v) { v.second->onNewVersion(edit); });
+      }
+      if (has_change_stream) {
+        write_thread_.ExitUnbatchedUndelayable(&w);
+      }
+    }
     InstallSuperVersionAndScheduleWork(cfd, &sv_context, mutable_cf_options);
 
     ROCKS_LOG_DEBUG(immutable_db_options_.info_log, "[%s] LogAndApply: %s\n",
@@ -1763,6 +1800,8 @@ void DBImpl::MaybeScheduleFlushOrCompaction() {
     // Compaction may introduce data race to DB open
     return;
   }
+  // TODO(xxxxxxxx): make sure open_read_replica really dont comes here
+  assert(!initial_db_options_.open_read_replica);
   if (bg_work_paused_ > 0) {
     // we paused the background work
     return;
@@ -2420,9 +2459,24 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     for (const auto& f : *c->inputs(0)) {
       c->edit()->DeleteFile(c->level(), f->fd.GetNumber());
     }
-    status = versions_->LogAndApply(c->column_family_data(),
+    {
+      WriteThread::Writer w;
+      bool has_change_stream = change_streams_.size() > 0;
+      if (has_change_stream) {
+        write_thread_.EnterUnbatchedUndelayable(&w, &mutex_);
+      }
+      status = versions_->LogAndApply(c->column_family_data(),
                                     *c->mutable_cf_options(), c->edit(),
                                     &mutex_, directories_.GetDbDir());
+
+      if (status.ok()) {
+        std::for_each(change_streams_.begin(), change_streams_.end(),
+          [&](CSP& v) { v.second->onNewVersion(*(c->edit())); });
+      }
+      if (has_change_stream) {
+        write_thread_.ExitUnbatchedUndelayable(&w);
+      }
+    }
     InstallSuperVersionAndScheduleWork(
         c->column_family_data(), &job_context->superversion_contexts[0],
         *c->mutable_cf_options(), FlushReason::kAutoCompaction);
@@ -2468,10 +2522,23 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         moved_bytes += f->fd.GetFileSize();
       }
     }
-
-    status = versions_->LogAndApply(c->column_family_data(),
-                                    *c->mutable_cf_options(), c->edit(),
-                                    &mutex_, directories_.GetDbDir());
+    {
+      WriteThread::Writer w;
+      bool has_change_stream = change_streams_.size() > 0;
+      if (has_change_stream) {
+        write_thread_.EnterUnbatchedUndelayable(&w, &mutex_);
+      }
+      status = versions_->LogAndApply(c->column_family_data(),
+                                      *c->mutable_cf_options(), c->edit(),
+                                      &mutex_, directories_.GetDbDir());
+      if (status.ok()) {
+        std::for_each(change_streams_.begin(), change_streams_.end(),
+          [&](CSP& v) { v.second->onNewVersion(*(c->edit())); });
+      }
+      if (has_change_stream) {
+        write_thread_.ExitUnbatchedUndelayable(&w);
+      }
+    }
     // Use latest MutableCFOptions
     InstallSuperVersionAndScheduleWork(
         c->column_family_data(), &job_context->superversion_contexts[0],
@@ -2540,7 +2607,13 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         snapshot_checker, table_cache_, &event_logger_,
         c->mutable_cf_options()->paranoid_file_checks,
         c->mutable_cf_options()->report_bg_io_stats, dbname_,
-        &compaction_job_stats);
+        &compaction_job_stats,
+        &write_thread_,
+        &change_streams_
+#ifdef USE_TIMESTAMPS
+        ,pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+    );
     compaction_job.Prepare();
 
     NotifyOnCompactionBegin(c->column_family_data(), c.get(), status,

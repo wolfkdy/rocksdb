@@ -218,6 +218,8 @@ void MutableCFOptions::Dump(Logger* log) const {
                  compaction_options_fifo.ttl);
   ROCKS_LOG_INFO(log, "compaction_options_fifo.allow_compaction : %d",
                  compaction_options_fifo.allow_compaction);
+  ROCKS_LOG_INFO(log, "compaction_options_fifo.exclude_prefix : %s",
+               compaction_options_fifo.exclude_prefix.c_str());
 }
 
 MutableCFOptions::MutableCFOptions(const Options& options)

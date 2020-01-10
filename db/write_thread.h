@@ -331,6 +331,18 @@ class WriteThread {
   // writers.
   void ExitUnbatched(Writer* w);
 
+  // Waits for all preceding writers (unlocking mu while waiting), then
+  // registers w as the currently proceeding writer.
+  // It will set the undelayable_ param for the previous stalled group
+  // exit as soon as possible.
+  //
+  // Writer* w:              A Writer not eligible for batching
+  // InstrumentedMutex* mu:  The db mutex, to unlock while waiting
+  // REQUIRES: db mutex held
+  void EnterUnbatchedUndelayable(Writer* w, InstrumentedMutex* mu);
+
+  void ExitUnbatchedUndelayable(Writer* w);
+
   // Wait for all parallel memtable writers to finish, in case pipelined
   // write is enabled.
   void WaitForMemTableWriters();
@@ -348,6 +360,10 @@ class WriteThread {
 
   // Remove the dummy writer and wake up waiting writers
   void EndWriteStall();
+
+  bool Delayable() {
+    return undelayable_cnt_.load(std::memory_order_relaxed) == 0;
+  }
 
  private:
   // See AwaitState.
@@ -376,6 +392,8 @@ class WriteThread {
   // at the tail of the writer queue by the leader, so newer writers can just
   // check for this and bail
   Writer write_stall_dummy_;
+
+  std::atomic<uint64_t> undelayable_cnt_;
 
   // Mutex and condvar for writers to block on a write stall. During a write
   // stall, writers with no_slowdown set to false will wait on this rather

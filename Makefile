@@ -9,10 +9,28 @@
 BASH_EXISTS := $(shell which bash)
 SHELL := $(shell which bash)
 
+#USE_TIMESTAMPS := 1
+ifdef USE_TIMESTAMPS
+CFLAGS += -DUSE_TIMESTAMPS
+CXXFLAGS += -DUSE_TIMESTAMPS
+endif
+
 CLEAN_FILES = # deliberately empty, so we can append below.
 CFLAGS += ${EXTRA_CFLAGS}
 CXXFLAGS += ${EXTRA_CXXFLAGS}
+ifdef USE_STREAM_UT
+CFLAGS += -DSTREAM_UT
+CXXFLAGS += -DSTREAM_UT
+endif
+ifdef USE_PILE_UT
+CFLAGS += -DPILE_UT
+CXXFLAGS += -DPILE_UT
+endif
+
 LDFLAGS += $(EXTRA_LDFLAGS)
+LDFLAGS += -lftdsclient
+LDFLAGS += -lilayerftds
+LDFLAGS += -O2
 MACHINE ?= $(shell uname -m)
 ARFLAGS = ${EXTRA_ARFLAGS} rs
 STRIPFLAGS = -S -x
@@ -308,7 +326,7 @@ endif
 default: all
 
 WARNING_FLAGS = -W -Wextra -Wall -Wsign-compare -Wshadow \
-  -Wunused-parameter
+  -Wno-unused-parameter
 
 ifeq ($(PLATFORM), OS_OPENBSD)
 	WARNING_FLAGS += -Wno-unused-lambda-capture
@@ -349,10 +367,11 @@ ifeq ($(NO_THREEWAY_CRC32C), 1)
 	CXXFLAGS += -DNO_THREEWAY_CRC32C
 endif
 
-CFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CCFLAGS) $(OPT)
-CXXFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers
+CFLAGS += $(WARNING_FLAGS) -I. -I./include -I/opt/stream/libstream/include/stream $(PLATFORM_CCFLAGS) $(OPT)
+CXXFLAGS += $(WARNING_FLAGS) -I. -I./include -I/opt/stream/libstream/include/stream $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers
 
 LDFLAGS += $(PLATFORM_LDFLAGS)
+LDFLAGS	+=	-L/opt/stream/libstream/lib -lstream -lsecurec
 
 # If NO_UPDATE_BUILD_VERSION is set we don't update util/build_version.cc, but
 # the file needs to already exist or else the build will fail
@@ -491,10 +510,6 @@ TESTS = \
 	skiplist_test \
 	write_buffer_manager_test \
 	stringappend_test \
-	cassandra_format_test \
-	cassandra_functional_test \
-	cassandra_row_merge_test \
-	cassandra_serialize_test \
 	ttl_test \
 	date_tiered_test \
 	backupable_db_test \
@@ -533,6 +548,7 @@ TESTS = \
 	column_aware_encoding_test \
 	compact_files_test \
 	optimistic_transaction_test \
+	totransaction_test \
 	write_callback_test \
 	heap_test \
 	compact_on_deletion_collector_test \
@@ -547,14 +563,14 @@ TESTS = \
 	object_registry_test \
 	repair_test \
 	env_timed_test \
-	write_prepared_transaction_test \
-	write_unprepared_transaction_test \
 	db_universal_compaction_test \
 	trace_analyzer_test \
 	repeatable_thread_test \
 	range_tombstone_fragmenter_test \
 	range_del_aggregator_test \
 	sst_file_reader_test \
+	change_stream_test \
+	change_stream_event_test \
 
 PARALLEL_TEST = \
 	backupable_db_test \
@@ -572,8 +588,6 @@ PARALLEL_TEST = \
 	persistent_cache_test \
 	table_test \
 	transaction_test \
-	write_prepared_transaction_test \
-	write_unprepared_transaction_test \
 
 # options_settable_test doesn't pass with UBSAN as we use hack in the test
 ifdef COMPILE_WITH_UBSAN
@@ -1141,18 +1155,6 @@ option_change_migration_test: utilities/option_change_migration/option_change_mi
 stringappend_test: utilities/merge_operators/string_append/stringappend_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-cassandra_format_test: utilities/cassandra/cassandra_format_test.o utilities/cassandra/test_utils.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
-cassandra_functional_test: utilities/cassandra/cassandra_functional_test.o utilities/cassandra/test_utils.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
-cassandra_row_merge_test: utilities/cassandra/cassandra_row_merge_test.o utilities/cassandra/test_utils.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
-cassandra_serialize_test: utilities/cassandra/cassandra_serialize_test.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
 redis_test: utilities/redis/redis_lists_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
@@ -1455,10 +1457,10 @@ obsolete_files_test: db/obsolete_files_test.o $(LIBOBJECTS) $(TESTHARNESS)
 geodb_test: utilities/geodb/geodb_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-rocksdb_dump: tools/dump/rocksdb_dump.o $(LIBOBJECTS)
+rocksdb_dump: tools/dump/rocksdb_dump.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-rocksdb_undump: tools/dump/rocksdb_undump.o $(LIBOBJECTS)
+rocksdb_undump: tools/dump/rocksdb_undump.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
 cuckoo_table_builder_test: table/cuckoo_table_builder_test.o $(LIBOBJECTS) $(TESTHARNESS)
@@ -1509,6 +1511,8 @@ column_aware_encoding_test: utilities/column_aware_encoding_test.o $(TESTHARNESS
 optimistic_transaction_test: utilities/transactions/optimistic_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
+totransaction_test: utilities/transactions/totransaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
+	$(AM_LINK)
 mock_env_test : env/mock_env_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
@@ -1533,16 +1537,10 @@ heap_test: util/heap_test.o $(GTEST)
 transaction_test: utilities/transactions/transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-write_prepared_transaction_test: utilities/transactions/write_prepared_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
+sst_dump: tools/sst_dump.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-write_unprepared_transaction_test: utilities/transactions/write_unprepared_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
-sst_dump: tools/sst_dump.o $(LIBOBJECTS)
-	$(AM_LINK)
-
-blob_dump: tools/blob_dump.o $(LIBOBJECTS)
+blob_dump: tools/blob_dump.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
 column_aware_encoding_exp: utilities/column_aware_encoding_exp.o $(EXPOBJECTS)
@@ -1554,7 +1552,7 @@ repair_test: db/repair_test.o db/db_test_util.o $(LIBOBJECTS) $(TESTHARNESS)
 ldb_cmd_test: tools/ldb_cmd_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
-ldb: tools/ldb.o $(LIBOBJECTS)
+ldb: tools/ldb.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
 iostats_context_test: monitoring/iostats_context_test.o $(LIBOBJECTS) $(TESTHARNESS)
@@ -1588,6 +1586,12 @@ range_tombstone_fragmenter_test: db/range_tombstone_fragmenter_test.o db/db_test
 	$(AM_LINK)
 
 sst_file_reader_test: table/sst_file_reader_test.o $(LIBOBJECTS) $(TESTHARNESS)
+	$(AM_LINK)
+
+change_stream_test: db/change_stream_impl_test.o db/db_test_util.o $(LIBOBJECTS) $(TESTHARNESS)
+	$(AM_LINK)
+
+change_stream_event_test: db/change_stream_apply_event_test.o db/db_test_util.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
 #-------------------------------------------------
@@ -1706,64 +1710,32 @@ ifeq ($(PLATFORM), OS_OPENBSD)
 endif
 
 libz.a:
-	-rm -rf zlib-$(ZLIB_VER)
-	curl -O -L ${ZLIB_DOWNLOAD_BASE}/zlib-$(ZLIB_VER).tar.gz
-	ZLIB_SHA256_ACTUAL=`$(SHA256_CMD) zlib-$(ZLIB_VER).tar.gz | cut -d ' ' -f 1`; \
-	if [ "$(ZLIB_SHA256)" != "$$ZLIB_SHA256_ACTUAL" ]; then \
-		echo zlib-$(ZLIB_VER).tar.gz checksum mismatch, expected=\"$(ZLIB_SHA256)\" actual=\"$$ZLIB_SHA256_ACTUAL\"; \
-		exit 1; \
-	fi
+
 	tar xvzf zlib-$(ZLIB_VER).tar.gz
 	cd zlib-$(ZLIB_VER) && CFLAGS='-fPIC ${EXTRA_CFLAGS}' LDFLAGS='${EXTRA_LDFLAGS}' ./configure --static && $(MAKE)
 	cp zlib-$(ZLIB_VER)/libz.a .
 
 libbz2.a:
-	-rm -rf bzip2-$(BZIP2_VER)
-	curl -O -L ${BZIP2_DOWNLOAD_BASE}/$(BZIP2_VER)/bzip2-$(BZIP2_VER).tar.gz
-	BZIP2_SHA256_ACTUAL=`$(SHA256_CMD) bzip2-$(BZIP2_VER).tar.gz | cut -d ' ' -f 1`; \
-	if [ "$(BZIP2_SHA256)" != "$$BZIP2_SHA256_ACTUAL" ]; then \
-		echo bzip2-$(BZIP2_VER).tar.gz checksum mismatch, expected=\"$(BZIP2_SHA256)\" actual=\"$$BZIP2_SHA256_ACTUAL\"; \
-		exit 1; \
-	fi
+
 	tar xvzf bzip2-$(BZIP2_VER).tar.gz
 	cd bzip2-$(BZIP2_VER) && $(MAKE) CFLAGS='-fPIC -O2 -g -D_FILE_OFFSET_BITS=64 ${EXTRA_CFLAGS}' AR='ar ${EXTRA_ARFLAGS}'
 	cp bzip2-$(BZIP2_VER)/libbz2.a .
 
 libsnappy.a:
-	-rm -rf snappy-$(SNAPPY_VER)
-	curl -O -L ${CURL_SSL_OPTS} ${SNAPPY_DOWNLOAD_BASE}/$(SNAPPY_VER)/snappy-$(SNAPPY_VER).tar.gz
-	SNAPPY_SHA256_ACTUAL=`$(SHA256_CMD) snappy-$(SNAPPY_VER).tar.gz | cut -d ' ' -f 1`; \
-	if [ "$(SNAPPY_SHA256)" != "$$SNAPPY_SHA256_ACTUAL" ]; then \
-		echo snappy-$(SNAPPY_VER).tar.gz checksum mismatch, expected=\"$(SNAPPY_SHA256)\" actual=\"$$SNAPPY_SHA256_ACTUAL\"; \
-		exit 1; \
-	fi
+
 	tar xvzf snappy-$(SNAPPY_VER).tar.gz
 	cd snappy-$(SNAPPY_VER) && CFLAGS='${EXTRA_CFLAGS}' CXXFLAGS='${EXTRA_CXXFLAGS}' LDFLAGS='${EXTRA_LDFLAGS}' ./configure --with-pic --enable-static --disable-shared
 	cd snappy-$(SNAPPY_VER) && $(MAKE) ${SNAPPY_MAKE_TARGET}
 	cp snappy-$(SNAPPY_VER)/.libs/libsnappy.a .
 
 liblz4.a:
-	-rm -rf lz4-$(LZ4_VER)
-	curl -O -L ${CURL_SSL_OPTS} ${LZ4_DOWNLOAD_BASE}/v$(LZ4_VER).tar.gz
-	mv v$(LZ4_VER).tar.gz lz4-$(LZ4_VER).tar.gz
-	LZ4_SHA256_ACTUAL=`$(SHA256_CMD) lz4-$(LZ4_VER).tar.gz | cut -d ' ' -f 1`; \
-	if [ "$(LZ4_SHA256)" != "$$LZ4_SHA256_ACTUAL" ]; then \
-		echo lz4-$(LZ4_VER).tar.gz checksum mismatch, expected=\"$(LZ4_SHA256)\" actual=\"$$LZ4_SHA256_ACTUAL\"; \
-		exit 1; \
-	fi
+
 	tar xvzf lz4-$(LZ4_VER).tar.gz
 	cd lz4-$(LZ4_VER)/lib && $(MAKE) CFLAGS='-fPIC -O2 ${EXTRA_CFLAGS}' all
 	cp lz4-$(LZ4_VER)/lib/liblz4.a .
 
 libzstd.a:
-	-rm -rf zstd-$(ZSTD_VER)
-	curl -O -L ${CURL_SSL_OPTS} ${ZSTD_DOWNLOAD_BASE}/v$(ZSTD_VER).tar.gz
-	mv v$(ZSTD_VER).tar.gz zstd-$(ZSTD_VER).tar.gz
-	ZSTD_SHA256_ACTUAL=`$(SHA256_CMD) zstd-$(ZSTD_VER).tar.gz | cut -d ' ' -f 1`; \
-	if [ "$(ZSTD_SHA256)" != "$$ZSTD_SHA256_ACTUAL" ]; then \
-		echo zstd-$(ZSTD_VER).tar.gz checksum mismatch, expected=\"$(ZSTD_SHA256)\" actual=\"$$ZSTD_SHA256_ACTUAL\"; \
-		exit 1; \
-	fi
+
 	tar xvzf zstd-$(ZSTD_VER).tar.gz
 	cd zstd-$(ZSTD_VER)/lib && DESTDIR=. PREFIX= $(MAKE) CFLAGS='-fPIC -O2 ${EXTRA_CFLAGS}' install
 	cp zstd-$(ZSTD_VER)/lib/libzstd.a .
@@ -1804,7 +1776,8 @@ rocksdbjavastatic: $(java_static_all_libobjects)
 	$(CXX) $(CXXFLAGS) -I./java/. $(JAVA_INCLUDE) -shared -fPIC \
 	  -o ./java/target/$(ROCKSDBJNILIB) $(JNI_NATIVE_SOURCES) \
 	  $(java_static_all_libobjects) $(COVERAGEFLAGS) \
-	  $(JAVA_COMPRESSIONS) $(JAVA_STATIC_LDFLAGS)
+	  $(JAVA_COMPRESSIONS) $(JAVA_STATIC_LDFLAGS)  \
+	  /opt/stream/libstream/lib/libstream.so
 	cd java/target;if [ "$(DEBUG_LEVEL)" == "0" ]; then \
 		strip $(STRIPFLAGS) $(ROCKSDBJNILIB); \
 	fi

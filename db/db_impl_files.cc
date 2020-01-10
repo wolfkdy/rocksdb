@@ -54,6 +54,9 @@ void DBImpl::FindObsoleteFiles(JobContext* job_context, bool force,
   if (disable_delete_obsolete_files_ > 0) {
     return;
   }
+  if (initial_db_options_.open_read_replica) {
+    return;
+  }
 
   bool doing_the_full_scan = false;
 
@@ -255,10 +258,23 @@ bool CompareCandidateFile(const JobContext::CandidateFileInfo& first,
 }
 };  // namespace
 
+void DBImpl::CheckDBLockLeaseOrAbort() {
+  if (!db_lock_) {
+    return;
+  }
+  auto s = env_->CheckLease(db_lock_->GetFileName());
+  if (!s.ok()) {
+    ROCKS_LOG_FATAL(immutable_db_options_.info_log,
+                    "check dblock lease failed:%s", s.ToString().c_str());
+    abort();
+  }
+}
+
 // Delete obsolete files and log status and information of file deletion
 void DBImpl::DeleteObsoleteFileImpl(int job_id, const std::string& fname,
                                     const std::string& path_to_sync,
                                     FileType type, uint64_t number) {
+  CheckDBLockLeaseOrAbort();
   Status file_deletion_status;
   if (type == kTableFile) {
     file_deletion_status =
@@ -329,6 +345,16 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
     file.DeleteMetadata();
   }
 
+  for (auto& f : state.logs_to_free) { 
+    ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                   "PurgeObsoleteFiles begins to sync wal:%llu", f->get_log_number());
+    auto ss = f->file()->Sync(true);
+    if (!ss.ok()) {
+      ROCKS_LOG_ERROR(immutable_db_options_.info_log,
+                      "PurgeObsoleteFiles sync wal:%llu fail:%s", f->get_log_number(), ss.ToString().c_str());
+    }
+  }
+
   for (auto file_num : state.log_delete_files) {
     if (file_num > 0) {
       candidate_files.emplace_back(LogFileName(kDumbDbName, file_num),
@@ -382,6 +408,8 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
     }
   }
 
+  bool disable_sst_wal_del = initial_db_options_.disable_file_del_until > env_->NowMicros() / 1000;
+
   std::unordered_set<uint64_t> files_to_del;
   for (const auto& candidate_file : candidate_files) {
     const std::string& to_delete = candidate_file.file_name;
@@ -409,7 +437,7 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
         // If the second condition is not there, this makes
         // DontDeletePendingOutputs fail
         keep = (sst_live_map.find(number) != sst_live_map.end()) ||
-               number >= state.min_pending_output;
+               number >= state.min_pending_output || disable_sst_wal_del;
         if (!keep) {
           files_to_del.insert(number);
         }
@@ -477,6 +505,7 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
 #ifndef ROCKSDB_LITE
     if (type == kLogFile && (immutable_db_options_.wal_ttl_seconds > 0 ||
                              immutable_db_options_.wal_size_limit_mb > 0)) {
+      CheckDBLockLeaseOrAbort();
       wal_manager_.ArchiveWALFile(fname, number);
       continue;
     }
@@ -521,6 +550,7 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
       ROCKS_LOG_INFO(immutable_db_options_.info_log,
                      "[JOB %d] Delete info log file %s\n", state.job_id,
                      full_path_to_delete.c_str());
+      CheckDBLockLeaseOrAbort();
       Status s = env_->DeleteFile(full_path_to_delete);
       if (!s.ok()) {
         if (env_->FileExists(full_path_to_delete).IsNotFound()) {
@@ -539,7 +569,10 @@ void DBImpl::PurgeObsoleteFiles(JobContext& state, bool schedule_only) {
     }
   }
 #ifndef ROCKSDB_LITE
-  wal_manager_.PurgeObsoleteWALFiles();
+  if (!disable_sst_wal_del) {
+    CheckDBLockLeaseOrAbort();
+    wal_manager_.PurgeObsoleteWALFiles();
+  }
 #endif  // ROCKSDB_LITE
   LogFlush(immutable_db_options_.info_log);
   InstrumentedMutexLock l(&mutex_);

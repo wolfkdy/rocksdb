@@ -79,7 +79,8 @@ Status BuildTable(
     InternalStats* internal_stats, TableFileCreationReason reason,
     EventLogger* event_logger, int job_id, const Env::IOPriority io_priority,
     TableProperties* table_properties, int level, const uint64_t creation_time,
-    const uint64_t oldest_key_time, Env::WriteLifeTimeHint write_hint) {
+    const uint64_t oldest_key_time, Env::WriteLifeTimeHint write_hint,
+    uint64_t pin_ts) {
   assert((column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          column_family_name.empty());
@@ -142,7 +143,10 @@ Status BuildTable(
         iter, internal_comparator.user_comparator(), &merge, kMaxSequenceNumber,
         &snapshots, earliest_write_conflict_snapshot, snapshot_checker, env,
         ShouldReportDetailedTime(env, ioptions.statistics),
-        true /* internal key corruption is not ok */, range_del_agg.get());
+        true /* internal key corruption is not ok */,
+        range_del_agg.get() /* range_del_agg */, nullptr /* compaction */,
+        nullptr /* compaction_filter */, nullptr /* shutting_down */,
+        0 /* preserve_deletes_seqnum */, pin_ts);
     c_iter.SeekToFirst();
     for (; c_iter.Valid(); c_iter.Next()) {
       const Slice& key = c_iter.key();

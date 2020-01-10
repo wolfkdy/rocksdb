@@ -11,6 +11,8 @@
 #include "port/port.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
 #include "rocksdb/utilities/transaction_db.h"
+#include "rocksdb/utilities/totransaction_db.h"
+
 
 namespace rocksdb {
 
@@ -38,8 +40,8 @@ class RandomTransactionInserter {
   explicit RandomTransactionInserter(
       Random64* rand, const WriteOptions& write_options = WriteOptions(),
       const ReadOptions& read_options = ReadOptions(), uint64_t num_keys = 1000,
-      uint16_t num_sets = 3);
-
+      uint16_t num_sets = 3, int readpercent = 0, int deletepercent = 0, 
+      int putpercent = 100, int conflict_level_ = 0);
   ~RandomTransactionInserter();
 
   // Increment a key in each set using a Transaction on a TransactionDB.
@@ -50,6 +52,17 @@ class RandomTransactionInserter {
   bool TransactionDBInsert(
       TransactionDB* db,
       const TransactionOptions& txn_options = TransactionOptions());
+
+  // Increment a key in each set using a Transaction on a TOTransactionDB.
+  //
+  // Returns true if the transaction succeeded OR if any error encountered was
+  // expected (eg a write-conflict). Error status may be obtained by calling
+  // GetLastStatus();
+  bool TOTransactionDBInsert(
+      TOTransactionDB* db);
+  
+  bool TOTransactionDBWriteRandom(
+      std::vector<ColumnFamilyHandle*> handles, TOTransactionDB* db);	  
 
   // Increment a key in each set using a Transaction on an
   // OptimisticTransactionDB
@@ -73,6 +86,11 @@ class RandomTransactionInserter {
                       uint16_t set_i, uint64_t ikey, bool get_for_update,
                       uint64_t* int_value, std::string* full_key,
                       bool* unexpected_error);
+  
+  static Status DBGet(DB* db, TOTransaction* txn, ReadOptions& read_options,
+                      uint16_t set_i, uint64_t ikey, 
+                      uint64_t* int_value, std::string* full_key,
+                      bool* unexpected_error);
 
   // Returns OK if Invariant is true.
   static Status Verify(DB* db, uint16_t num_sets, uint64_t num_keys_per_set = 0,
@@ -93,6 +111,16 @@ class RandomTransactionInserter {
   // Returns the sum of user keys/values Put() to the DB.
   size_t GetBytesInserted() { return bytes_inserted_; }
 
+  size_t GetBytesRead() { return bytes_read_; }
+  
+  int64_t GetFoundCount() { return found_; }
+  
+  int64_t GetPutCount() { return puts_done_; }
+  
+  int64_t GetGetCount() { return gets_done_; }
+  
+  int64_t GetDeleteCount() { return deletes_done_; }
+
  private:
   // Input options
   Random64* rand_;
@@ -100,6 +128,11 @@ class RandomTransactionInserter {
   ReadOptions read_options_;
   const uint64_t num_keys_;
   const uint16_t num_sets_;
+  
+  const int readpercent_ ;
+  const int deletepercent_ ;
+  const int putpercent_ ;
+  const int conflict_level_;
 
   // Number of successful insert batches performed
   uint64_t success_count_ = 0;
@@ -109,16 +142,29 @@ class RandomTransactionInserter {
 
   size_t bytes_inserted_ = 0;
 
+  
+  size_t bytes_read_ = 0;
+
+  const int value_size_ = 1000;
+
+  int64_t found_ = 0;
+  int64_t gets_done_ = 0;
+  int64_t puts_done_ = 0;
+  int64_t deletes_done_ = 0;
+
   // Status returned by most recent insert operation
   Status last_status_;
 
   // optimization: re-use allocated transaction objects.
   Transaction* txn_ = nullptr;
+  TOTransaction* to_txn_ = nullptr;
   Transaction* optimistic_txn_ = nullptr;
 
   std::atomic<int> txn_id_;
 
   bool DoInsert(DB* db, Transaction* txn, bool is_optimistic);
+  bool DoInsert(DB* db, TOTransaction* txn);
+  bool DoWriteRandom(std::vector<ColumnFamilyHandle*> handles, TOTransaction* txn);
 };
 
 }  // namespace rocksdb

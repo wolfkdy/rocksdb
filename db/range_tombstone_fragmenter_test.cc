@@ -11,6 +11,21 @@
 
 namespace rocksdb {
 
+struct RangeTombstoneForTest : public RangeTombstone {
+ public:
+  RangeTombstoneForTest(Slice sk, Slice ek, SequenceNumber sn)
+#ifdef USE_TIMESTAMPS
+    :RangeTombstone(sk, ek, sn, 0)
+#else
+    :RangeTombstone(sk, ek, sn)
+#endif  // USE_TIMESTAMPS
+  {}
+
+  RangeTombstoneForTest()
+    :RangeTombstone() {
+  }
+};
+
 class RangeTombstoneFragmenterTest : public testing::Test {};
 
 namespace {
@@ -18,7 +33,7 @@ namespace {
 static auto bytewise_icmp = InternalKeyComparator(BytewiseComparator());
 
 std::unique_ptr<InternalIterator> MakeRangeDelIter(
-    const std::vector<RangeTombstone>& range_dels) {
+    const std::vector<RangeTombstoneForTest>& range_dels) {
   std::vector<std::string> keys, values;
   for (const auto& range_del : range_dels) {
     auto key_and_value = range_del.Serialize();
@@ -44,7 +59,7 @@ void CheckIterPosition(const RangeTombstone& tombstone,
 
 void VerifyFragmentedRangeDels(
     FragmentedRangeTombstoneIterator* iter,
-    const std::vector<RangeTombstone>& expected_tombstones) {
+    const std::vector<RangeTombstoneForTest>& expected_tombstones) {
   iter->SeekToFirst();
   for (size_t i = 0; i < expected_tombstones.size(); i++, iter->Next()) {
     ASSERT_TRUE(iter->Valid());
@@ -55,7 +70,7 @@ void VerifyFragmentedRangeDels(
 
 void VerifyVisibleTombstones(
     FragmentedRangeTombstoneIterator* iter,
-    const std::vector<RangeTombstone>& expected_tombstones) {
+    const std::vector<RangeTombstoneForTest>& expected_tombstones) {
   iter->SeekToTopFirst();
   for (size_t i = 0; i < expected_tombstones.size(); i++, iter->TopNext()) {
     ASSERT_TRUE(iter->Valid());
@@ -66,7 +81,7 @@ void VerifyVisibleTombstones(
 
 struct SeekTestCase {
   Slice seek_target;
-  RangeTombstone expected_position;
+  RangeTombstoneForTest expected_position;
   bool out_of_range;
 };
 

@@ -11,11 +11,11 @@
 #include <atomic>
 #include <deque>
 #include <limits>
+#include <memory>
 #include <set>
+#include <string>
 #include <utility>
 #include <vector>
-#include <string>
-#include <memory>
 
 #include "db/version_set.h"
 #include "options/db_options.h"
@@ -47,6 +47,11 @@ class WalManager {
 
   void PurgeObsoleteWALFiles();
 
+  // NOTE: sequence is both input and output
+  Status SetOldestWalSequenceNumber(SequenceNumber* sequence, bool round);
+
+  SequenceNumber GetOldestWalSeqNum();
+
   void ArchiveWALFile(const std::string& fname, uint64_t number);
 
   Status DeleteFile(const std::string& fname, uint64_t number);
@@ -60,6 +65,8 @@ class WalManager {
                             SequenceNumber* sequence) {
     return ReadFirstLine(fname, number, sequence);
   }
+
+  Status GetOldestOnDiskLsn(SequenceNumber* seq);
 
  private:
   Status GetSortedWalsOfType(const std::string& path, VectorLogPtr& log_files,
@@ -94,6 +101,8 @@ class WalManager {
   // obsolete files will be deleted every this seconds if ttl deletion is
   // enabled and archive size_limit is disabled.
   static const uint64_t kDefaultIntervalToDeleteObsoleteWAL = 600;
+  port::Mutex set_oldest_seq_mutux_;
+  std::atomic<uint64_t> oldest_wal_seq_number_ = {0};
 };
 
 #endif  // ROCKSDB_LITE

@@ -666,6 +666,10 @@ DEFINE_bool(optimistic_transaction_db, false,
             "Open a OptimisticTransactionDB instance. "
             "Required for randomtransaction benchmark.");
 
+DEFINE_bool(to_transaction_db, false,
+            "Open a TOTransactionDB instance. "
+            "Required for randomtransaction benchmark.");
+            
 DEFINE_bool(transaction_db, false,
             "Open a TransactionDB instance. "
             "Required for randomtransaction benchmark.");
@@ -681,6 +685,12 @@ DEFINE_bool(transaction_set_snapshot, false,
 DEFINE_int32(transaction_sleep, 0,
              "Max microseconds to sleep in between "
              "reading and writing a value (used in RandomTransaction only). ");
+
+DEFINE_int32(transaction_stripe_num, 32,
+             "stripe_num in totransaction (used in RandomTransactionWriteRandom only). ");
+
+DEFINE_int32(conflict_level, 0,
+             "conflict_level in totransaction (used in RandomTransactionWriteRandom only). ");
 
 DEFINE_uint64(transaction_lock_timeout, 100,
               "If using a transaction_db, specifies the lock wait timeout in"
@@ -1498,6 +1508,7 @@ enum OperationType : unsigned char {
   kUncompress,
   kCrc,
   kHash,
+  kTxn,
   kOthers
 };
 
@@ -1525,9 +1536,15 @@ class Stats {
   uint64_t finish_;
   double seconds_;
   uint64_t done_;
+  uint64_t txn_done_;
+  uint64_t txn_abort_;
+  uint64_t read_done_;
+  uint64_t put_done_;
+  uint64_t delete_done_;
   uint64_t last_report_done_;
   uint64_t next_report_;
   uint64_t bytes_;
+  uint64_t read_bytes_;
   uint64_t last_op_finish_;
   uint64_t last_report_finish_;
   std::unordered_map<OperationType, std::shared_ptr<HistogramImpl>,
@@ -1550,8 +1567,14 @@ class Stats {
     last_op_finish_ = start_;
     hist_.clear();
     done_ = 0;
+    txn_done_ = 0;
+    txn_abort_ = 0;
+    read_done_ = 0;
+    put_done_ = 0;
+    delete_done_ = 0;
     last_report_done_ = 0;
     bytes_ = 0;
+    read_bytes_ = 0;
     seconds_ = 0;
     start_ = FLAGS_env->NowMicros();
     sine_interval_ = FLAGS_env->NowMicros();
@@ -1578,6 +1601,12 @@ class Stats {
     done_ += other.done_;
     bytes_ += other.bytes_;
     seconds_ += other.seconds_;
+    txn_done_ += other.txn_done_;
+    read_bytes_ += other.read_bytes_;
+    read_done_ += other.read_done_;
+    put_done_ += other.put_done_;
+    delete_done_ += other.delete_done_;
+    txn_abort_ += other.txn_abort_;
     if (other.start_ < start_) start_ = other.start_;
     if (other.finish_ > finish_) finish_ = other.finish_;
 
@@ -1666,8 +1695,18 @@ class Stats {
       }
       last_op_finish_ = now;
     }
-
-    done_ += num_ops;
+    if(op_type == kTxn){
+      txn_done_ += num_ops;
+    } else {
+      done_ += num_ops;
+      if(op_type == kRead){
+        read_done_ += num_ops;
+      } else if(op_type == kDelete){
+        delete_done_ += num_ops;
+      } else if(op_type == kWrite){
+        put_done_ += num_ops;
+      }
+    }
     if (done_ >= next_report_) {
       if (!FLAGS_stats_interval) {
         if      (next_report_ < 1000)   next_report_ += 100;
@@ -1762,6 +1801,14 @@ class Stats {
     bytes_ += n;
   }
 
+  void AddReadBytes(int64_t n) {
+    read_bytes_ += n;
+  }
+
+  void AddTxnConflict(int64_t n) {
+    txn_abort_ += n;
+  }
+
   void Report(const Slice& name) {
     // Pretend at least one op was done in case we are running a benchmark
     // that does not call FinishedOps().
@@ -1773,20 +1820,44 @@ class Stats {
       // elapsed times.
       double elapsed = (finish_ - start_) * 1e-6;
       char rate[100];
-      snprintf(rate, sizeof(rate), "%6.1f MB/s",
-               (bytes_ / 1048576.0) / elapsed);
-      extra = rate;
+      if(txn_done_ == 0){
+         snprintf(rate, sizeof(rate), "%6.1f MB/s",
+                   (bytes_ / 1048576.0) / elapsed);
+          extra = rate;
+      } else{
+         snprintf(rate, sizeof(rate), "%6.1f wMB/s %6.1f rMB/s",
+                   (bytes_ / 1048576.0) / elapsed,
+                   (read_bytes_ / 1048576.0) / elapsed);
+         extra = rate;
+      }
     }
     AppendWithSpace(&extra, message_);
     double elapsed = (finish_ - start_) * 1e-6;
     double throughput = (double)done_/elapsed;
+    double tps = (double)txn_done_/elapsed;
 
-    fprintf(stdout, "%-12s : %11.3f micros/op %ld ops/sec;%s%s\n",
-            name.ToString().c_str(),
-            elapsed * 1e6 / done_,
-            (long)throughput,
-            (extra.empty() ? "" : " "),
-            extra.c_str());
+    if(txn_done_ == 0) {
+       fprintf(stdout, "%-12s : %11.3f micros/op %ld ops/sec;%s%s\n",
+                name.ToString().c_str(),
+                elapsed * 1e6 / done_,
+                (long)throughput,
+                (extra.empty() ? "" : " "),
+                extra.c_str());
+
+    } else{
+       fprintf(stdout, "%-12s : %11.3f micros/op %ld ops/sec %ld tps/sec reads %ld puts %ld deletes %ld conflict_rate %5.2f%%; %s%s\n",
+                name.ToString().c_str(),
+                elapsed * 1e6 / done_,
+                (long)throughput,
+                (long)tps,
+                (long)read_done_,
+                (long)put_done_,
+                (long)delete_done_,
+                txn_abort_ * 1e2 / (txn_done_ + txn_abort_),
+                (extra.empty() ? "" : " "),
+                extra.c_str());
+    }
+    
     if (FLAGS_histogram) {
       for (auto it = hist_.begin(); it != hist_.end(); ++it) {
         fprintf(stdout, "Microseconds per %s:\n%s\n",
@@ -2702,6 +2773,8 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       } else if (name == "randomtransaction") {
         method = &Benchmark::RandomTransaction;
         post_process_method = &Benchmark::RandomTransactionVerify;
+      } else if (name == "randomtransactionwriterandom") {
+        method = &Benchmark::RandomTransactionWriteRandom; 
 #endif  // ROCKSDB_LITE
       } else if (name == "randomreplacekeys") {
         fresh_db = true;
@@ -3149,6 +3222,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     if (FLAGS_cost_write_buffer_to_cache || FLAGS_db_write_buffer_size != 0) {
       options.write_buffer_manager.reset(
           new WriteBufferManager(FLAGS_db_write_buffer_size, cache_));
+       printf("write_buffer_manager use cache\n");
     }
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_write_buffer_number = FLAGS_max_write_buffer_number;
@@ -3499,7 +3573,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
   void InitializeOptionsGeneral(Options* opts) {
     Options& options = *opts;
-
+    options.info_log_level = WARN_LEVEL;
     options.create_missing_column_families = FLAGS_num_column_families > 1;
     options.statistics = dbstats;
     options.wal_dir = FLAGS_wal_dir;
@@ -3643,7 +3717,17 @@ void VerifyDBFromDB(std::string& truth_db_name) {
         if (s.ok()) {
           db->db = db->opt_txn_db->GetBaseDB();
         }
-      } else if (FLAGS_transaction_db) {
+      } else if (FLAGS_to_transaction_db) {
+        TOTransactionDB* ptr;
+        TOTransactionDBOptions txn_db_options;
+        txn_db_options.num_stripes = FLAGS_transaction_stripe_num;
+        s = TOTransactionDB::Open(options, txn_db_options, db_name,
+                                column_families, &db->cfh, &ptr);
+        fprintf(stdout, "open muti cf TOTransactionDB txn_db_options.num_stripes:%ld \n",txn_db_options.num_stripes);
+        if (s.ok()) {
+          db->db = ptr;
+        }
+      }else if (FLAGS_transaction_db) {
         TransactionDB* ptr;
         TransactionDBOptions txn_db_options;
         s = TransactionDB::Open(options, txn_db_options, db_name,
@@ -3675,6 +3759,17 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       s = CreateLoggerFromOptions(db_name, options, &options.info_log);
       if (s.ok()) {
         s = TransactionDB::Open(options, txn_db_options, db_name, &ptr);
+      }
+      if (s.ok()) {
+        db->db = ptr;
+      }
+    }  else if (FLAGS_to_transaction_db) {
+      TOTransactionDB* ptr = nullptr;
+      TOTransactionDBOptions txn_db_options;
+      s = CreateLoggerFromOptions(db_name, options, &options.info_log);
+      if (s.ok()) {
+        s = TOTransactionDB::Open(options, txn_db_options, db_name, &ptr);
+        fprintf(stdout, "open default cf TOTransactionDB \n");
       }
       if (s.ok()) {
         db->db = ptr;
@@ -5384,11 +5479,15 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
       // RandomTransactionInserter will attempt to insert a key for each
       // # of FLAGS_transaction_sets
+	  TOTransactionDB* to_txn_db = NULL;
       if (FLAGS_optimistic_transaction_db) {
         success = inserter.OptimisticTransactionDBInsert(db_.opt_txn_db);
       } else if (FLAGS_transaction_db) {
         TransactionDB* txn_db = reinterpret_cast<TransactionDB*>(db_.db);
         success = inserter.TransactionDBInsert(txn_db, txn_options);
+      } else if (FLAGS_to_transaction_db) {
+        to_txn_db = reinterpret_cast<TOTransactionDB*>(db_.db);
+        success = inserter.TOTransactionDBInsert(to_txn_db);
       } else {
         success = inserter.DBInsert(db_.db);
       }
@@ -5401,10 +5500,29 @@ void VerifyDBFromDB(std::string& truth_db_name) {
 
       thread->stats.FinishedOps(nullptr, db_.db, 1, kOthers);
       transactions_done++;
+      
+      if (FLAGS_to_transaction_db && to_txn_db != NULL && transactions_done%1000 == 0) {
+        RocksTimeStamp all_committed_ts;
+        Status s;
+        s = to_txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts);
+        assert(s.ok());
+        RocksTimeStamp oldest_ts;
+        s = to_txn_db->QueryTimeStamp(kOldest, &oldest_ts);
+        if(!s.ok()){
+           oldest_ts = 0;
+        }
+        if(all_committed_ts>oldest_ts){
+          s = to_txn_db->SetTimeStamp(kOldest, all_committed_ts);
+          if(!s.ok()){
+           fprintf(stderr, "Set kOldest TimeStamp error: %s\n",
+                s.ToString().c_str());
+          }
+        }
+      }
     }
 
     char msg[100];
-    if (FLAGS_optimistic_transaction_db || FLAGS_transaction_db) {
+    if (FLAGS_optimistic_transaction_db || FLAGS_transaction_db || FLAGS_to_transaction_db) {
       snprintf(msg, sizeof(msg),
                "( transactions:%" PRIu64 " aborts:%" PRIu64 ")",
                transactions_done, inserter.GetFailureCount());
@@ -5424,7 +5542,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
   // Since each iteration of RandomTransaction() incremented a key in each set
   // by the same value, the sum of the keys in each set should be the same.
   void RandomTransactionVerify() {
-    if (!FLAGS_transaction_db && !FLAGS_optimistic_transaction_db) {
+    if (!FLAGS_transaction_db && !FLAGS_optimistic_transaction_db && !FLAGS_to_transaction_db) {
       // transactions not used, nothing to verify.
       return;
     }
@@ -5439,6 +5557,109 @@ void VerifyDBFromDB(std::string& truth_db_name) {
       fprintf(stdout, "RandomTransactionVerify FAILED!!\n");
     }
   }
+
+  
+  void RandomTransactionWriteRandom(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    Duration duration(FLAGS_duration, readwrites_);
+    ReadOptions read_options(FLAGS_verify_checksum, true);
+    uint16_t num_prefix_ranges = static_cast<uint16_t>(FLAGS_transaction_sets);
+    uint64_t transactions_done = 0;
+
+    if (num_prefix_ranges == 0 || num_prefix_ranges > 9999) {
+      fprintf(stderr, "invalid value for transaction_sets\n");
+      abort();
+    } 
+    if (FLAGS_conflict_level<0 || FLAGS_num * pow(10, -FLAGS_conflict_level)  < 100){
+      fprintf(stderr, "invalid value for conflict_level\n");
+      abort();
+    }
+
+    TransactionOptions txn_options;
+    txn_options.lock_timeout = FLAGS_transaction_lock_timeout;
+    txn_options.set_snapshot = FLAGS_transaction_set_snapshot;
+
+    RandomTransactionInserter inserter(&thread->rand, write_options_,
+                                       read_options, FLAGS_num,
+                                       num_prefix_ranges,FLAGS_readwritepercent,
+                                       FLAGS_deletepercent,100 - FLAGS_readwritepercent - FLAGS_deletepercent,
+                                       FLAGS_conflict_level);
+
+    if (FLAGS_num_multi_db > 1) {
+      fprintf(stderr,
+              "Cannot run RandomTransactionWriteRandom benchmark with "
+              "FLAGS_multi_db > 1.");
+      abort();
+    }
+
+    //int64_t found = inserter.GetFoundCount();
+    int64_t gets_done = inserter.GetGetCount();
+    int64_t puts_done = inserter.GetPutCount();
+    int64_t deletes_done = inserter.GetDeleteCount();
+    //int64_t readwrites = gets_done + puts_done + deletes_done;
+
+    int64_t stage = 0;
+    if (db_.db != nullptr) {
+      db_.CreateNewCf(open_options_, stage);
+      fprintf(stdout,"create cf ,created cf num %ld \n",db_.num_created.load(std::memory_order_acquire));
+    }
+    //size_t num_key_gens = 1;
+    while (!duration.Done(1)) {
+      bool success;
+
+      TOTransactionDB* txn_db = reinterpret_cast<TOTransactionDB*>(db_.db);
+      Status s;
+      
+      success = inserter.TOTransactionDBWriteRandom(db_.cfh ,txn_db);
+      
+      if (!success) {
+        fprintf(stderr, "Unexpected error: %s\n",
+                inserter.GetLastStatus().ToString().c_str());
+        continue;
+      }
+
+      int64_t gets_done_t = inserter.GetGetCount();
+      int64_t puts_done_t = inserter.GetPutCount();
+      int64_t deletes_done_t = inserter.GetDeleteCount();
+      thread->stats.FinishedOps(nullptr, db_.db, 1, kTxn);
+      thread->stats.FinishedOps(&db_, db_.db, deletes_done_t - deletes_done, kDelete);
+      thread->stats.FinishedOps(&db_, db_.db, puts_done_t - puts_done, kWrite);
+      thread->stats.FinishedOps(&db_, db_.db, gets_done_t - gets_done, kRead);
+      gets_done = gets_done_t;
+      puts_done = puts_done_t;
+      deletes_done = deletes_done_t;
+      transactions_done++; 
+
+      if (transactions_done%10 == 0) {
+        RocksTimeStamp all_committed_ts;
+        s = txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts);
+        assert(s.ok());
+        RocksTimeStamp oldest_ts;
+        s = txn_db->QueryTimeStamp(kOldest, &oldest_ts);
+        if(!s.ok()){
+           oldest_ts = 0;
+        }
+        if(all_committed_ts>oldest_ts){
+          s = txn_db->SetTimeStamp(kOldest, all_committed_ts);
+          if(!s.ok()){
+           fprintf(stderr, "Set kOldest TimeStamp error: %s\n",
+                s.ToString().c_str());
+          }
+        }
+      }
+
+    }
+
+    printf("transactions %ld  success %ld failcount %ld \n",transactions_done, inserter.GetSuccessCount(), inserter.GetFailureCount());
+    
+    if (FLAGS_perf_level > rocksdb::PerfLevel::kDisable) {
+      thread->stats.AddMessage(get_perf_context()->ToString());
+    }
+    thread->stats.AddBytes(static_cast<int64_t>(inserter.GetBytesInserted()));
+    thread->stats.AddReadBytes(static_cast<int64_t>(inserter.GetBytesRead()));
+    thread->stats.AddTxnConflict(static_cast<int64_t>(inserter.GetFailureCount()));
+  }
+  
 #endif  // ROCKSDB_LITE
 
   // Writes and deletes random keys without overwriting keys.

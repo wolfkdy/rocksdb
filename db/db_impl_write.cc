@@ -98,6 +98,18 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
 
+#ifdef USE_TIMESTAMPS
+  WriteBatch tmp_batch;
+  if (!write_options.already_has_timestamp) {
+    auto status =
+        WriteBatchInternal::RewriteBatch(&tmp_batch, my_batch, write_options);
+    if (!status.ok()) {
+        return status;
+    }
+    my_batch = &tmp_batch;
+  }
+#endif  // USE_TIMESTAMPS
+
   Status status;
   if (write_options.low_pri) {
     status = ThrottleLowPriWritesIfNeeded(write_options, my_batch);
@@ -160,6 +172,9 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       // TODO(myabandeh): propagate status to write_group
       auto last_sequence = w.write_group->last_sequence;
       versions_->SetLastSequence(last_sequence);
+      std::for_each(change_streams_.begin(), change_streams_.end(),
+        [&](CSP& v) { v.second->onNewLSN(last_sequence); });
+
       MemTableInsertStatusCheck(w.status);
       write_thread_.ExitAsBatchGroupFollower(&w);
     }
@@ -206,11 +221,10 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     PERF_TIMER_STOP(write_pre_and_post_process_time);
 
     status = PreprocessWrite(write_options, &need_log_sync, &write_context);
-
     PERF_TIMER_START(write_pre_and_post_process_time);
   }
-  log::Writer* log_writer = logs_.back().writer;
-
+  log::Writer* log_writer = logs_.size() > 0 ? logs_.back().writer : nullptr;
+  assert(log_writer || initial_db_options_.open_read_replica);
   mutex_.Unlock();
 
   // Add to log and apply to memtable.  We can release the lock
@@ -314,12 +328,15 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
 
       if (!parallel) {
         // w.sequence will be set inside InsertInto
+        FlushScheduler* scheduler =
+          initial_db_options_.open_read_replica ? nullptr : &flush_scheduler_;
         w.status = WriteBatchInternal::InsertInto(
             write_group, current_sequence, column_family_memtables_.get(),
-            &flush_scheduler_, write_options.ignore_missing_column_families,
+            scheduler, write_options.ignore_missing_column_families,
             0 /*recovery_log_number*/, this, parallel, seq_per_batch_,
             batch_per_txn_);
       } else {
+        assert(!initial_db_options_.open_read_replica);
         SequenceNumber next_sequence = current_sequence;
         // Note: the logic for advancing seq here must be consistent with the
         // logic in WriteBatchInternal::InsertInto(write_group...) as well as
@@ -366,6 +383,7 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   }
 
   if (need_log_sync) {
+    assert(!initial_db_options_.open_read_replica);
     mutex_.Lock();
     MarkLogsSynced(logfile_number_, need_log_dir_sync, status);
     mutex_.Unlock();
@@ -400,6 +418,8 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         }
       }
       versions_->SetLastSequence(last_sequence);
+      std::for_each(change_streams_.begin(), change_streams_.end(),
+        [&](CSP& v) { v.second->onNewLSN(last_sequence); });
     }
     MemTableInsertStatusCheck(w.status);
     write_thread_.ExitAsBatchGroupLeader(write_group, status);
@@ -516,6 +536,8 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
           0 /*log_number*/, this, false /*concurrent_memtable_writes*/,
           seq_per_batch_, batch_per_txn_);
       versions_->SetLastSequence(memtable_write_group.last_sequence);
+      std::for_each(change_streams_.begin(), change_streams_.end(),
+        [&](CSP& v) { v.second->onNewLSN(memtable_write_group.last_sequence); });
       write_thread_.ExitAsMemTableWriter(&w, memtable_write_group);
     }
   }
@@ -531,6 +553,8 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
     if (write_thread_.CompleteParallelMemTableWriter(&w)) {
       MemTableInsertStatusCheck(w.status);
       versions_->SetLastSequence(w.write_group->last_sequence);
+      std::for_each(change_streams_.begin(), change_streams_.end(),
+        [&](CSP& v) { v.second->onNewLSN(w.write_group->last_sequence); });
       write_thread_.ExitAsMemTableWriter(&w, *w.write_group);
     }
   }
@@ -718,10 +742,12 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
          versions_->GetColumnFamilySet()->NumberOfColumnFamilies() == 1);
   if (UNLIKELY(status.ok() && !single_column_family_mode_ &&
                total_log_size_ > GetMaxTotalWalSize())) {
+    assert(!initial_db_options_.open_read_replica);
     status = SwitchWAL(write_context);
   }
 
-  if (UNLIKELY(status.ok() && write_buffer_manager_->ShouldFlush())) {
+  if (UNLIKELY(status.ok() && write_buffer_manager_->ShouldFlush() &&
+               !initial_db_options_.open_read_replica)) {
     // Before a new memtable is added in SwitchMemtable(),
     // write_buffer_manager_->ShouldFlush() will keep returning true. If another
     // thread is writing to another DB with the same write buffer, they may also
@@ -731,6 +757,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   }
 
   if (UNLIKELY(status.ok() && !flush_scheduler_.Empty())) {
+    assert(!initial_db_options_.open_read_replica);
     status = ScheduleFlushes(write_context);
   }
 
@@ -738,7 +765,10 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   PERF_TIMER_GUARD(write_pre_and_post_process_time);
 
   if (UNLIKELY(status.ok() && (write_controller_.IsStopped() ||
-                               write_controller_.NeedsDelay()))) {
+                               write_controller_.NeedsDelay()) &&
+                               (!initial_db_options_.open_read_replica))) {
+    // open_read_replica mode won't writestall because delayed_write_rate is set
+    // to a very large number.
     PERF_TIMER_STOP(write_pre_and_post_process_time);
     PERF_TIMER_GUARD(write_delay_time);
     // We don't know size of curent batch so that we always use the size
@@ -889,7 +919,8 @@ Status DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //  - as long as other threads don't modify it, it's safe to read
     //    from std::deque from multiple threads concurrently.
     for (auto& log : logs_) {
-      status = log.writer->file()->Sync(immutable_db_options_.use_fsync);
+      // origin:  status = log.writer->file()->Sync(immutable_db_options_.use_fsync);
+	  status = log.writer->file()->Sync(false /*immutable_db_options_.use_fsync*/);
       if (!status.ok()) {
         break;
       }
@@ -994,6 +1025,9 @@ Status DBImpl::WriteRecoverableState() {
       versions_->SetLastPublishedSequence(last_seq);
     }
     versions_->SetLastSequence(last_seq);
+    std::for_each(change_streams_.begin(), change_streams_.end(),
+      [&](CSP& v) { v.second->onNewLSN(last_seq); });
+
     if (two_write_queues_) {
       log_write_mutex_.Unlock();
     }
@@ -1221,7 +1255,7 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
       // we don't need a delay anymore
       const uint64_t kDelayInterval = 1000;
       uint64_t stall_end = sw.start_time() + delay;
-      while (write_controller_.NeedsDelay()) {
+      while (write_controller_.NeedsDelay() && write_thread_.Delayable()) {
         if (env_->NowMicros() >= stall_end) {
           // We already delayed this write `delay` microseconds
           break;
@@ -1239,7 +1273,9 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
     // might wait here indefinitely as the background compaction may never
     // finish successfully, resulting in the stall condition lasting
     // indefinitely
-    while (error_handler_.GetBGError().ok() && write_controller_.IsStopped()) {
+    while (error_handler_.GetBGError().ok() &&
+           write_controller_.IsStopped() &&
+           write_thread_.Delayable()) {
       if (write_options.no_slowdown) {
         return Status::Incomplete("Write stall");
       }
@@ -1249,11 +1285,12 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
       // fail any pending writers with no_slowdown
       write_thread_.BeginWriteStall();
       TEST_SYNC_POINT("DBImpl::DelayWrite:Wait");
-      bg_cv_.Wait();
+      // We periodly check if someone wants to EnterBatch urgently
+      bg_cv_.TimedWait(env_->NowMicros() + 10000 /* 10ms */);
       write_thread_.EndWriteStall();
     }
   }
-  assert(!delayed || !write_options.no_slowdown);
+  assert(!delayed || !write_options.no_slowdown || !write_thread_.Delayable());
   if (delayed) {
     default_cf_internal_stats_->AddDBStats(InternalStats::WRITE_STALL_MICROS,
                                            time_delayed);
@@ -1264,6 +1301,12 @@ Status DBImpl::DelayWrite(uint64_t num_bytes,
   // writes, we can ignore any background errors and allow the write to
   // proceed
   Status s;
+  if (!write_thread_.Delayable()) {
+    ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                   "undelayable write happen, current lsn:%" PRIu64,
+                   versions_->LastSequence());
+    return Status::OK();
+  }
   if (write_controller_.IsStopped()) {
     // If writes are still stopped, it means we bailed due to a background
     // error

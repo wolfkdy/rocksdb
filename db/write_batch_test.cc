@@ -24,6 +24,11 @@
 namespace rocksdb {
 
 static std::string PrintContents(WriteBatch* b) {
+#ifdef USE_TIMESTAMPS
+  WriteBatch rewrite;
+  WriteBatchInternal::RewriteBatch(&rewrite, b, WriteOptions());
+  b = &rewrite;
+#endif  // USE_TIMESTAMPS
   InternalKeyComparator cmp(BytewiseComparator());
   auto factory = std::make_shared<SkipListFactory>();
   Options options;
@@ -161,9 +166,15 @@ TEST_F(WriteBatchTest, Corruption) {
   Slice contents = WriteBatchInternal::Contents(&batch);
   WriteBatchInternal::SetContents(&batch,
                                   Slice(contents.data(),contents.size()-1));
+#ifdef USE_TIMESTAMPS
+  ASSERT_EQ("Put(foo, bar)@200"
+            "Corruption: WriteBatch has wrong count",
+            PrintContents(&batch));
+#else
   ASSERT_EQ("Put(foo, bar)@200"
             "Corruption: bad WriteBatch Delete",
             PrintContents(&batch));
+#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(WriteBatchTest, Append) {

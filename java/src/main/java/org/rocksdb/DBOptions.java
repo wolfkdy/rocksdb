@@ -820,6 +820,29 @@ public class DBOptions
     return delayedWriteRate(nativeHandle_);
   }
 
+  
+  @Override
+  public DBOptions setEnablePipelinedWrite(final boolean enablePipelinedWrite) {
+    setEnablePipelinedWrite(nativeHandle_, enablePipelinedWrite);
+    return this;
+  }
+
+  @Override
+  public boolean enablePipelinedWrite() {
+    return enablePipelinedWrite(nativeHandle_);
+  }
+
+  @Override
+  public DBOptions setTwoWriteQueues(final boolean twoWriteQueues) {
+    setTwoWriteQueues(nativeHandle_, twoWriteQueues);
+    return this;
+  }
+
+  @Override
+  public boolean twoWriteQueues() {
+    return twoWriteQueues(nativeHandle_);
+  }
+
   @Override
   public DBOptions setAllowConcurrentMemtableWrite(
       final boolean allowConcurrentMemtableWrite) {
@@ -972,6 +995,20 @@ public class DBOptions
     assert(isOwningHandle());
     return avoidFlushDuringShutdown(nativeHandle_);
   }
+
+  
+  public DBOptions setManualWalFlush(final boolean manualWalFlush) {
+    assert(isOwningHandle());
+    setManualWalFlush(nativeHandle_, manualWalFlush);
+    return this;
+  }
+
+
+  public boolean manualWalFlush() {
+    assert(isOwningHandle());
+    return manualWalFlush(nativeHandle_);
+  }
+
 
   static final int DEFAULT_NUM_SHARD_BITS = -1;
 
@@ -1133,6 +1170,10 @@ public class DBOptions
   private native boolean enableThreadTracking(long handle);
   private native void setDelayedWriteRate(long handle, long delayedWriteRate);
   private native long delayedWriteRate(long handle);
+  private native void setEnablePipelinedWrite(long handle, boolean enablePipelinedWrite);
+  private native boolean enablePipelinedWrite(long handle);
+  private native void setTwoWriteQueues(long handle, boolean twoWriteQueues);
+  private native boolean twoWriteQueues(long handle);
   private native void setAllowConcurrentMemtableWrite(long handle,
       boolean allowConcurrentMemtableWrite);
   private native boolean allowConcurrentMemtableWrite(long handle);
@@ -1168,6 +1209,10 @@ public class DBOptions
   private native void setAvoidFlushDuringShutdown(final long handle,
       final boolean avoidFlushDuringShutdown);
   private native boolean avoidFlushDuringShutdown(final long handle);
+
+  private native void setManualWalFlush(final long handle,
+      final boolean manualWalFlush);
+  private native boolean manualWalFlush(final long handle);
 
   // instance variables
   // NOTE: If you add new member variables, please update the copy constructor above!

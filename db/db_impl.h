@@ -14,6 +14,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <queue>
 #include <set>
 #include <string>
 #include <utility>
@@ -39,6 +40,7 @@
 #include "db/wal_manager.h"
 #include "db/write_controller.h"
 #include "db/write_thread.h"
+#include "db/change_stream_impl.h"
 #include "memtable_list.h"
 #include "monitoring/instrumented_mutex.h"
 #include "options/db_options.h"
@@ -58,6 +60,8 @@
 #include "util/stop_watch.h"
 #include "util/thread_local.h"
 #include "util/trace_replay.h"
+#include "rocksdb/change_stream.h"
+
 
 namespace rocksdb {
 
@@ -247,6 +251,11 @@ class DBImpl : public DB {
 
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) override;
 
+  virtual Status SetOldestWalSequenceNumber(SequenceNumber seqnum,
+                                            bool round) override;
+
+  uint64_t GetOldestWalSequenceNumber();
+
 #ifndef ROCKSDB_LITE
   using DB::ResetStats;
   virtual Status ResetStats() override;
@@ -270,6 +279,13 @@ class DBImpl : public DB {
 
   virtual void GetLiveFilesMetaData(
       std::vector<LiveFileMetaData>* metadata) override;
+
+  // Obtains the stats data of the specified column family of the DB.
+  // Stats data (zero) will be returned if the current DB does not have
+  // any column family match the specified name.
+  virtual void GetColumnFamilyStats(
+      ColumnFamilyHandle* /*column_family*/,
+      int64_t* /*num_record*/, int64_t* /*size*/) override;
 
   // Obtains the meta data of the specified column family of the DB.
   // Status::NotFound() will be returned if the current DB does not have
@@ -380,6 +396,37 @@ class DBImpl : public DB {
   LogsWithPrepTracker* logs_with_prep_tracker() {
     return &logs_with_prep_tracker_;
   }
+
+  // feature: support backup for mongodb
+  Status RecoverSyncOldWal();
+
+  Status SwitchAndSyncWal(uint64_t& backup_log_number);
+
+  Status ContinueBackgroundCompation();
+
+  Status PauseBackgroundCompation();
+
+  Status ApplyEvent(const ChangeEvent& event, EventCFOptionFn fn);
+
+  Status ReloadReadOnly(const std::string& version_snapshot,
+                        uint64_t snapshot_lsn, EventCFOptionFn fn,
+                        std::vector<std::string>* new_cfs,
+                        std::vector<std::string>* del_cfs);
+
+  Status DumpManifestSnapshot(std::string* res, uint64_t* lsn);
+
+  Status GetAllVersionsCreateHint(
+      std::map<std::uint32_t, std::vector<uint64_t>>* versions);
+
+  Status CreateChangeStream(ChangeStream::ManifestType type,
+                            ChangeStream** handler, std::string* manifest,
+                            uint64_t* lsn);
+
+  Status ReleaseChangeStream(ChangeStream* handler);
+
+  void ReadReplicaEvictMemtables(ColumnFamilyData* cfd,
+                                 const MutableCFOptions& cf_opt,
+                                 bool evict_all);
 
 #ifndef NDEBUG
   // Extra methods (for testing) that are not in the public DB interface
@@ -540,6 +587,14 @@ class DBImpl : public DB {
   // mutex is held.
   SuperVersion* GetAndRefSuperVersion(uint32_t column_family_id);
 
+  // TODO(deyukong): refine interface, it seems better to Ref version first, then
+  // pass the version to ChangeStream
+  Version* GetAndRefVersionInDBLock(uint32_t colun_family_id);
+
+  void UnrefVersion(Version*);
+
+  void UnrefVersionInDBLock(Version*);
+
   // Un-reference the super version and clean it up if it is the last reference.
   void CleanupSuperVersion(SuperVersion* sv);
 
@@ -561,6 +616,8 @@ class DBImpl : public DB {
   // Same as above, should called without mutex held and not on write thread.
   std::unique_ptr<ColumnFamilyHandle> GetColumnFamilyHandleUnlocked(
       uint32_t column_family_id);
+
+  Status GetReadReplicaColumnFamily(const std::string& cfd_name, ColumnFamilyHandle** column_family);
 
   // Returns the number of currently running flushes.
   // REQUIREMENT: mutex_ must be held when calling this function.
@@ -699,6 +756,8 @@ class DBImpl : public DB {
 
   Status NewDB();
 
+  virtual Status FastClose() override;
+
   // This is to be used only by internal rocksdb classes.
   static Status Open(const DBOptions& db_options, const std::string& name,
                      const std::vector<ColumnFamilyDescriptor>& column_families,
@@ -706,6 +765,8 @@ class DBImpl : public DB {
                      const bool seq_per_batch, const bool batch_per_txn);
 
   virtual Status Close() override;
+
+  Status AdvancePinTs(uint64_t);
 
   static Status CreateAndNewDirectory(Env* env, const std::string& dirname,
                                       std::unique_ptr<Directory>* directory);
@@ -864,7 +925,13 @@ class DBImpl : public DB {
   // be made to the descriptor are added to *edit.
   Status Recover(const std::vector<ColumnFamilyDescriptor>& column_families,
                  bool read_only = false, bool error_if_log_file_exist = false,
-                 bool error_if_data_exists_in_logs = false);
+                 bool error_if_data_exists_in_logs = false,
+                 FileLock* db_lock = nullptr);
+
+  Status RecoverReadOnly(
+      const std::vector<ColumnFamilyDescriptor>& column_families,
+      const std::string& replica_manifest_path,
+      uint64_t replica_manifest_start_lsn);
 
   Status ResumeImpl();
 
@@ -972,6 +1039,12 @@ class DBImpl : public DB {
                                       WriteBatch* my_batch);
 
   Status ScheduleFlushes(WriteContext* context);
+
+  
+  // feature: support backup for mongodb
+  Status SwitchWal(uint64_t& log_number);
+
+  Status FSyncWAL(bool update_meta) override;
 
   Status SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context);
 
@@ -1138,6 +1211,8 @@ class DBImpl : public DB {
   Status CloseHelper();
 
   void WaitForBackgroundWork();
+
+  void CheckDBLockLeaseOrAbort();
 
   // table_cache_ provides its own synchronization
   std::shared_ptr<Cache> table_cache_;
@@ -1514,6 +1589,14 @@ class DBImpl : public DB {
   // REQUIRES: mutex locked
   std::unique_ptr<rocksdb::RepeatableThread> thread_dump_stats_;
 
+#ifdef USE_TIMESTAMPS
+  // set by TOTransactionDB to hint the timestamp boundary
+  // for compacting unnecessary key versions
+  std::atomic<uint64_t> pin_timestamp_;
+#endif // USE_TIMESTAMPS
+
+  ChangeStreams change_streams_;
+
   // No copying allowed
   DBImpl(const DBImpl&);
   void operator=(const DBImpl&);
@@ -1561,6 +1644,9 @@ class DBImpl : public DB {
   Env::WriteLifeTimeHint CalculateWALWriteHint() {
     return Env::WLTH_SHORT;
   }
+
+  Status ApplyWALEvent(const ChangeEvent& event);
+  Status ApplyVersionEvent(const ChangeEvent& event, EventCFOptionFn fn);
 
   // When set, we use a separate queue for writes that dont write to memtable.
   // In 2PC these are the writes at Prepare phase.

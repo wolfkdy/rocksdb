@@ -101,6 +101,7 @@ class PosixFileLock : public FileLock {
  public:
   int fd_;
   std::string filename;
+  std::string GetFileName() const override { return filename; }
 };
 
 int cloexec_flags(int flags, const EnvOptions* options) {
@@ -617,6 +618,16 @@ class PosixEnv : public Env {
     *file_mtime = static_cast<uint64_t>(s.st_mtime);
     return Status::OK();
   }
+
+  virtual Status RenameDir(const std::string& src,
+                           const std::string& target) override {
+    Status result;
+    if (rename(src.c_str(), target.c_str()) != 0) {
+      result = IOError("While renaming a folder to " + target, src, errno);
+    }
+    return result;
+  }
+
   virtual Status RenameFile(const std::string& src,
                             const std::string& target) override {
     Status result;
@@ -1099,6 +1110,19 @@ std::string Env::GenerateUniqueId() {
            (unsigned long)random_uuid_portion);
   return uuid2;
 }
+
+
+
+/*start: merge stream*/
+Env* Env::Default_Posix()
+{
+  ThreadLocalPtr::InitSingletons();  
+  static PosixEnv default_env;
+  return &default_env;
+}
+/*end: merge stream*/
+
+
 
 //
 // Default Posix Env

@@ -13,6 +13,7 @@
 #include <limits>
 #include <queue>
 #include <string>
+
 #include "db/db_impl.h"
 #include "db/memtable.h"
 #include "db/range_tombstone_fragmenter.h"
@@ -322,7 +323,7 @@ Status MemTableList::TryInstallMemtableFlushResults(
     const autovector<MemTable*>& mems, LogsWithPrepTracker* prep_tracker,
     VersionSet* vset, InstrumentedMutex* mu, uint64_t file_number,
     autovector<MemTable*>* to_delete, Directory* db_directory,
-    LogBuffer* log_buffer) {
+    LogBuffer* log_buffer, WriteThread* write_thread, ChangeStreams* change_streams) {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_MEMTABLE_INSTALL_FLUSH_RESULTS);
   mu->AssertHeld();
@@ -395,9 +396,21 @@ Status MemTableList::TryInstallMemtableFlushResults(
       }
 
       // this can release and reacquire the mutex.
-      s = vset->LogAndApply(cfd, mutable_cf_options, edit_list, mu,
+      {
+        WriteThread::Writer w;
+        if (write_thread != nullptr) {
+          write_thread->EnterUnbatchedUndelayable(&w, mu);
+        }
+        s = vset->LogAndApply(cfd, mutable_cf_options, edit_list, mu,
                             db_directory);
-
+        if (s.ok() && change_streams != nullptr) {
+          std::for_each(change_streams->begin(), change_streams->end(),
+            [&](CSP& v) { v.second->onNewVersions(edit_list); });
+        }
+        if (write_thread != nullptr) {
+          write_thread->ExitUnbatchedUndelayable(&w);
+        }
+      }
       // we will be changing the version in the next code path,
       // so we better create a new one, since versions are immutable
       InstallNewVersion();
@@ -450,6 +463,61 @@ Status MemTableList::TryInstallMemtableFlushResults(
   }
   commit_in_progress_ = false;
   return s;
+}
+
+void MemTableList::UnrefImmUntilExclude(uint64_t until,
+                                        autovector<MemTable*>* to_delete,
+                                        autovector<std::unique_ptr<MemTableInfo>>* delete_info,
+                                        InstrumentedMutex* mu) {
+  mu->AssertHeld();
+  InstallNewVersion();
+  std::list<MemTable*> pending_drop;
+  auto it = current_->memlist_.begin();
+  if (until != kMaxSequenceNumber) {
+    for (; it != current_->memlist_.end(); ++it) {
+      if ((*it)->GetEarliestSequenceNumber() < until) {
+        ++it;
+        // imms after(inclusive) this it can be coverd by "until"
+        break;
+      }
+    }
+  } else {
+    // until == kMaxSequenceNumber, in this case, we unref all the imms
+  }
+  for (; it != current_->memlist_.end(); ++it) {
+    pending_drop.emplace_back(*it);
+  }
+
+  for (auto& v : pending_drop) {
+    current_->Remove(v, to_delete);
+    if (until == kMaxSequenceNumber) {
+      assert(num_flush_not_started_ >= 1);
+    } else {
+      // for until < kMaxSequenceNumber, the imm-pickup-rule guarantees we'll
+      // always have at least
+      // imm in hand.
+      assert(num_flush_not_started_ > 1);
+    }
+    auto info = std::unique_ptr<MemTableInfo>(new MemTableInfo);
+    info->first_seqno = v->GetFirstSequenceNumber();
+    info->earliest_seqno = v->GetEarliestSequenceNumber();
+    info->num_entries = v->num_entries();
+    info->num_deletes = v->num_deletes();
+    delete_info->emplace_back(std::move(info));
+    num_flush_not_started_--;
+  }
+}
+
+void MemTableList::DumpImm(autovector<std::unique_ptr<MemTableInfo>>* res, InstrumentedMutex* mu) {
+  mu->AssertHeld();
+  for (auto& v : current_->memlist_) {
+    auto info = std::unique_ptr<MemTableInfo>(new MemTableInfo);
+    info->first_seqno = v->GetFirstSequenceNumber();
+    info->earliest_seqno = v->GetEarliestSequenceNumber();
+    info->num_entries = v->num_entries();
+    info->num_deletes = v->num_deletes();
+    res->emplace_back(std::move(info));
+  }
 }
 
 // New memtables are inserted at the front of the list.
@@ -535,7 +603,7 @@ Status InstallMemtableAtomicFlushResults(
     const autovector<const autovector<MemTable*>*>& mems_list, VersionSet* vset,
     InstrumentedMutex* mu, const autovector<FileMetaData*>& file_metas,
     autovector<MemTable*>* to_delete, Directory* db_directory,
-    LogBuffer* log_buffer) {
+    LogBuffer* log_buffer, WriteThread* write_thread, ChangeStreams* change_streams) {
   AutoThreadOperationStageUpdater stage_updater(
       ThreadStatus::STAGE_MEMTABLE_INSTALL_FLUSH_RESULTS);
   mu->AssertHeld();
@@ -580,9 +648,22 @@ Status InstallMemtableAtomicFlushResults(
   }
   assert(0 == num_entries);
 
-  // this can release and reacquire the mutex.
-  s = vset->LogAndApply(cfds, mutable_cf_options_list, edit_lists, mu,
+  {
+    WriteThread::Writer w;
+    if (write_thread != nullptr) {
+      write_thread->EnterUnbatchedUndelayable(&w, mu);
+    }
+    // this can release and reacquire the mutex.
+    s = vset->LogAndApply(cfds, mutable_cf_options_list, edit_lists, mu,
                         db_directory);
+    if (s.ok() && change_streams != nullptr) {
+      std::for_each(change_streams->begin(), change_streams->end(),
+        [&](CSP& v) { v.second->onNewVersions(edit_lists); });
+    }
+    if (write_thread != nullptr) {
+      write_thread->ExitUnbatchedUndelayable(&w);
+    }
+  }
 
   for (size_t k = 0; k != cfds.size(); ++k) {
     auto* imm = (imm_lists == nullptr) ? cfds[k]->imm() : imm_lists->at(k);

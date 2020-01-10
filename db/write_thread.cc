@@ -26,6 +26,7 @@ WriteThread::WriteThread(const ImmutableDBOptions& db_options)
       newest_memtable_writer_(nullptr),
       last_sequence_(0),
       write_stall_dummy_(),
+      undelayable_cnt_(0),
       stall_mu_(),
       stall_cv_(&stall_mu_) {}
 
@@ -748,6 +749,17 @@ void WriteThread::ExitUnbatched(Writer* w) {
     next_leader->link_older = nullptr;
     SetState(next_leader, STATE_GROUP_LEADER);
   }
+}
+
+void WriteThread::EnterUnbatchedUndelayable(Writer* w, InstrumentedMutex* mu) {
+  undelayable_cnt_.fetch_add(1);
+  EnterUnbatched(w, mu);
+}
+
+void WriteThread::ExitUnbatchedUndelayable(Writer* w) {
+  assert(undelayable_cnt_.load() > 0);
+  ExitUnbatched(w);
+  undelayable_cnt_.fetch_sub(1);
 }
 
 static WriteThread::AdaptationContext wfmw_ctx("WaitForMemTableWriters");

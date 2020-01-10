@@ -18,8 +18,8 @@ namespace cassandra {
 
 // Implementation for the merge operation (merges two Cassandra values)
 bool CassandraValueMergeOperator::FullMergeV2(
-    const MergeOperationInput& merge_in,
-    MergeOperationOutput* merge_out) const {
+  const MergeOperationInput& merge_in,
+  MergeOperationOutput* merge_out) const {
   // Clear the *new_value for writing.
   merge_out->new_value.clear();
   std::vector<RowValue> row_values;
@@ -34,7 +34,7 @@ bool CassandraValueMergeOperator::FullMergeV2(
   }
 
   RowValue merged = RowValue::Merge(std::move(row_values));
-  merged = merged.RemoveTombstones(gc_grace_period_in_seconds_);
+  merged = merged.RemoveTombstones(gc_grace_period_);
   merge_out->new_value.reserve(merged.Size());
   merged.Serialize(&(merge_out->new_value));
 
@@ -42,8 +42,8 @@ bool CassandraValueMergeOperator::FullMergeV2(
 }
 
 bool CassandraValueMergeOperator::PartialMergeMulti(
-    const Slice& /*key*/, const std::deque<Slice>& operand_list,
-    std::string* new_value, Logger* /*logger*/) const {
+  const Slice& /*key*/, const std::deque<Slice>& operand_list,
+  std::string* new_value, Logger* /*logger*/) const {
   // Clear the *new_value for writing.
   assert(new_value);
   new_value->clear();
@@ -58,8 +58,58 @@ bool CassandraValueMergeOperator::PartialMergeMulti(
   return true;
 }
 
-const char* CassandraValueMergeOperator::Name() const  {
+const char* CassandraValueMergeOperator::Name() const {
   return "CassandraValueMergeOperator";
+}
+
+bool CassandraPartitionMetaMergeOperator::FullMergeV2(
+  const MergeOperationInput& merge_in,
+  MergeOperationOutput* merge_out) const {
+  // Clear the *new_value for writing.
+  merge_out->new_value.clear();
+  std::vector<PartitionHeader> phs;
+
+  if (merge_in.existing_value) {
+    phs.push_back(PartitionHeader::Deserialize(
+      merge_in.existing_value->data(), merge_in.existing_value->size()));
+  }
+
+  for (auto& operand : merge_in.operand_list) {
+    phs.push_back(
+      PartitionHeader::Deserialize(operand.data(), operand.size()));
+  }
+
+  PartitionHeader merged = PartitionHeader::Merge(std::move(phs),
+                                                  gc_grace_period_);
+  merge_out->new_value.reserve(merged.Size());
+  merged.Serialize(&(merge_out->new_value));
+
+  return true;
+}
+
+bool CassandraPartitionMetaMergeOperator::PartialMergeMulti(
+  const Slice& /*key*/, const std::deque<Slice>& operand_list,
+  std::string* new_value, Logger* /*logger*/) const {
+  // Clear the *new_value for writing.
+  assert(new_value);
+  new_value->clear();
+
+  std::vector<PartitionHeader> phs;
+  for (auto& operand : operand_list) {
+    phs.push_back(
+      PartitionHeader::Deserialize(operand.data(), operand.size()));
+  }
+
+  PartitionHeader merged = PartitionHeader::Merge(std::move(phs),
+                                                  gc_grace_period_);
+  new_value->reserve(merged.Size());
+  merged.Serialize(new_value);
+
+  return true;
+}
+
+const char* CassandraPartitionMetaMergeOperator::Name() const {
+  return "CassandraPartitionMetaMergeOperator";
 }
 
 } // namespace cassandra

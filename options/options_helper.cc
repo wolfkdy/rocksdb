@@ -41,6 +41,7 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.info_log = immutable_db_options.info_log;
   options.info_log_level = immutable_db_options.info_log_level;
   options.max_open_files = mutable_db_options.max_open_files;
+  options.oldest_wal_seq_number = mutable_db_options.oldest_wal_seq_number; 
   options.max_file_opening_threads =
       immutable_db_options.max_file_opening_threads;
   options.max_total_wal_size = mutable_db_options.max_total_wal_size;
@@ -1398,6 +1399,10 @@ std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct DBOptions, compaction_readahead_size),
           OptionType::kSizeT, OptionVerificationType::kNormal, true,
           offsetof(struct MutableDBOptions, compaction_readahead_size)}},
+        {"oldest_wal_seq_number",
+         {offsetof(struct DBOptions, oldest_wal_seq_number),
+          OptionType::kUInt64T, OptionVerificationType::kNormal, true,
+          offsetof(struct MutableDBOptions, oldest_wal_seq_number)}},  
         {"random_access_max_buffer_size",
          {offsetof(struct DBOptions, random_access_max_buffer_size),
           OptionType::kSizeT, OptionVerificationType::kNormal, false, 0}},
@@ -1531,6 +1536,9 @@ std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct DBOptions, avoid_flush_during_shutdown),
           OptionType::kBoolean, OptionVerificationType::kNormal, true,
           offsetof(struct MutableDBOptions, avoid_flush_during_shutdown)}},
+        {"recover_lease_during_open",
+         {offsetof(struct DBOptions, recover_lease_during_open),
+          OptionType::kBoolean, OptionVerificationType::kNormal, false, 0}},
         {"writable_file_max_buffer_size",
          {offsetof(struct DBOptions, writable_file_max_buffer_size),
           OptionType::kSizeT, OptionVerificationType::kNormal, true,

@@ -158,42 +158,43 @@ class VersionBuilder::Rep {
         auto f2 = level_files[i];
         if (level == 0) {
           if (!level_zero_cmp_(f1, f2)) {
-            fprintf(stderr, "L0 files are not sorted properly");
+            ROCKS_LOG_FATAL(info_log_, "L0 files are not sorted properly");
             abort();
           }
 
           if (f2->fd.smallest_seqno == f2->fd.largest_seqno) {
             // This is an external file that we ingested
             SequenceNumber external_file_seqno = f2->fd.smallest_seqno;
-            if (!(external_file_seqno < f1->fd.largest_seqno ||
+            if (!(external_file_seqno <= f1->fd.largest_seqno ||
                   external_file_seqno == 0)) {
-              fprintf(stderr,
-                      "L0 file with seqno %" PRIu64 " %" PRIu64
-                      " vs. file with global_seqno %" PRIu64 "\n",
-                      f1->fd.smallest_seqno, f1->fd.largest_seqno,
-                      external_file_seqno);
+              ROCKS_LOG_FATAL(info_log_,
+                              "L0 file with seqno %" PRIu64 " %" PRIu64
+                              " vs. file with global_seqno %" PRIu64 "\n",
+                              f1->fd.smallest_seqno, f1->fd.largest_seqno,
+                              external_file_seqno);
               abort();
             }
           } else if (f1->fd.smallest_seqno <= f2->fd.smallest_seqno) {
-            fprintf(stderr,
-                    "L0 files seqno %" PRIu64 " %" PRIu64 " vs. %" PRIu64
-                    " %" PRIu64 "\n",
-                    f1->fd.smallest_seqno, f1->fd.largest_seqno,
-                    f2->fd.smallest_seqno, f2->fd.largest_seqno);
+            ROCKS_LOG_FATAL(info_log_, "L0 files seqno %" PRIu64 " %" PRIu64
+                            " vs. %" PRIu64 " %" PRIu64 "\n",
+                            f1->fd.smallest_seqno, f1->fd.largest_seqno,
+                            f2->fd.smallest_seqno, f2->fd.largest_seqno);
             abort();
           }
         } else {
           if (!level_nonzero_cmp_(f1, f2)) {
-            fprintf(stderr, "L%d files are not sorted properly", level);
+            ROCKS_LOG_FATAL(info_log_, "L%d files are not sorted properly",
+                            level);
             abort();
           }
 
           // Make sure there is no overlap in levels > 0
           if (vstorage->InternalComparator()->Compare(f1->largest,
                                                       f2->smallest) >= 0) {
-            fprintf(stderr, "L%d have overlapping ranges %s vs. %s\n", level,
-                    (f1->largest).DebugString(true).c_str(),
-                    (f2->smallest).DebugString(true).c_str());
+            ROCKS_LOG_FATAL(info_log_,
+                            "L%d have overlapping ranges %s vs. %s\n", level,
+                            (f1->largest).DebugString(true).c_str(),
+                            (f2->smallest).DebugString(true).c_str());
             abort();
           }
         }

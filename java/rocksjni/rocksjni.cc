@@ -19,6 +19,7 @@
 #include "include/org_rocksdb_RocksDB.h"
 #include "rocksdb/cache.h"
 #include "rocksdb/db.h"
+#include "rocksdb/convenience.h"
 #include "rocksdb/options.h"
 #include "rocksdb/types.h"
 #include "rocksjni/portal.h"
@@ -1374,6 +1375,92 @@ void Java_org_rocksdb_RocksDB_deleteRange__JJ_3BII_3BIIJ(
   }
 }
 
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    deleteFilesInRange
+ * Signature: (J[BII[BII)V
+ */
+JNIEXPORT void JNICALL Java_org_rocksdb_RocksDB_deleteFilesInRange__J_3BII_3BII(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle, jbyteArray jbegin_key,
+        jint jbegin_key_off, jint jbegin_key_len, jbyteArray jend_key,
+        jint jend_key_off, jint jend_key_len) {
+  auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+  auto* cf_handle = db->DefaultColumnFamily();
+
+  jbyte* begin_key = new jbyte[jbegin_key_len];
+  env->GetByteArrayRegion(jbegin_key, jbegin_key_off, jbegin_key_len, begin_key);
+  if (env->ExceptionCheck()) {
+    // exception thrown: ArrayIndexOutOfBoundsException
+    delete[] begin_key;
+    return;
+  }
+  const rocksdb::Slice begin_key_slice(reinterpret_cast<char*>(begin_key),jbegin_key_len);
+
+  jbyte* end_key = new jbyte[jend_key_len];
+  env->GetByteArrayRegion(jend_key, jend_key_off, jend_key_len, end_key);
+  if (env->ExceptionCheck()) {
+    // exception thrown: ArrayIndexOutOfBoundsException
+    delete[] begin_key;
+    delete[] end_key;
+    return;
+  }
+  const rocksdb::Slice end_key_slice(reinterpret_cast<char*>(end_key), jend_key_len);
+
+  rocksdb::Status s = rocksdb::DeleteFilesInRange(db, cf_handle, &begin_key_slice, &end_key_slice);
+
+  // cleanup
+  delete[] begin_key;
+  delete[] end_key;
+
+  if (!s.ok()) {
+    rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+  }
+}
+
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    deleteFilesInRange
+ * Signature: (J[BII[BIIJ)V
+ */
+JNIEXPORT void JNICALL Java_org_rocksdb_RocksDB_deleteFilesInRange__J_3BII_3BIIJ(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle, jbyteArray jbegin_key,
+        jint jbegin_key_off, jint jbegin_key_len, jbyteArray jend_key,
+        jint jend_key_off, jint jend_key_len, jlong jcf_handle) {
+  auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+  auto* cf_handle = reinterpret_cast<rocksdb::ColumnFamilyHandle*>(jcf_handle);
+
+  jbyte* begin_key = new jbyte[jbegin_key_len];
+  env->GetByteArrayRegion(jbegin_key, jbegin_key_off, jbegin_key_len, begin_key);
+  if (env->ExceptionCheck()) {
+    // exception thrown: ArrayIndexOutOfBoundsException
+    delete[] begin_key;
+    return;
+  }
+  const rocksdb::Slice begin_key_slice(reinterpret_cast<char*>(begin_key), jbegin_key_len);
+
+  jbyte* end_key = new jbyte[jend_key_len];
+  env->GetByteArrayRegion(jend_key, jend_key_off, jend_key_len, end_key);
+  if (env->ExceptionCheck()) {
+    // exception thrown: ArrayIndexOutOfBoundsException
+    delete[] begin_key;
+    delete[] end_key;
+    return;
+  }
+  const rocksdb::Slice end_key_slice(reinterpret_cast<char*>(end_key), jend_key_len);
+
+  rocksdb::Status s = rocksdb::DeleteFilesInRange(db, cf_handle, &begin_key_slice, &end_key_slice);
+
+  // cleanup
+  delete[] begin_key;
+  delete[] end_key;
+
+  if (!s.ok()) {
+    rocksdb::RocksDBExceptionJni::ThrowNew(env, s);	
+  }
+}
+	
+
 //////////////////////////////////////////////////////////////////////////////
 // rocksdb::DB::Merge
 
@@ -2308,3 +2395,169 @@ void Java_org_rocksdb_RocksDB_destroyDB(JNIEnv* env, jclass /*jcls*/,
     rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
   }
 }
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    getDBPath
+ * Signature: (JLjava/lang/String;I)
+ */
+jstring Java_org_rocksdb_RocksDB_getDBPath(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle ) {
+  auto *db = reinterpret_cast<rocksdb::DB *>(jdb_handle);
+  const std::string& path = db->GetName();
+  return env->NewStringUTF(path.c_str());
+}
+
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    getApproximateSizes
+ * Signature: (JLjava/lang/String;I)
+ */
+jlong Java_org_rocksdb_RocksDB_getLiveFilesSize(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle) {
+  uint64_t size;
+  auto* db = reinterpret_cast<rocksdb::DB *>(jdb_handle);
+
+  size = db->GetLiveFilesSize();
+  if (env->ExceptionCheck()) {
+    return 0;
+  }
+  return size;
+}
+
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    syncWal
+ * Signature: (JLjava/lang/String;I)
+ */
+void Java_org_rocksdb_RocksDB_syncWal(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle ) {
+    auto *db = reinterpret_cast<rocksdb::DB *>(jdb_handle);
+    rocksdb::Status s = db->SyncWAL();
+    if (s.IsIOError())
+      std::abort();
+
+    if (!s.ok()) {
+        rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+    }
+}
+//////////////////////////////////////////////////////////////////////////////
+// rocksdb::DB::RecoverSyncOldWal
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    RecoverSyncOldWal
+ * Signature: (J)V
+ */
+void Java_org_rocksdb_RocksDB_recoverSyncOldWal(
+        JNIEnv* env, jobject jobj, jlong jdb_handle) {
+auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+  auto s = db->RecoverSyncOldWal();
+  if (s.ok()) {
+    return;
+  }
+
+  rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// rocksdb::DB::SwitchAndSyncWal
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    switchAndSyncWal
+ * Signature: (J)Ljava/lang/String;
+ */
+jstring Java_org_rocksdb_RocksDB_switchAndSyncWal(
+        JNIEnv* env, jobject jobj, jlong jdb_handle) {
+  auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+
+  uint64_t backup_log_number = 0;
+  auto s = db->SwitchAndSyncWal(backup_log_number);
+  char buf[100];
+  CommonSnprintf(buf, sizeof(buf), sizeof(buf) - 1, "%06llu.%s",
+  static_cast<unsigned long long>(backup_log_number), "log");
+  std::string wal_name = buf;
+  if (s.ok()) {
+    return env->NewStringUTF(wal_name.c_str());
+  }
+
+  rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+  return nullptr;
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// rocksdb::DB::ContinueBackgroundCompation
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    ContinueBackgroundCompaction
+ * Signature: (J)V
+ */
+void Java_org_rocksdb_RocksDB_continueBackgroundCompaction(
+        JNIEnv* env, jobject jobj, jlong jdb_handle) {
+  auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+  auto s = db->ContinueBackgroundCompation();
+  if (s.ok()) {
+    return;
+  }
+
+  rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// rocksdb::DB::PauseBackgroundCompation
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    PauseBackgroundCompaction
+ * Signature: (JJ)V
+ */
+void Java_org_rocksdb_RocksDB_pauseBackgroundCompaction(
+        JNIEnv* env, jobject jobj, jlong jdb_handle) {
+  auto* db = reinterpret_cast<rocksdb::DB*>(jdb_handle);
+  auto s = db->PauseBackgroundCompation();
+  if (s.ok()) {
+    return;
+  }
+
+  rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+}
+
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    FsyncWal
+ * Signature: (JLjava/lang/String;I)
+ */
+void Java_org_rocksdb_RocksDB_fSyncWal(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle ) {
+    auto *db = reinterpret_cast<rocksdb::DB *>(jdb_handle);
+    rocksdb::Status s = db->FSyncWAL(true);
+    if (s.IsIOError())
+      std::abort();
+
+if (!s.ok()) {
+        rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+    }
+}
+
+/*
+ * Class:     org_rocksdb_RocksDB
+ * Method:    FastClose
+ * Signature: (JLjava/lang/String;I)
+ */
+void Java_org_rocksdb_RocksDB_FastClose(
+        JNIEnv* env, jobject /*jdb*/, jlong jdb_handle ) {
+  auto *db = reinterpret_cast<rocksdb::DB *>(jdb_handle);
+  rocksdb::Status s = db->FastClose();
+  if (s.IsIOError())
+    std::abort();
+
+  if (!s.ok()) {
+    rocksdb::RocksDBExceptionJni::ThrowNew(env, s);
+  }
+}
+

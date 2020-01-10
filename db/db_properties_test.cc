@@ -248,8 +248,11 @@ void GetExpectedTableProperties(
   const int kKeyCount = kPutCount + kDeletionCount + kMergeCount;
   const int kAvgSuccessorSize = kKeySize / 5;
   const int kEncodingSavePerKey = kKeySize / 4;
-  expected_tp->raw_key_size =
-      (kKeyCount + kRangeDeletionCount) * (kKeySize + 8);
+#ifdef USE_TIMESTAMPS
+  expected_tp->raw_key_size = (kKeyCount + kRangeDeletionCount) * (kKeySize + 16);
+#else
+  expected_tp->raw_key_size = (kKeyCount + kRangeDeletionCount) * (kKeySize + 8);
+#endif  // USE_TIMESTAMPS
   expected_tp->raw_value_size =
       (kPutCount + kMergeCount + kRangeDeletionCount) * kValueSize;
   expected_tp->num_entries = kKeyCount;
@@ -259,13 +262,26 @@ void GetExpectedTableProperties(
   expected_tp->num_data_blocks =
       kTableCount * (kKeysPerTable * (kKeySize - kEncodingSavePerKey + kValueSize)) /
       kBlockSize;
+#ifdef USE_TIMESTAMPS
+  expected_tp->data_size =
+      kTableCount * (kKeysPerTable * (kKeySize + 16 + kValueSize));
+#else
   expected_tp->data_size =
       kTableCount * (kKeysPerTable * (kKeySize + 8 + kValueSize));
+#endif  // USE_TIMESTAMPS
+#ifdef USE_TIMESTAMPS
+  expected_tp->index_size =
+      expected_tp->num_data_blocks *
+      (kAvgSuccessorSize + (index_key_is_user_key ? 0 : 16) -
+       // discount 1 byte as value size is not encoded in value delta encoding
+       (value_delta_encoding ? 1 : 0));
+#else
   expected_tp->index_size =
       expected_tp->num_data_blocks *
       (kAvgSuccessorSize + (index_key_is_user_key ? 0 : 8) -
        // discount 1 byte as value size is not encoded in value delta encoding
        (value_delta_encoding ? 1 : 0));
+#endif  // USE_TIMESTAMPS
   expected_tp->filter_size =
       kTableCount * (kKeysPerTable * kBloomBitsPerKey / 8);
 }

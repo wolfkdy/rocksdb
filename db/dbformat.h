@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <string>
 #include <utility>
+#include <limits>
 #include "monitoring/perf_context_imp.h"
 #include "rocksdb/comparator.h"
 #include "rocksdb/db.h"
@@ -83,30 +84,76 @@ inline bool IsExtendedValueType(ValueType t) {
 static const SequenceNumber kMaxSequenceNumber =
     ((0x1ull << 56) - 1);
 
+#ifdef USE_TIMESTAMPS
+static const uint64_t kMaxTimeStamp = std::numeric_limits<uint64_t>::max();
+#endif // USE_TIMESTAMPS
+
 static const SequenceNumber kDisableGlobalSequenceNumber = port::kMaxUint64;
 
 struct ParsedInternalKey {
   Slice user_key;
   SequenceNumber sequence;
   ValueType type;
-
+#ifdef USE_TIMESTAMPS
+  uint64_t timestamp;
+#endif // USE_TIMESTAMPS
   ParsedInternalKey()
       : sequence(kMaxSequenceNumber)  // Make code analyzer happy
-        {} // Intentionally left uninitialized (for speed)
+#ifdef USE_TIMESTAMPS
+        ,timestamp(kMaxTimeStamp)
+#endif  // USE_TIMESTAMPS
+  {}  // Intentionally left uninitialized (for speed)
+
+#ifdef USE_TIMESTAMPS
+  ParsedInternalKey(const Slice& u, const SequenceNumber& seq, ValueType t,
+                    uint64_t ts)
+      : user_key(u),
+        sequence(seq),
+        type(t),
+        timestamp(ts)
+  {}
+#else
   ParsedInternalKey(const Slice& u, const SequenceNumber& seq, ValueType t)
       : user_key(u), sequence(seq), type(t) { }
+#endif  // USE_TIMESTAMPS
   std::string DebugString(bool hex = false) const;
+
+#ifdef USE_TIMESTAMPS
+  static ParsedInternalKey MaxFromUserKeyAndType(const Slice& u, ValueType t) {
+    return ParsedInternalKey(u, 0, t, 0);
+  }
+
+  static ParsedInternalKey MinFromUserKeyAndType(const Slice& u, ValueType t) {
+    return ParsedInternalKey(u, kMaxSequenceNumber, t, kMaxTimeStamp);
+  }
+
+#else
+  static ParsedInternalKey MaxFromUserKeyAndType(const Slice& u, ValueType t) {
+    return ParsedInternalKey(u, 0, t);
+  }
+
+  static ParsedInternalKey MinFromUserKeyAndType(const Slice& u, ValueType t) {
+    return ParsedInternalKey(u, kMaxSequenceNumber, t);
+  }
+#endif  // USE_TIMESTAMPS
 
   void clear() {
     user_key.clear();
     sequence = 0;
     type = kTypeDeletion;
+#ifdef USE_TIMESTAMPS
+    timestamp = 0;
+#endif  // USE_TIMESTAMPS
   }
 };
 
 // Return the length of the encoding of "key".
 inline size_t InternalKeyEncodingLength(const ParsedInternalKey& key) {
-  return key.user_key.size() + 8;
+  size_t result = key.user_key.size() + 8;
+#ifdef USE_TIMESTAMPS
+  result += 8;
+#endif  // USE_TIMESTAMPS
+  return result;
 }
 
 // Pack a sequence number and a ValueType into a uint64_t
@@ -121,11 +168,17 @@ EntryType GetEntryType(ValueType value_type);
 // Append the serialization of "key" to *result.
 extern void AppendInternalKey(std::string* result,
                               const ParsedInternalKey& key);
+
+#ifdef USE_TIMESTAMPS
+extern void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
+                                    ValueType t, uint64_t ts);
+#else
 // Serialized internal key consists of user key followed by footer.
 // This function appends the footer to *result, assuming that *result already
 // contains the user key at the end.
 extern void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
                                     ValueType t);
+#endif  // USE_TIMESTAMPS
 
 // Attempt to parse an internal key from "internal_key".  On success,
 // stores the parsed data in "*result", and returns true.
@@ -136,8 +189,12 @@ extern bool ParseInternalKey(const Slice& internal_key,
 
 // Returns the user key portion of an internal key.
 inline Slice ExtractUserKey(const Slice& internal_key) {
-  assert(internal_key.size() >= 8);
-  return Slice(internal_key.data(), internal_key.size() - 8);
+  size_t suffix = 8;
+#ifdef USE_TIMESTAMPS
+  suffix += 8;
+#endif  // USE_TIMESTAMPS
+  assert(internal_key.size() >= suffix);
+  return Slice(internal_key.data(), internal_key.size() - suffix);
 }
 
 inline uint64_t ExtractInternalKeyFooter(const Slice& internal_key) {
@@ -186,6 +243,11 @@ class InternalKeyComparator
   }
 };
 
+Slice UserKeyFromRawInternalKey(const char* key, uint32_t klen);
+uint32_t I2ULen(uint32_t);
+uint32_t U2ILen(uint32_t);
+std::string Userkey2Timestamped(const std::string& uk, uint64_t ts = 0);
+
 // Modules in this directory should keep internal keys wrapped inside
 // the following class instead of plain strings so that we do not
 // incorrectly use string comparisons instead of an InternalKeyComparator.
@@ -194,6 +256,41 @@ class InternalKey {
   std::string rep_;
  public:
   InternalKey() { }   // Leave rep_ as empty to indicate it is invalid
+#ifdef USE_TIMESTAMPS
+  InternalKey(const Slice& _user_key, SequenceNumber s, ValueType t,
+              uint64_t ts) {
+    AppendInternalKey(&rep_, ParsedInternalKey(_user_key, s, t, ts));
+  }
+
+  // sets the internal key to be bigger or equal to all internal keys with this
+  // user key
+  void SetMaxPossibleForUserKey(const Slice& _user_key) {
+    AppendInternalKey(
+        &rep_, ParsedInternalKey(_user_key, 0, static_cast<ValueType>(0), 0));
+  }
+
+  // sets the internal key to be smaller or equal to all internal keys with this
+  // user key
+  void SetMinPossibleForUserKey(const Slice& _user_key) {
+    AppendInternalKey(&rep_, ParsedInternalKey(_user_key, kMaxSequenceNumber,
+                                               kValueTypeForSeek, kMaxTimeStamp));
+  }
+
+  void SetMaxPossibleForUserKeyAndType(const Slice& _user_key, ValueType t) {
+     AppendInternalKey(
+        &rep_, ParsedInternalKey(_user_key, 0, t, 0));
+  }
+
+  void SetMinPossibleForUserKeyAndType(const Slice& _user_key, ValueType t) {
+     AppendInternalKey(
+        &rep_, ParsedInternalKey(_user_key, kMaxSequenceNumber, t, kMaxTimeStamp));
+  }
+
+  void Set(const Slice& _user_key, SequenceNumber s, ValueType t, uint64_t ts) {
+    SetFrom(ParsedInternalKey(_user_key, s, t, ts));
+  }
+
+#else
   InternalKey(const Slice& _user_key, SequenceNumber s, ValueType t) {
     AppendInternalKey(&rep_, ParsedInternalKey(_user_key, s, t));
   }
@@ -212,6 +309,20 @@ class InternalKey {
                                                kValueTypeForSeek));
   }
 
+  void SetMaxPossibleForUserKeyAndType(const Slice& _user_key, ValueType t) {
+     AppendInternalKey(
+        &rep_, ParsedInternalKey(_user_key, 0, t));
+  }
+
+  void SetMinPossibleForUserKeyAndType(const Slice& _user_key, ValueType t) {
+     AppendInternalKey(
+        &rep_, ParsedInternalKey(_user_key, kMaxSequenceNumber, t));
+  }
+
+  void Set(const Slice& _user_key, SequenceNumber s, ValueType t) {
+    SetFrom(ParsedInternalKey(_user_key, s, t));
+  }
+#endif // USE_TIMESTAMPS
   bool Valid() const {
     ParsedInternalKey parsed;
     return ParseInternalKey(Slice(rep_), &parsed);
@@ -224,11 +335,8 @@ class InternalKey {
   }
 
   Slice user_key() const { return ExtractUserKey(rep_); }
-  size_t size() { return rep_.size(); }
 
-  void Set(const Slice& _user_key, SequenceNumber s, ValueType t) {
-    SetFrom(ParsedInternalKey(_user_key, s, t));
-  }
+  size_t size() { return rep_.size(); }
 
   void SetFrom(const ParsedInternalKey& p) {
     rep_.clear();
@@ -243,9 +351,24 @@ class InternalKey {
 
   // Assuming that *rep() contains a user key, this method makes internal key
   // out of it in-place. This saves a memcpy compared to Set()/SetFrom().
+#ifdef USE_TIMESTAMPS
+  void ConvertFromUserKey(SequenceNumber s, ValueType t, uint64_t ts) {
+    AppendInternalKeyFooter(&rep_, s, t, ts);
+  }
+
+  void ConvertFromUserKeyMinPossible(ValueType t) {
+    AppendInternalKeyFooter(&rep_, kMaxSequenceNumber, t, kMaxTimeStamp);
+  }
+
+#else
   void ConvertFromUserKey(SequenceNumber s, ValueType t) {
     AppendInternalKeyFooter(&rep_, s, t);
   }
+
+  void ConvertFromUserKeyMinPossible(ValueType t) {
+    AppendInternalKeyFooter(&rep_, kMaxSequenceNumber, t);
+  }
+#endif  // USE_TIMESTAMPS
 
   std::string DebugString(bool hex = false) const;
 };
@@ -258,18 +381,45 @@ inline int InternalKeyComparator::Compare(
 inline bool ParseInternalKey(const Slice& internal_key,
                              ParsedInternalKey* result) {
   const size_t n = internal_key.size();
-  if (n < 8) return false;
+  
+  // A internal key at least has 8 bytes lsn/tag packed info plus 8 bytes timestamp info.
+  // | user_key | timestamp (perhaps not) | lsn+type packed |
+
+  size_t offset = 8;
+#ifdef USE_TIMESTAMPS
+  offset = 16;
+#endif // USE_TIMESTAMPS
+
+  if (n < offset) return false;
+
+#ifdef USE_TIMESTAMPS
+  uint64_t ts = DecodeFixed64(internal_key.data() + n - 16);
+  result->timestamp = ts;
+#endif  // USE_TIMESTAMPS
+
   uint64_t num = DecodeFixed64(internal_key.data() + n - 8);
   unsigned char c = num & 0xff;
   result->sequence = num >> 8;
   result->type = static_cast<ValueType>(c);
   assert(result->type <= ValueType::kMaxValue);
-  result->user_key = Slice(internal_key.data(), n - 8);
+  result->user_key = Slice(internal_key.data(), n - offset);
   return IsExtendedValueType(result->type);
 }
 
 // Update the sequence number in the internal key.
 // Guarantees not to invalidate ikey.data().
+#ifdef USE_TIMESTAMPS
+inline void UpdateInternalKey(std::string* ikey, uint64_t seq, ValueType t, uint64_t ts) {
+  size_t ikey_sz = ikey->size();
+  assert(ikey_sz >= 16);
+  uint64_t newval = (seq << 8) | t;
+
+  // Note: Since C++11, strings are guaranteed to be stored contiguously and
+  // string::operator[]() is guaranteed not to change ikey.data().
+  EncodeFixed64(&(*ikey)[ikey_sz - 8], newval);
+  EncodeFixed64(&(*ikey)[ikey_sz - 16], ts);
+}
+#else
 inline void UpdateInternalKey(std::string* ikey, uint64_t seq, ValueType t) {
   size_t ikey_sz = ikey->size();
   assert(ikey_sz >= 8);
@@ -279,6 +429,7 @@ inline void UpdateInternalKey(std::string* ikey, uint64_t seq, ValueType t) {
   // string::operator[]() is guaranteed not to change ikey.data().
   EncodeFixed64(&(*ikey)[ikey_sz - 8], newval);
 }
+#endif // USE_TIMESTAMPS
 
 // Get the sequence number from the internal key
 inline uint64_t GetInternalKeySeqno(const Slice& internal_key) {
@@ -294,7 +445,11 @@ class LookupKey {
  public:
   // Initialize *this for looking up user_key at a snapshot with
   // the specified sequence number.
+#ifdef USE_TIMESTAMPS
+  LookupKey(const Slice& _user_key, SequenceNumber s, uint64_t timestamp = kMaxTimeStamp);
+#else
   LookupKey(const Slice& _user_key, SequenceNumber sequence);
+#endif  // USE_TIMESTAMPS
 
   ~LookupKey();
 
@@ -310,13 +465,24 @@ class LookupKey {
 
   // Return the user key
   Slice user_key() const {
+#ifdef USE_TIMESTAMPS
+    return Slice(kstart_, static_cast<size_t>(end_ - kstart_ - 16));
+#else
     return Slice(kstart_, static_cast<size_t>(end_ - kstart_ - 8));
+#endif  // USE_TIMESTAMPS
   }
+
+#ifdef USE_TIMESTAMPS
+  uint64_t timestamp() const {
+    return DecodeFixed64(end_ - 16);
+  }
+#endif  // USE_TIMESTAMPS
 
  private:
   // We construct a char array of the form:
   //    klength  varint32               <-- start_
   //    userkey  char[klength]          <-- kstart_
+  //    timstamp uint64, if exists.
   //    tag      uint64
   //                                    <-- end_
   // The array is a suitable MemTable key.
@@ -361,8 +527,7 @@ class IterKey {
     if (IsUserKey()) {
       return Slice(key_, key_size_);
     } else {
-      assert(key_size_ >= 8);
-      return Slice(key_, key_size_ - 8);
+      return UserKeyFromRawInternalKey(key_, key_size_);
     }
   }
 
@@ -420,9 +585,8 @@ class IterKey {
   // and returns a Slice referencing the new copy.
   Slice SetInternalKey(const Slice& key, ParsedInternalKey* ikey) {
     size_t key_n = key.size();
-    assert(key_n >= 8);
     SetInternalKey(key);
-    ikey->user_key = Slice(key_, key_n - 8);
+    ikey->user_key = UserKeyFromRawInternalKey(key_, key_n);
     return Slice(key_, key_n);
   }
 
@@ -444,11 +608,44 @@ class IterKey {
     EncodeFixed64(&buf_[key_size_ - 8], newval);
   }
 
+  void UpdateInternalKey(uint64_t seq, ValueType t, uint64_t timestamp) {
+    assert(!IsKeyPinned());
+    assert(key_size_ >= 8);
+    uint64_t newval = (seq << 8) | t;
+    EncodeFixed64(&buf_[key_size_ - 8], newval);
+#ifdef USE_TIMESTAMPS
+    assert(key_size_ >= 16);
+    EncodeFixed64(&buf_[key_size_ - 16], timestamp);
+#else
+    std::ignore = timestamp;
+#endif
+  }
+
   bool IsKeyPinned() const { return (key_ != buf_); }
 
+#ifdef USE_TIMESTAMPS
   void SetInternalKey(const Slice& key_prefix, const Slice& user_key,
                       SequenceNumber s,
-                      ValueType value_type = kValueTypeForSeek) {
+                      uint64_t ts,
+                      ValueType value_type/* = kValueTypeForSeek*/) {
+    size_t psize = key_prefix.size();
+    size_t usize = user_key.size();
+    EnlargeBufferIfNeeded(psize + usize + 8 + 8);
+    if (psize > 0) {
+      memcpy(buf_, key_prefix.data(), psize);
+    }
+    memcpy(buf_ + psize, user_key.data(), usize);
+    EncodeFixed64(buf_ + usize + psize, ts);
+    EncodeFixed64(buf_ + usize + psize + 8, PackSequenceAndType(s, value_type));
+
+    key_ = buf_;
+    key_size_ = psize + usize + 8 + 8;
+    is_user_key_ = false;
+  }
+#else
+  void SetInternalKey(const Slice& key_prefix, const Slice& user_key,
+                      SequenceNumber s,
+                      ValueType value_type) {
     size_t psize = key_prefix.size();
     size_t usize = user_key.size();
     EnlargeBufferIfNeeded(psize + usize + sizeof(uint64_t));
@@ -462,11 +659,19 @@ class IterKey {
     key_size_ = psize + usize + sizeof(uint64_t);
     is_user_key_ = false;
   }
+#endif  // USE_TIMESTAMPS
 
+#ifdef USE_TIMESTAMPS
+  void SetInternalKey(const Slice& user_key, SequenceNumber s, uint64_t ts,
+                      ValueType value_type/* = kValueTypeForSeek*/) {
+    SetInternalKey(Slice(), user_key, s, ts, value_type);
+  }
+#else
   void SetInternalKey(const Slice& user_key, SequenceNumber s,
-                      ValueType value_type = kValueTypeForSeek) {
+                      ValueType value_type) {
     SetInternalKey(Slice(), user_key, s, value_type);
   }
+#endif  // USE_TIMESTAMPS
 
   void Reserve(size_t size) {
     EnlargeBufferIfNeeded(size);
@@ -479,8 +684,14 @@ class IterKey {
 
   void SetInternalKey(const Slice& key_prefix,
                       const ParsedInternalKey& parsed_key_suffix) {
+#ifdef USE_TIMESTAMPS
+    SetInternalKey(key_prefix, parsed_key_suffix.user_key,
+                   parsed_key_suffix.sequence,
+                   parsed_key_suffix.timestamp, parsed_key_suffix.type);
+#else
     SetInternalKey(key_prefix, parsed_key_suffix.user_key,
                    parsed_key_suffix.sequence, parsed_key_suffix.type);
+#endif  // USE_TIMESTAMPS
   }
 
   void EncodeLengthPrefixedKey(const Slice& key) {
@@ -595,30 +806,52 @@ extern Status ReadRecordFromWriteBatch(Slice* input, char* tag,
 // we will store a serialized RangeTombstone in MemTable and SST.
 // the struct here is a easy-understood form
 // start/end_key_ is the start/end user key of the range to be deleted
+
+// NOTE: RangeTombstone with timestamp is NOT tested
+// in fact, it is not supported.
 struct RangeTombstone {
   Slice start_key_;
   Slice end_key_;
   SequenceNumber seq_;
+#ifdef USE_TIMESTAMPS
+  uint64_t timestamp_;
+#endif // USE_TIMESTAMPS
   RangeTombstone() = default;
+#ifdef USE_TIMESTAMPS
+  RangeTombstone(Slice sk, Slice ek, SequenceNumber sn, uint64_t ts)
+      : start_key_(sk), end_key_(ek), seq_(sn), timestamp_(ts) {}
+#else
   RangeTombstone(Slice sk, Slice ek, SequenceNumber sn)
       : start_key_(sk), end_key_(ek), seq_(sn) {}
+#endif // USE_TIMESTAMPS
 
   RangeTombstone(ParsedInternalKey parsed_key, Slice value) {
     start_key_ = parsed_key.user_key;
     seq_ = parsed_key.sequence;
     end_key_ = value;
+#ifdef USE_TIMESTAMPS
+    timestamp_ = parsed_key.timestamp;
+#endif // USE_TIMESTAMPS
   }
 
   // be careful to use Serialize(), allocates new memory
   std::pair<InternalKey, Slice> Serialize() const {
+#ifdef USE_TIMESTAMPS
+    auto key = InternalKey(start_key_, seq_, kTypeRangeDeletion, timestamp_);
+#else
     auto key = InternalKey(start_key_, seq_, kTypeRangeDeletion);
+#endif  // USE_TIMESTAMPS
     Slice value = end_key_;
     return std::make_pair(std::move(key), std::move(value));
   }
 
   // be careful to use SerializeKey(), allocates new memory
   InternalKey SerializeKey() const {
+#ifdef USE_TIMESTAMPS
+    return InternalKey(start_key_, seq_, kTypeRangeDeletion, timestamp_);
+#else
     return InternalKey(start_key_, seq_, kTypeRangeDeletion);
+#endif // USE_TIMESTAMPS
   }
 
   // The tombstone end-key is exclusive, so we generate an internal-key here
@@ -629,12 +862,15 @@ struct RangeTombstone {
   //
   // be careful to use SerializeEndKey(), allocates new memory
   InternalKey SerializeEndKey() const {
+#ifdef USE_TIMESTAMPS
+	return InternalKey(end_key_, kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp);
+#else
     return InternalKey(end_key_, kMaxSequenceNumber, kTypeRangeDeletion);
+#endif // USE_TIMESTAMPS
   }
 };
 
-inline
-int InternalKeyComparator::Compare(const Slice& akey, const Slice& bkey) const {
+inline int InternalKeyComparator::Compare(const Slice& akey, const Slice& bkey) const {
   // Order by:
   //    increasing user key (according to user-supplied comparator)
   //    decreasing sequence number

@@ -4930,6 +4930,8 @@ Status TransactionStressTestInserter(TransactionDB* db,
   TransactionOptions txn_options;
   txn_options.set_snapshot = true;
 
+
+
   RandomTransactionInserter inserter(&_rand, write_options, read_options,
                                      num_keys_per_set,
                                      static_cast<uint16_t>(num_sets));

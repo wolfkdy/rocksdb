@@ -5,13 +5,17 @@
 
 package org.rocksdb;
 
+import java.io.Serializable;
+
 /**
  * Represents the status returned by a function call in RocksDB.
  *
  * Currently only used with {@link RocksDBException} when the
  * status is not {@link Code#Ok}
  */
-public class Status {
+public class Status implements Serializable {
+
+  private static final long serialVersionUID = -6454995273782985690L;
   private final Code code;
   /* @Nullable */ private final SubCode subCode;
   /* @Nullable */ private final String state;

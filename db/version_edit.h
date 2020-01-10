@@ -204,6 +204,22 @@ class VersionEdit {
     has_log_number_ = true;
     log_number_ = num;
   }
+
+  void SetHasNoLogNumber() {
+    has_log_number_ = false;
+    log_number_ = 0;
+  }
+
+  void SetHasNoPrevLogNumber() {
+    has_prev_log_number_ = false;
+    prev_log_number_ = 0;
+  }
+
+  void SetHasNoNextFile() {
+    has_next_file_number_ = false;
+    next_file_number_ = 0;
+  }
+
   void SetPrevLogNumber(uint64_t num) {
     has_prev_log_number_ = true;
     prev_log_number_ = num;
@@ -228,6 +244,10 @@ class VersionEdit {
   bool has_log_number() { return has_log_number_; }
 
   uint64_t log_number() { return log_number_; }
+
+  bool has_last_seq() const { return has_last_sequence_; }
+
+  uint64_t last_seq() const { return last_sequence_; }
 
   // Add the specified file at the specified number.
   // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
@@ -266,8 +286,24 @@ class VersionEdit {
     return is_column_family_add_ || is_column_family_drop_;
   }
 
+  bool IsColumnFamilyAdd() {
+     return is_column_family_add_;
+   }
+
+  bool IsColumnFamilyDrop()   {
+     return is_column_family_drop_;
+  }
+
   void SetColumnFamily(uint32_t column_family_id) {
     column_family_ = column_family_id;
+  }
+
+  uint32_t GetColumnFamily() const {
+    return column_family_;
+  }
+
+  std::string GetColumnFamilyName() {
+    return column_family_name_;
   }
 
   // set column family ID by calling SetColumnFamily()
@@ -313,6 +349,7 @@ class VersionEdit {
   friend class Version;
 
   bool GetLevel(Slice* input, int* level, const char** msg);
+
 
   int max_level_;
   std::string comparator_;

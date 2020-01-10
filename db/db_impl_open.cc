@@ -304,7 +304,8 @@ Status DBImpl::Directories::SetDirectories(
 
 Status DBImpl::Recover(
     const std::vector<ColumnFamilyDescriptor>& column_families, bool read_only,
-    bool error_if_log_file_exist, bool error_if_data_exists_in_logs) {
+    bool error_if_log_file_exist, bool error_if_data_exists_in_logs,
+    FileLock* db_lock) {
   mutex_.AssertHeld();
 
   bool is_new_db = false;
@@ -317,9 +318,22 @@ Status DBImpl::Recover(
       return s;
     }
 
-    s = env_->LockFile(LockFileName(dbname_), &db_lock_);
-    if (!s.ok()) {
-      return s;
+	if(initial_db_options_.recover_lease_during_open){
+      s = env_->RecoverLease(LockFileName(dbname_));
+      if (!s.ok()) {
+        Log(InfoLogLevel::WARN_LEVEL, immutable_db_options_.info_log,
+              "[OpenDB] force to recover lease of lock failed (%s)", s.ToString().c_str());
+        return s;
+      }
+    }
+
+    if (db_lock == nullptr) {
+      s = env_->LockFile(LockFileName(dbname_), &db_lock_);
+      if (!s.ok()) {
+        return s;
+      }
+    } else {
+      db_lock_ = db_lock;
     }
 
     s = env_->FileExists(CurrentFileName(dbname_));
@@ -463,6 +477,18 @@ Status DBImpl::Recover(
     if (!logs.empty()) {
       // Recover in the order in which the logs were generated
       std::sort(logs.begin(), logs.end());
+
+      uint64_t last_log = logs.back();
+      std::string old_fname = LogFileName(immutable_db_options_.wal_dir, last_log);
+      std::string new_fname = LogFileName(immutable_db_options_.wal_dir, (last_log + 200));
+      s = env_->RenameFile(old_fname, new_fname);
+      if(!s.ok()){
+          return s;
+      }
+      logs.pop_back();
+      logs.push_back(last_log+200);
+      ROCKS_LOG_INFO(immutable_db_options_.info_log, "rename file:%d to :%d",
+                     last_log, last_log + 200);
       s = RecoverLogFiles(logs, &next_sequence, read_only);
       if (!s.ok()) {
         // Clear memtables if recovery failed
@@ -499,6 +525,68 @@ Status DBImpl::Recover(
   return s;
 }
 
+Status DBImpl::RecoverReadOnly(
+    const std::vector<ColumnFamilyDescriptor>& column_families,
+    const std::string& replica_manifest_content, uint64_t start_lsn) {
+  mutex_.AssertHeld();
+  assert(db_lock_ == nullptr);
+  Status s =
+      versions_->Recover(column_families, true, replica_manifest_content);
+  if (!s.ok()) {
+     return s;
+  }
+  assert(versions_->LastSequence() <= start_lsn);
+  // NOTE(xxxxxxxx): manifest's max lsn does not stand for the actual last lsn.
+  versions_->SetLastSequence(start_lsn);
+
+  for (auto cfd : *versions_->GetColumnFamilySet()) {
+     cfd->current()->HintCreatedSinceLsn(versions_->LastSequence());
+  }
+  if (immutable_db_options_.paranoid_checks && s.ok()) {
+    s = CheckConsistency();
+  }
+  if (!s.ok()) {
+     return s;
+  }
+  default_cf_handle_ = new ColumnFamilyHandleImpl(
+        versions_->GetColumnFamilySet()->GetDefault(), this, &mutex_);
+  ROCKS_LOG_INFO(immutable_db_options_.info_log,
+                     "default cf name %s" , default_cf_handle_->GetName().c_str() );
+  default_cf_internal_stats_ = default_cf_handle_->cfd()->internal_stats();
+  single_column_family_mode_ = false;
+
+  // Initial max_total_in_memory_state_ before recovery logs. Log recovery
+  // may check this value to decide whether to flush.
+  max_total_in_memory_state_ = 0;
+  for (auto cfd : *versions_->GetColumnFamilySet()) {
+    auto* mutable_cf_options = cfd->GetLatestMutableCFOptions();
+    max_total_in_memory_state_ += mutable_cf_options->write_buffer_size *
+                                  mutable_cf_options->max_write_buffer_number;
+  }
+
+  // If we are opening as read-only, we need to update options_file_number_
+  // to reflect the most recent OPTIONS file. It does not matter for regular
+  // read-write db instance because options_file_number_ will later be
+  // updated to versions_->NewFileNumber() in RenameTempFileToOptionsFile.
+  std::vector<std::string> file_names;
+  if (s.ok()) {
+    s = env_->GetChildren(GetName(), &file_names);
+  }
+  if (s.ok()) {
+    uint64_t number = 0;
+    uint64_t options_file_number = 0;
+    FileType type;
+    for (const auto& fname : file_names) {
+      if (ParseFileName(fname, &number, &type) && type == kOptionsFile) {
+        options_file_number = std::max(number, options_file_number);
+      }
+    }
+    versions_->options_file_number_ = options_file_number;
+  }
+  return s;
+}
+
+
 // REQUIRES: log_numbers are sorted in ascending order
 Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
                                SequenceNumber* next_sequence, bool read_only) {
@@ -519,6 +607,7 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
 
   mutex_.AssertHeld();
   Status status;
+  uint64_t last_log = log_numbers.back();
   std::unordered_map<int, VersionEdit> version_edits;
   // no need to refcount because iteration is under mutex
   for (auto cfd : *versions_->GetColumnFamilySet()) {
@@ -624,7 +713,7 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
     // to be skipped instead of propagating bad information (like overly
     // large sequence numbers).
     log::Reader reader(immutable_db_options_.info_log, std::move(file_reader),
-                       &reporter, true /*checksum*/, log_number,
+                       &reporter, true /*checksum*/, ((last_log==log_number)? (last_log-200):log_number),
                        false /* retry_after_eof */);
 
     // Determine if we should tolerate incomplete records at the tail end of the
@@ -896,8 +985,11 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
       // VersionSet::next_file_number_ always to be strictly greater than any
       // log number
       versions_->MarkFileNumberUsed(max_log_number + 1);
+
       status = versions_->LogAndApply(cfd, *cfd->GetLatestMutableCFOptions(),
                                       edit, &mutex_);
+      // db is not opened, there should be no change_streams_
+      assert(change_streams_.size() == 0);
       if (!status.ok()) {
         // Recovery failed
         break;
@@ -911,6 +1003,9 @@ Status DBImpl::RecoverLogFiles(const std::vector<uint64_t>& log_numbers,
 
   event_logger_.Log() << "job" << job_id << "event"
                       << "recovery_finished";
+
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "recovery stat:(%d,%d,%d)",
+                 status.ok(), data_seen, flushed);
 
   return status;
 }
@@ -1141,6 +1236,17 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   }
 
   s = impl->CreateArchivalDirectory();
+  if (s.ok() && db_options.oldest_wal_seq_number > 0) {
+    assert(db_options.WAL_size_limit_MB > 0);
+    // we must set SetOldestWalSequenceNumber before Recovery because
+    // Recovery will delete files, at which time, oldest_wal_seq_number should
+    // have been set into wal_manager.
+    ROCKS_LOG_INFO(impl->immutable_db_options_.info_log,
+                   "open db with oldest_wal_seq_number:%llu",
+                   db_options.oldest_wal_seq_number);
+    auto seq = SequenceNumber(db_options.oldest_wal_seq_number);
+    s = impl->wal_manager_.SetOldestWalSequenceNumber(&seq, false /* round */);
+  }
   if (!s.ok()) {
     delete impl;
     return s;
@@ -1148,7 +1254,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
   impl->mutex_.Lock();
   auto write_hint = impl->CalculateWALWriteHint();
   // Handles create_if_missing, error_if_exists
-  s = impl->Recover(column_families);
+  s = impl->Recover(column_families, false, false, false, db_options.db_lock_);
   if (s.ok()) {
     uint64_t new_log_number = impl->versions_->NewFileNumber();
     std::unique_ptr<WritableFile> lfile;

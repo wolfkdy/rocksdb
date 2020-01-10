@@ -170,11 +170,25 @@ Compaction* FIFOCompactionPicker::PickSizeCompaction(
   std::vector<CompactionInputFiles> inputs;
   inputs.emplace_back();
   inputs[0].level = 0;
+  Slice tmp(mutable_cf_options.compaction_options_fifo.exclude_prefix);
 
   for (auto ritr = level_files.rbegin(); ritr != level_files.rend(); ++ritr) {
     auto f = *ritr;
     total_size -= f->compensated_file_size;
-    inputs[0].files.push_back(f);
+    if (mutable_cf_options.compaction_options_fifo.exclude_prefix.empty()
+        || (BytewiseComparator()->Compare(tmp, f->largest.user_key()) 
+               > 0) 
+        || (BytewiseComparator()->Compare(tmp, f->smallest.user_key()) 
+               < 0)) {
+      ROCKS_LOG_BUFFER(log_buffer,
+                       "[%s] FIFO compaction: no picking file %" PRIu64
+                       " with small %s-largest %s-prefix %s",
+                       cf_name.c_str(), 
+                       f->fd.GetNumber(), f->smallest.user_key().ToString(true).c_str(),
+                       f->largest.user_key().ToString(true).c_str(), 
+                       tmp.ToString(true).c_str());
+      inputs[0].files.push_back(f);
+    }
     char tmp_fsize[16];
     AppendHumanBytes(f->fd.GetFileSize(), tmp_fsize, sizeof(tmp_fsize));
     ROCKS_LOG_BUFFER(log_buffer,
@@ -185,6 +199,10 @@ Compaction* FIFOCompactionPicker::PickSizeCompaction(
         mutable_cf_options.compaction_options_fifo.max_table_files_size) {
       break;
     }
+  }
+
+  if (inputs[0].files.size() == 0) {
+    return nullptr;
   }
 
   Compaction* c = new Compaction(

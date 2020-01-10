@@ -60,7 +60,11 @@ class FileIndexerTest : public testing::Test {
   }
 
   InternalKey IntKey(int64_t v) {
+#ifdef USE_TIMESTAMPS
+    return InternalKey(Slice(reinterpret_cast<char*>(&v), 8), 0, kTypeValue, 0);
+#else
     return InternalKey(Slice(reinterpret_cast<char*>(&v), 8), 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
   }
 
   void ClearFiles() {

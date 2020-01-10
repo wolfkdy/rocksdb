@@ -266,7 +266,11 @@ void TestCustomizedTablePropertiesCollector(
 
   SequenceNumber seqNum = 0U;
   for (const auto& kv : kvs) {
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(kv.first.first, seqNum++, kv.first.second, 0);
+#else
     InternalKey ikey(kv.first.first, seqNum++, kv.first.second);
+#endif  // USE_TIMESTAMPS
     builder->Add(ikey.Encode(), kv.second);
   }
   ASSERT_OK(builder->Finish());
@@ -334,7 +338,7 @@ TEST_P(TablePropertiesTest, CustomizedTablePropertiesCollector) {
         std::make_shared<FlushBlockEveryThreePolicyFactory>();
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
 
-    test::PlainInternalKeyComparator ikc(options.comparator);
+    InternalKeyComparator ikc(options.comparator);
     std::shared_ptr<TablePropertiesCollectorFactory> collector_factory(
         new RegularKeysStartWithAFactory(backward_mode_));
     options.table_properties_collector_factories.resize(1);
@@ -364,6 +368,20 @@ namespace {
 void TestInternalKeyPropertiesCollector(
     bool backward_mode, uint64_t magic_number, bool sanitized,
     std::shared_ptr<TableFactory> table_factory) {
+#ifdef USE_TIMESTAMPS
+  InternalKey keys[] = {
+      InternalKey("A       ", 0, ValueType::kTypeValue, 0),
+      InternalKey("B       ", 1, ValueType::kTypeValue, 0),
+      InternalKey("C       ", 2, ValueType::kTypeValue, 0),
+      InternalKey("W       ", 3, ValueType::kTypeDeletion, 0),
+      InternalKey("X       ", 4, ValueType::kTypeDeletion, 0),
+      InternalKey("Y       ", 5, ValueType::kTypeDeletion, 0),
+      InternalKey("Z       ", 6, ValueType::kTypeDeletion, 0),
+      InternalKey("a       ", 7, ValueType::kTypeSingleDeletion, 0),
+      InternalKey("b       ", 8, ValueType::kTypeMerge, 0),
+      InternalKey("c       ", 9, ValueType::kTypeMerge, 0),
+  };
+#else
   InternalKey keys[] = {
       InternalKey("A       ", 0, ValueType::kTypeValue),
       InternalKey("B       ", 1, ValueType::kTypeValue),
@@ -376,11 +394,11 @@ void TestInternalKeyPropertiesCollector(
       InternalKey("b       ", 8, ValueType::kTypeMerge),
       InternalKey("c       ", 9, ValueType::kTypeMerge),
   };
-
+#endif  // USE_TIMESTAMPS
   std::unique_ptr<TableBuilder> builder;
   std::unique_ptr<WritableFileWriter> writable;
   Options options;
-  test::PlainInternalKeyComparator pikc(options.comparator);
+  InternalKeyComparator pikc(options.comparator);
 
   std::vector<std::unique_ptr<IntTblPropCollectorFactory>>
       int_tbl_prop_collector_factories;

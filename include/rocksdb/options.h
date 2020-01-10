@@ -605,7 +605,7 @@ struct DBOptions {
   // int table_cache_remove_scan_count_limit;
 
   // The following two fields affect how archived logs will be deleted.
-  // 1. If both set to 0, logs will be deleted asap and will not get into
+  // 1. If all set to 0, logs will be deleted asap and will not get into
   //    the archive.
   // 2. If WAL_ttl_seconds is 0 and WAL_size_limit_MB is not 0,
   //    WAL files will be checked every 10 min and if total size is greater
@@ -614,10 +614,12 @@ struct DBOptions {
   // 3. If WAL_ttl_seconds is not 0 and WAL_size_limit_MB is 0, then
   //    WAL files will be checked every WAL_ttl_seconds / 2 and those that
   //    are older than WAL_ttl_seconds will be deleted.
-  // 4. If both are not 0, WAL files will be checked every 10 min and both
-  //    checks will be performed with ttl being first.
+  // 4. If all are not 0, WAL files will be checked every 10 min and 
+  //    checks will be performed with oldest_wal_seq_number first,
+  //    ttl will be disabled.
   uint64_t WAL_ttl_seconds = 0;
   uint64_t WAL_size_limit_MB = 0;
+  uint64_t oldest_wal_seq_number = 0;
 
   // Number of bytes to preallocate (via fallocate) the manifest
   // files.  Default is 4mb, which is reasonable to reduce random IO
@@ -735,6 +737,7 @@ struct DBOptions {
   //
   // Dynamically changeable through SetDBOptions() API.
   size_t compaction_readahead_size = 0;
+
 
   // This is a maximum buffer size that is used by WinMmapReadableFile in
   // unbuffered disk I/O mode. We need to maintain an aligned buffer for
@@ -943,6 +946,10 @@ struct DBOptions {
   // Dynamically changeable through SetDBOptions() API.
   bool avoid_flush_during_shutdown = false;
 
+  // NOTE:this param is used by mongodb. when the mongo service need to do HA,
+  // the mongod will open this instance with this flag is true, others is false.
+  bool recover_lease_during_open = false;
+
   // Set this option to true during creation of database if you want
   // to be able to ingest behind (call IngestExternalFile() skipping keys
   // that already exist, rather than overwriting matching keys).
@@ -992,6 +999,19 @@ struct DBOptions {
   // Currently, any WAL-enabled writes after atomic flush may be replayed
   // independently if the process crashes later and tries to recover.
   bool atomic_flush = false;
+
+  bool open_read_replica = false;
+
+  // disable filedeletion until currenttime reachs this point. milliseconds
+  uint64_t disable_file_del_until = 0;
+
+  std::string read_replica_manifest = "";
+
+  uint64_t read_replica_start_lsn = 0;
+
+  // when the mongodb open db with all cfs, it need to get the file lock
+  // before get the listcolumnfamilys
+  FileLock* db_lock_ = nullptr;
 };
 
 // Options to control the behavior of a database (passed to DB::Open)
@@ -1169,6 +1189,8 @@ struct ReadOptions {
   // Default: 0 (don't filter by seqnum, return user keys)
   SequenceNumber iter_start_seqnum;
 
+  uint64_t read_timestamp;
+
   ReadOptions();
   ReadOptions(bool cksum, bool cache);
 };
@@ -1218,12 +1240,29 @@ struct WriteOptions {
   // Default: false
   bool low_pri;
 
+  // Used for wal-based replication. timestamp is persisted with key-value
+  // in wal, when the right node applys wal, timestamp should not be added
+  // twice.
+  bool already_has_timestamp;
+
+  // Set by TOTransaction, the asif-commit-timestamp.
+  // To the same key, the TOTransaction will guarantee the 
+  // asif-commit-timestamp the same as its lsn.
+  // To the same key, if the asif_commit_timestamp travels back, rocksdb
+  // WILL NOT do the consistency check!
+  // If asif_commit_timestamp is none-zero, the internal key will be
+  // encoded as UserKey+Timestamp+LSN, otherwise, it will be encoded
+  // as UserKey+LSN.
+  std::vector<uint64_t> asif_commit_timestamps;
+
   WriteOptions()
       : sync(false),
         disableWAL(false),
         ignore_missing_column_families(false),
         no_slowdown(false),
-        low_pri(false) {}
+        low_pri(false),
+        already_has_timestamp(false),
+        asif_commit_timestamps({}) {}
 };
 
 // Options that control flush operations

@@ -178,7 +178,7 @@ class PlainTableReader: public TableReader {
   }
 
   Slice GetUserKey(const Slice& key) const {
-    return Slice(key.data(), key.size() - 8);
+    return UserKeyFromRawInternalKey(key.data(), key.size());
   }
 
   Slice GetPrefixFromUserKey(const Slice& user_key) const {

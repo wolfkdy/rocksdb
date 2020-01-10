@@ -15,6 +15,12 @@
 
 namespace rocksdb {
 
+#ifdef USE_TIMESTAMPS
+#define VSIZE 982
+#else
+#define VSIZE 990 
+#endif  // USE_TIMESTAMPS
+
 static std::string CompressibleString(Random* rnd, int len) {
   std::string r;
   test::CompressibleString(rnd, 0.8, len, &r);
@@ -961,7 +967,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionOptions) {
   for (int num = 0; num < options.level0_file_num_compaction_trigger; num++) {
     // Write 100KB (100 values, each 1K)
     for (int i = 0; i < 100; i++) {
-      ASSERT_OK(Put(1, Key(key_idx), RandomString(&rnd, 990)));
+      ASSERT_OK(Put(1, Key(key_idx), RandomString(&rnd, VSIZE)));
       key_idx++;
     }
     dbfull()->TEST_WaitForFlushMemTable(handles_[1]);
@@ -999,7 +1005,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionStopStyleSimilarSize) {
        num++) {
     // Write 100KB (100 values, each 1K)
     for (int i = 0; i < 100; i++) {
-      ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, 990)));
+      ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, VSIZE)));
       key_idx++;
     }
     dbfull()->TEST_WaitForFlushMemTable();
@@ -1009,7 +1015,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionStopStyleSimilarSize) {
   // Generate one more file at level-0, which should trigger level-0
   // compaction.
   for (int i = 0; i < 100; i++) {
-    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, 990)));
+    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, VSIZE)));
     key_idx++;
   }
   dbfull()->TEST_WaitForCompact();
@@ -1030,7 +1036,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionStopStyleSimilarSize) {
        num++) {
     // Write 110KB (11 values, each 10K)
     for (int i = 0; i < 100; i++) {
-      ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, 990)));
+      ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, VSIZE)));
       key_idx++;
     }
     dbfull()->TEST_WaitForFlushMemTable();
@@ -1040,7 +1046,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionStopStyleSimilarSize) {
   // Generate one more file at level-0, which should trigger level-0
   // compaction.
   for (int i = 0; i < 100; i++) {
-    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, 990)));
+    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, VSIZE)));
     key_idx++;
   }
   dbfull()->TEST_WaitForCompact();
@@ -1051,7 +1057,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionStopStyleSimilarSize) {
   //   Now we have 3 files at level 0, with size 4, 0.4, 2. Generate one
   //   more file at level-0, which should trigger level-0 compaction.
   for (int i = 0; i < 100; i++) {
-    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, 990)));
+    ASSERT_OK(Put(Key(key_idx), RandomString(&rnd, VSIZE)));
     key_idx++;
   }
   dbfull()->TEST_WaitForCompact();
@@ -1340,7 +1346,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionFourPaths) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+    ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
   }
 
   Reopen(options);
@@ -1348,7 +1354,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionFourPaths) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+    ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
   }
 
   Destroy(options);
@@ -1411,19 +1417,19 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionCFPathUse) {
     for (int i = 0; i < key_idx; i++) {
       auto v = Get(0, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+      ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
     }
 
     for (int i = 0; i < key_idx1; i++) {
       auto v = Get(1, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+      ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
     }
 
     for (int i = 0; i < key_idx2; i++) {
       auto v = Get(2, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+      ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
     }
   };
 
@@ -1677,7 +1683,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionSecondPathRatio) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+    ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
   }
 
   Reopen(options);
@@ -1685,7 +1691,7 @@ TEST_P(DBTestUniversalCompaction, UniversalCompactionSecondPathRatio) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
+    ASSERT_TRUE(v.size() == 1 || v.size() == VSIZE);
   }
 
   Destroy(options);

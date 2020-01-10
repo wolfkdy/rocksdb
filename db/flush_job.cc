@@ -29,6 +29,7 @@
 #include "db/merge_context.h"
 #include "db/range_tombstone_fragmenter.h"
 #include "db/version_set.h"
+#include "db/write_thread.h"
 #include "monitoring/iostats_context_imp.h"
 #include "monitoring/perf_context_imp.h"
 #include "monitoring/thread_status_util.h"
@@ -100,7 +101,13 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
                    Directory* output_file_directory,
                    CompressionType output_compression, Statistics* stats,
                    EventLogger* event_logger, bool measure_io_stats,
-                   const bool sync_output_directory, const bool write_manifest)
+                   const bool sync_output_directory, const bool write_manifest,
+                   WriteThread* write_thread, ChangeStreams* change_streams
+#ifdef USE_TIMESTAMPS
+                   ,
+                   uint64_t pin_ts
+#endif  // USE_TIMESTAMPS
+                   )
     : dbname_(dbname),
       cfd_(cfd),
       db_options_(db_options),
@@ -123,9 +130,14 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
       measure_io_stats_(measure_io_stats),
       sync_output_directory_(sync_output_directory),
       write_manifest_(write_manifest),
+#ifdef USE_TIMESTAMPS
+      pin_ts_(pin_ts),
+#endif  // USE_TIMESTAMPS
       edit_(nullptr),
       base_(nullptr),
-      pick_memtable_called(false) {
+      pick_memtable_called(false),
+      write_thread_(write_thread),
+      change_streams_(change_streams) {
   // Update the thread status to indicate flush.
   ReportStartedFlush();
   TEST_SYNC_POINT("FlushJob::FlushJob()");
@@ -237,7 +249,7 @@ Status FlushJob::Run(LogsWithPrepTracker* prep_tracker,
     s = cfd_->imm()->TryInstallMemtableFlushResults(
         cfd_, mutable_cf_options_, mems_, prep_tracker, versions_, db_mutex_,
         meta_.fd.GetNumber(), &job_context_->memtables_to_free, db_directory_,
-        log_buffer_);
+        log_buffer_, write_thread_, change_streams_);
   }
 
   if (s.ok() && file_meta != nullptr) {
@@ -353,6 +365,10 @@ Status FlushJob::WriteLevel0Table() {
       uint64_t oldest_key_time =
           mems_.front()->ApproximateOldestKeyTime();
 
+      uint64_t pin_ts = 0;
+#ifdef USE_TIMESTAMPS
+      pin_ts = pin_ts_;
+#endif  // USE_TIMESTAMPS
       s = BuildTable(
           dbname_, db_options_.env, *cfd_->ioptions(), mutable_cf_options_,
           env_options_, cfd_->table_cache(), iter.get(),
@@ -364,7 +380,7 @@ Status FlushJob::WriteLevel0Table() {
           mutable_cf_options_.paranoid_file_checks, cfd_->internal_stats(),
           TableFileCreationReason::kFlush, event_logger_, job_context_->job_id,
           Env::IO_HIGH, &table_properties_, 0 /* level */, current_time,
-          oldest_key_time, write_hint);
+          oldest_key_time, write_hint, pin_ts);
       LogFlush(db_options_.info_log);
     }
     ROCKS_LOG_INFO(db_options_.info_log,

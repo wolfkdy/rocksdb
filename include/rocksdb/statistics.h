@@ -432,6 +432,167 @@ struct HistogramData {
   uint64_t sum = 0;
 };
 
+enum StreamMetrics : uint32_t
+{
+    STREAM_OPEN_COUNT=0,
+    STREAM_OPEN_COST_AVGTIME,
+    STREAM_OPEN_COST_TIME,
+
+    STREAM_CLOSE_COUNT,
+    STREAM_CLOSE_COST_AVGTIME,
+    STREAM_CLOSE_COST_TIME,
+
+    STREAM_EXIST_COUNT,
+    STREAM_EXIST_COST_AVGTIME,
+    STREAM_EXIST_COST_TIME,
+
+    STREAM_SEEK_COUNT,
+    STREAM_SEEK_COST_AVGTIME,
+    STREAM_SEEK_COST_TIME,
+
+    STREAM_PREAD_COUNT,
+    STREAM_PREAD_COST_AVGTIME,
+    STREAM_PREAD_COST_TIME,
+
+    STREAM_READ_COUNT,
+    STREAM_READ_COST_AVGTIME,
+    STREAM_READ_COST_TIME,
+
+    STREAM_WRITE_COUNT,
+    STREAM_WRITE_COST_AVGTIME,
+    STREAM_WRITE_COST_TIME,
+
+    STREAM_FLUSH_COUNT,
+    STREAM_FLUSH_COST_AVGTIME,
+    STREAM_FLUSH_COST_TIME,
+
+    STREAM_SYNC_COUNT,
+    STREAM_SYNC_COST_AVGTIME,
+    STREAM_SYNC_COST_TIME,
+
+    STREAM_AVAILABLE_COUNT,
+    STREAM_AVAILABLE_COST_AVGTIME,
+    STREAM_AVAILABLE_COST_TIME,
+
+    STREAM_DELETE_COUNT,
+    STREAM_DELETE_COST_AVGTIME,
+    STREAM_DELETE_COST_TIME,
+
+    STREAM_RENAME_COUNT,
+    STREAM_RENAME_COST_AVGTIME,
+    STREAM_RENAME_COST_TIME,
+
+    STREAM_CREATESNAPSHOT_COUNT,
+    STREAM_CREATESNAPSHOT_COST_AVGTIME,
+    STREAM_CREATESNAPSHOT_COST_TIME,
+
+    STREAM_DELETESNAPSHOT_COUNT,
+    STREAM_DELETESNAPSHOT_COST_AVGTIME,
+    STREAM_DELETESNAPSHOT_COST_TIME,
+
+    STREAM_CREATEDIRECTORY_COUNT,
+    STREAM_CREATEDIRECTORY_COST_AVGTIME,
+    STREAM_CREATEDIRECTORY_COST_TIME,
+
+    STREAM_LISTDIRECTORY_COUNT,
+    STREAM_LISTDIRECTORY_COST_AVGTIME,
+    STREAM_LISTDIRECTORY_COST_TIME,
+
+    STREAM_GETCONTENTSUMMARY_COUNT,
+    STREAM_GETCONTENTSUMMARY_COST_AVGTIME,
+    STREAM_GETCONTENTSUMMARY_COST_TIME,
+
+
+    //NEW STREAM STATISTICS
+    STREAM_READ_SIZE_SUM,
+    STREAM_PREAD_SIZE_SUM,
+    STREAM_WRITE_SIZE_SUM,
+
+
+    STREAM_METRIC_ENUM_MAX
+};
+	
+
+const std::vector<std::pair<StreamMetrics, std::string>> StreamStatisticsNameMap =
+{
+    {STREAM_OPEN_COUNT, "streamOpenCount"},
+    {STREAM_OPEN_COST_AVGTIME, "streamOpenCostAvgTime"},
+    {STREAM_OPEN_COST_TIME, "streamOpenCostTime"},
+
+    {STREAM_CLOSE_COUNT, "streamCloseCount"},
+    {STREAM_CLOSE_COST_AVGTIME, "streamCloseCostAvgTime"},
+    {STREAM_CLOSE_COST_TIME, "streamCloseCostTime"},
+
+    {STREAM_EXIST_COUNT, "streamExistCount"},
+    {STREAM_EXIST_COST_AVGTIME, "streamExistCostAvgTime"},
+    {STREAM_EXIST_COST_TIME, "streamExistCostTime"},
+
+
+    {STREAM_SEEK_COUNT, "streamSeekCount"},
+    {STREAM_SEEK_COST_AVGTIME, "streamSeekCostAvgTime"},
+    {STREAM_SEEK_COST_TIME, "streamSeekCostTime"},
+
+    {STREAM_PREAD_COUNT, "streamPreadCount"},
+    {STREAM_PREAD_COST_AVGTIME, "streamPreadCostAvgTime"},
+    {STREAM_PREAD_COST_TIME, "streamPreadCostTime"},
+
+    {STREAM_READ_COUNT, "streamReadCount"},
+    {STREAM_READ_COST_AVGTIME, "streamReadCostAvgTime"},
+    {STREAM_READ_COST_TIME, "streamReadCostTime"},
+
+    {STREAM_WRITE_COUNT, "streamWriteCount"},
+    {STREAM_WRITE_COST_AVGTIME, "streamWriteCostAvgTime"},
+    {STREAM_WRITE_COST_TIME, "streamWriteCostTime"},
+
+    {STREAM_FLUSH_COUNT, "streamFlushCount"},
+    {STREAM_FLUSH_COST_AVGTIME, "streamFlushCostAvgTime"},
+    {STREAM_FLUSH_COST_TIME, "streamFlushCostTime"},
+
+    {STREAM_SYNC_COUNT, "streamSyncCount"},
+    {STREAM_SYNC_COST_AVGTIME, "streamSyncCostAvgTime"},
+    {STREAM_SYNC_COST_TIME, "streamSyncCostTime"},
+
+    {STREAM_AVAILABLE_COUNT, "streamAvailableCount"},
+    {STREAM_AVAILABLE_COST_AVGTIME, "streamAvailableCostAvgTime"},
+    {STREAM_AVAILABLE_COST_TIME, "streamAvailableCostTime"},
+
+    {STREAM_DELETE_COUNT, "streamDeleteCount"},
+    {STREAM_DELETE_COST_AVGTIME, "streamDeleteCostAvgTime"},
+    {STREAM_DELETE_COST_TIME, "streamDeleteCostTime"},
+
+    {STREAM_RENAME_COUNT, "streamRenameCount"},
+    {STREAM_RENAME_COST_AVGTIME, "streamRenameCostAvgTime"},
+    {STREAM_RENAME_COST_TIME, "streamRenameCostTime"},
+
+    {STREAM_CREATESNAPSHOT_COUNT, "streamCreateSnapshotCount"},
+    {STREAM_CREATESNAPSHOT_COST_AVGTIME, "streamCreateSnapshotCostAvgTime"},
+    {STREAM_CREATESNAPSHOT_COST_TIME, "streamCreateSnapshotCostTime"},
+
+    {STREAM_DELETESNAPSHOT_COUNT, "streamDeleteSnapshotCount"},
+    {STREAM_DELETESNAPSHOT_COST_AVGTIME, "streamDeleteSnapshotCostAvgTime"},
+    {STREAM_DELETESNAPSHOT_COST_TIME, "streamDeleteSnapshotCostTime"},
+
+    {STREAM_CREATEDIRECTORY_COUNT, "streamCreateDirectoryCount"},
+    {STREAM_CREATEDIRECTORY_COST_AVGTIME, "streamCreateDirectoryCostAvgTime"},
+    {STREAM_CREATEDIRECTORY_COST_TIME, "streamCreateDirectoryCostTime"},
+
+    {STREAM_LISTDIRECTORY_COUNT, "streamListDirectoryCount"},
+    {STREAM_LISTDIRECTORY_COST_AVGTIME, "streamListDirectoryCostAvgTime"},
+    {STREAM_LISTDIRECTORY_COST_TIME, "streamListDirectoryCostTime"},
+
+    {STREAM_GETCONTENTSUMMARY_COUNT, "streamGetContentSummaryCount"},
+    {STREAM_GETCONTENTSUMMARY_COST_AVGTIME, "streamGetContentSummaryCostAvgTime"},
+    {STREAM_GETCONTENTSUMMARY_COST_TIME, "streamGetContentSummaryCostTime"},
+
+
+    //NEW STREAM STATISTICS
+    {STREAM_READ_SIZE_SUM, "streamReadSizeSum"},
+    {STREAM_PREAD_SIZE_SUM, "streamPreadSizeSum"},
+    {STREAM_WRITE_SIZE_SUM, "streamWriteSizeSum"}
+
+
+};
+
 enum StatsLevel {
   // Collect all stats except time inside mutex lock AND time spent on
   // compression.
@@ -470,11 +631,26 @@ class Statistics {
     return std::string("ToString(): not implemented");
   }
 
+  virtual std::vector<std::string> ToFormatString() const{
+      return std::vector<std::string>();
+  }
+
   // Override this function to disable particular histogram collection
   virtual bool HistEnabledForType(uint32_t type) const {
     return type < HISTOGRAM_ENUM_MAX;
   }
 
+  virtual void resetStreamStatistics() {
+  }
+  
+  virtual Status getStreamStatistics(){
+    return Status::NotSupported("Not implemented");
+  }
+  
+  virtual long getStreamCount(uint32_t StreamMetrics) {
+    return 0;
+  }
+  
   StatsLevel stats_level_ = kExceptDetailedTimers;
 };
 

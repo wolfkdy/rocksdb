@@ -15,8 +15,8 @@
 
 #include <inttypes.h>
 #include <algorithm>
-#include <vector>
 #include <memory>
+#include <vector>
 
 #include "db/log_reader.h"
 #include "db/log_writer.h"
@@ -108,7 +108,6 @@ Status WalManager::GetUpdatesSince(
     SequenceNumber seq, std::unique_ptr<TransactionLogIterator>* iter,
     const TransactionLogIterator::ReadOptions& read_options,
     VersionSet* version_set) {
-
   //  Get all sorted Wal Files.
   //  Do binary search and open files and find the seq number.
 
@@ -136,9 +135,17 @@ Status WalManager::GetUpdatesSince(
 //    a. compute how many files should be deleted
 //    b. get sorted non-empty archived logs
 //    c. delete what should be deleted
+
 void WalManager::PurgeObsoleteWALFiles() {
-  bool const ttl_enabled = db_options_.wal_ttl_seconds > 0;
+  MutexLock lock(&set_oldest_seq_mutux_);
+  TEST_SYNC_POINT("PurgeObsoleteWALFiles::DeleteFileEnd");
+  bool ttl_enabled = db_options_.wal_ttl_seconds > 0;
+  if (0 != oldest_wal_seq_number_.load()) {
+    ttl_enabled = false;  // close ttl  db_options_.wal_ttl_seconds > 0;
+    assert(db_options_.wal_size_limit_mb > 0);
+  }
   bool const size_limit_enabled = db_options_.wal_size_limit_mb > 0;
+
   if (!ttl_enabled && !size_limit_enabled) {
     return;
   }
@@ -159,9 +166,7 @@ void WalManager::PurgeObsoleteWALFiles() {
   if (purge_wal_files_last_run_ + time_to_check > now_seconds) {
     return;
   }
-
   purge_wal_files_last_run_ = now_seconds;
-
   std::string archival_dir = ArchivalDirectory(db_options_.wal_dir);
   std::vector<std::string> files;
   s = env_->GetChildren(archival_dir, &files);
@@ -236,8 +241,8 @@ void WalManager::PurgeObsoleteWALFiles() {
     return;
   }
 
-  size_t const files_keep_num =
-      static_cast<size_t>(db_options_.wal_size_limit_mb * 1024 * 1024 / log_file_size);
+  size_t const files_keep_num = static_cast<size_t>(
+      db_options_.wal_size_limit_mb * 1024 * 1024 / log_file_size);
   if (log_files_num <= files_keep_num) {
     return;
   }
@@ -253,8 +258,48 @@ void WalManager::PurgeObsoleteWALFiles() {
     files_del_num = archived_logs.size();
   }
 
+  SequenceNumber temp_oldest_wal_seq_number = oldest_wal_seq_number_.load();
+  ROCKS_LOG_WARN(db_options_.info_log, "current oldest_wal_seq_number: %llu",
+                 temp_oldest_wal_seq_number);
+
   for (size_t i = 0; i < files_del_num; ++i) {
     std::string const file_path = archived_logs[i]->PathName();
+    if (0 != temp_oldest_wal_seq_number) {
+      SequenceNumber current_seq_num =
+          archived_logs.at(static_cast<size_t>(i))->StartSequence();
+      if (current_seq_num >= temp_oldest_wal_seq_number) {
+        ROCKS_LOG_INFO(db_options_.info_log,
+                       "Trying to delete file %s start seq: %llu, older than "
+                       "oldest seq, can not remove this.",
+                       archived_logs[i]->PathName().c_str(), current_seq_num);
+        continue;  // maybe break is better, archived_logs is sorted
+      } else {
+        if (i < files_del_num - 1) {
+          SequenceNumber next_file_seq_num =
+              archived_logs.at(static_cast<size_t>(i + 1))->StartSequence();
+          if (temp_oldest_wal_seq_number <= next_file_seq_num - 1) {
+            ROCKS_LOG_INFO(db_options_.info_log,
+                           "Trying to delete file %s, seq: %llu, next file "
+                           "start seq: %llu, older than oldest seq, can not "
+                           "remove this",
+                           archived_logs[i]->PathName().c_str(),
+                           current_seq_num, next_file_seq_num);
+            continue;
+          } else {
+            ROCKS_LOG_INFO(db_options_.info_log,
+                           "Trying to delete file %s, seq:%llu, next file "
+                           "start seq:%llu, oldest_wal_seq_num:%llu, ok to delete",
+                           archived_logs[i]->PathName().c_str(), current_seq_num,
+                           next_file_seq_num, temp_oldest_wal_seq_number);
+          }
+        } else {
+          ROCKS_LOG_INFO(db_options_.info_log, "oldset file: %s",
+                         archived_logs[i]->PathName().c_str());
+          continue;  // if i is the oldest file or last archived file, we can
+                     // not delete it
+        }
+      }
+    }
     s = env_->DeleteFile(db_options_.wal_dir + "/" + file_path);
     if (!s.ok()) {
       ROCKS_LOG_WARN(db_options_.info_log, "Unable to delete file: %s: %s",
@@ -312,6 +357,9 @@ Status WalManager::GetSortedWalsOfType(const std::string& path,
         // empty file
         continue;
       }
+      ROCKS_LOG_ERROR(db_options_.info_log,
+                      "[WalManger] GetSortedWalsOfType logNum:%llu, startSeq:%llu", number,
+                      sequence);
 
       // Reproduce the race condition where a log file is moved
       // to archived dir, between these two sync points, used in
@@ -352,7 +400,8 @@ Status WalManager::RetainProbableWalFiles(VectorLogPtr& all_logs,
   // Binary Search. avoid opening all files.
   while (end >= start) {
     int64_t mid = start + (end - start) / 2;  // Avoid overflow.
-    SequenceNumber current_seq_num = all_logs.at(static_cast<size_t>(mid))->StartSequence();
+    SequenceNumber current_seq_num =
+        all_logs.at(static_cast<size_t>(mid))->StartSequence();
     if (current_seq_num == target) {
       end = mid;
       break;
@@ -363,7 +412,8 @@ Status WalManager::RetainProbableWalFiles(VectorLogPtr& all_logs,
     }
   }
   // end could be -ve.
-  size_t start_index = static_cast<size_t>(std::max(static_cast<int64_t>(0), end));
+  size_t start_index =
+      static_cast<size_t>(std::max(static_cast<int64_t>(0), end));
   // The last wal file is always included
   all_logs.erase(all_logs.begin(), all_logs.begin() + start_index);
   return Status::OK();
@@ -376,8 +426,7 @@ Status WalManager::ReadFirstRecord(const WalFileType type,
   if (type != kAliveLogFile && type != kArchivedLogFile) {
     ROCKS_LOG_ERROR(db_options_.info_log, "[WalManger] Unknown file type %s",
                     ToString(type).c_str());
-    return Status::NotSupported(
-        "File Type Not Known " + ToString(type));
+    return Status::NotSupported("File Type Not Known " + ToString(type));
   }
   {
     MutexLock l(&read_first_record_cache_mutex_);
@@ -481,5 +530,64 @@ Status WalManager::ReadFirstLine(const std::string& fname,
   return status;
 }
 
+SequenceNumber WalManager::GetOldestWalSeqNum() {
+  MutexLock l(&set_oldest_seq_mutux_);
+  return oldest_wal_seq_number_.load();
+}
+
+Status WalManager::SetOldestWalSequenceNumber(SequenceNumber* sequence,
+                                              bool round) {
+  assert(db_options_.wal_size_limit_mb > 0);
+  assert(sequence);
+  MutexLock l(&set_oldest_seq_mutux_);
+  TEST_SYNC_POINT("SetOldestWalSequenceNumber::SetSeqSuccess");
+  SequenceNumber oldest_ondisk(0);
+  auto s = GetOldestOnDiskLsn(&oldest_ondisk);
+  if (!s.ok()) {
+    return s;
+  }
+  if (oldest_ondisk > *sequence) {
+    if (!round) {
+      ROCKS_LOG_ERROR(db_options_.info_log,
+                      "SetOldestWalSequenceNumber failed:%llu less than "
+                      "current wal oldest seq:%llu",
+                      *sequence, oldest_ondisk);
+      return Status::InvalidArgument("seq less than current ondisk oldest seq");
+    } else {
+      *sequence = oldest_ondisk;
+    }
+  }
+  if (*sequence >= oldest_wal_seq_number_.load()) {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                   "SetOldestWalSequenceNumber from:%llu to %llu succ",
+                   oldest_wal_seq_number_.load(), *sequence);
+    oldest_wal_seq_number_.store(*sequence);
+    return Status::OK();
+  } else {
+    ROCKS_LOG_ERROR(db_options_.info_log,
+                    "SetOldestWalSequenceNumber failed,%llu less than "
+                    "current %llu",
+                    *sequence, oldest_wal_seq_number_.load());
+    return Status::InvalidArgument("seq less than current oldest seq");
+  }
+}
+
+// set_oldest_seq_mutux_ must be hold to race with delete wals
+Status WalManager::GetOldestOnDiskLsn(SequenceNumber* seq) {
+  std::unique_ptr<VectorLogPtr> wal_files(new VectorLogPtr);
+  Status s = GetSortedWalFiles(*wal_files);
+  if (!s.ok()) {
+    ROCKS_LOG_ERROR(db_options_.info_log,
+                    "GetOldestOnDiskLsn, query wal files failed -- %s",
+                    s.ToString().c_str());
+    return s;
+  }
+  if (wal_files->size() == 0) {
+    *seq = SequenceNumber(0);
+    return Status::OK();
+  }
+  *seq = wal_files->front()->StartSequence();
+  return Status::OK();
+}
 #endif  // ROCKSDB_LITE
 }  // namespace rocksdb

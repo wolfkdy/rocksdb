@@ -32,8 +32,24 @@
 #undef GetCurrentTime
 #endif
 
+//#define KB_4 (1 << 12)
+//#define KB_8 ( 1 << 13)
+//#define KB_16 ( 1 << 14)
+//#define KB_32 ( 1 << 15)
+//#define MB_1  (1 << 20)
+#define IO_PRIORITY_ULTRA_HIGH (0)
+#define IO_PRIORITY_HIGH (1)
+#define IO_PRIORITY_NORMAL (2)
+#define IO_PRIORITY_LOW (3)
+
+
+//extern void ftdsRecordWalIoSize(uint64_t ioSize, uint32_t ioStatus, bool isBatch);
+//extern bool CheckFileType(const std::string& name, const std::string& type);
+
+
 namespace rocksdb {
 
+typedef int32_t IO_PRIORITY;
 class FileLock;
 class Logger;
 class RandomAccessFile;
@@ -107,6 +123,12 @@ struct EnvOptions {
 
   // If not nullptr, write rate limiting is enabled for flush and compaction
   RateLimiter* rate_limiter = nullptr;
+
+
+  //io priority, default is HIGH PRIORITY
+  IO_PRIORITY io_pri = IO_PRIORITY_HIGH;
+
+  
 };
 
 class Env {
@@ -129,6 +151,10 @@ class Env {
   //
   // The result of Default() belongs to rocksdb and must never be deleted.
   static Env* Default();
+
+  /*start: merge stream*/
+  static Env* Default_Posix();
+  /*end: merge stream*/
 
   // Create a brand new sequentially-readable file with the specified name.
   // On success, stores a pointer to the new file in *result and returns OK.
@@ -280,6 +306,11 @@ class Env {
   virtual Status RenameFile(const std::string& src,
                             const std::string& target) = 0;
 
+  virtual Status RenameDir(const std::string& src,
+                           const std::string& target) {
+    return Status::NotSupported("RenameDir is not supported for this Env");
+  }
+
   // Hard Link file src to target.
   virtual Status LinkFile(const std::string& /*src*/,
                           const std::string& /*target*/) {
@@ -296,6 +327,15 @@ class Env {
                               const std::string& /*second*/, bool* /*res*/) {
     return Status::NotSupported("AreFilesSame is not supported for this Env");
   }
+							  
+  // MongoDB backup call this fun to update the length of wal.
+  virtual Status RecoverLease(const std::string& src) {
+    //return Status::NotSupported("RecoverLease is not supported for this Env");
+    return Status::OK();
+  }
+
+  // check if lease of file with path "src" is owned by this process
+  virtual Status CheckLease(const std::string& src) { return Status::OK(); }
 
   // Lock the specified file.  Used to prevent concurrent access to
   // the same db by multiple processes.  On failure, stores nullptr in
@@ -474,7 +514,9 @@ class Env {
 
   // Returns the ID of the current thread.
   virtual uint64_t GetThreadID() const;
-
+  virtual void SetSplitOption(std::shared_ptr<Logger> logger, const std::string & name) {
+    return;
+  }
 // This seems to clash with a macro on Windows, so #undef it here
 #undef GetFreeSpace
 
@@ -934,6 +976,8 @@ class FileLock {
  public:
   FileLock() { }
   virtual ~FileLock();
+  virtual std::string GetFileName() const;
+
  private:
   // No copying allowed
   FileLock(const FileLock&);
@@ -1296,6 +1340,9 @@ Env* NewMemEnv(Env* base_env);
 // Returns a new environment that is used for HDFS environment.
 // This is a factory method for HdfsEnv declared in hdfs/env_hdfs.h
 Status NewHdfsEnv(Env** hdfs_env, const std::string& fsname);
+
+
+
 
 // Returns a new environment that measures function call times for filesystem
 // operations, reporting results to variables in PerfContext.

@@ -63,7 +63,11 @@ class TestIterator : public InternalIterator {
   void Add(std::string argkey, ValueType type, std::string argvalue,
            size_t seq_num, bool update_iter = false) {
     valid_ = true;
+#ifdef USE_TIMESTAMPS
+    ParsedInternalKey internal_key(argkey, seq_num, type, 0);
+#else
     ParsedInternalKey internal_key(argkey, seq_num, type);
+#endif  // USE_TIMESTAMPS
     data_.push_back(
         std::pair<std::string, std::string>(std::string(), argvalue));
     AppendInternalKey(&data_.back().first, internal_key);
@@ -702,6 +706,14 @@ TEST_F(DBIteratorTest, DBIteratorUseSkipCountSkips) {
   }
   internal_iter->Finish();
 
+  auto f = [](uint32_t v) {
+// reseek is disabled in USE_TIMESTAMPS mode
+#ifdef USE_TIMESTAMPS
+    return 0;
+#else
+    return v;
+#endif  // USE_TIMESTAMPS
+  };
   std::unique_ptr<Iterator> db_iter(NewDBIterator(
       env_, ro, ImmutableCFOptions(options), MutableCFOptions(options),
       BytewiseComparator(), internal_iter, 2,
@@ -710,23 +722,23 @@ TEST_F(DBIteratorTest, DBIteratorUseSkipCountSkips) {
   ASSERT_TRUE(db_iter->Valid());
   ASSERT_EQ(db_iter->key().ToString(), "c");
   ASSERT_EQ(db_iter->value().ToString(), "c");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 1u);
+  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), f(1u));
 
   db_iter->Prev();
   ASSERT_TRUE(db_iter->Valid());
   ASSERT_EQ(db_iter->key().ToString(), "b");
   ASSERT_EQ(db_iter->value().ToString(), "b");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 2u);
+  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), f(2u));
 
   db_iter->Prev();
   ASSERT_TRUE(db_iter->Valid());
   ASSERT_EQ(db_iter->key().ToString(), "a");
   ASSERT_EQ(db_iter->value().ToString(), "a");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 3u);
+  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), f(3u));
 
   db_iter->Prev();
   ASSERT_TRUE(!db_iter->Valid());
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 3u);
+  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), f(3u));
 }
 
 TEST_F(DBIteratorTest, DBIteratorUseSkip) {
@@ -1242,6 +1254,7 @@ TEST_F(DBIteratorTest, DBIteratorSkipInternalKeys) {
     ASSERT_TRUE(db_iter->status().IsIncomplete());
   }
 
+#ifndef USE_TIMESTAMPS
   // Test for large number of skippable internal keys with *default*
   // max_sequential_skip_in_iterations.
   {
@@ -1334,6 +1347,7 @@ TEST_F(DBIteratorTest, DBIteratorSkipInternalKeys) {
       ASSERT_TRUE(db_iter->status().IsIncomplete());
     }
   }
+#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(DBIteratorTest, DBIterator1) {
@@ -3001,6 +3015,27 @@ TEST_F(DBIterWithMergeIterTest, InnerMergeIteratorDataRace8) {
   rocksdb::SyncPoint::GetInstance()->DisableProcessing();
 }
 
+TEST_F(DBIterWithMergeIterTest, DuplicatedInternalKey) {
+  // internal_iter1_: a3, f5, g7
+  // internal_iter2_: a6, b1, c2, d3, adding (f5)
+  internal_iter2_->Add("f", kTypeValue, "2", 5u);
+  db_iter_->Seek("f");
+  ASSERT_TRUE(db_iter_->Valid());
+  ASSERT_EQ(db_iter_->key().ToString(), "f");
+  ASSERT_EQ(db_iter_->value().ToString(), "2");
+  db_iter_->Next();
+  ASSERT_TRUE(db_iter_->Valid());
+  ASSERT_EQ(db_iter_->key().ToString(), "g");
+
+  db_iter_->SeekToLast();
+  // g
+  ASSERT_TRUE(db_iter_->Valid());
+  // f
+  db_iter_->Prev();
+  ASSERT_EQ(db_iter_->key().ToString(), "f");
+  db_iter_->Prev();
+  ASSERT_EQ(db_iter_->key().ToString(), "d");
+}
 
 TEST_F(DBIteratorTest, SeekPrefixTombstones) {
   ReadOptions ro;

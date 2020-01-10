@@ -105,6 +105,8 @@ Status Logger::CloseImpl() { return Status::NotSupported(); }
 FileLock::~FileLock() {
 }
 
+std::string FileLock::GetFileName() const { return ""; }
+
 void LogFlush(Logger *info_log) {
   if (info_log) {
     info_log->Flush();

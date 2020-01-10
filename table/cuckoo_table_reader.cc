@@ -333,8 +333,9 @@ void CuckooTableIterator::PrepareKVAtCurrIdx() {
                        id * reader_->bucket_length_;
   if (reader_->is_last_level_) {
     // Always return internal key.
-    curr_key_.SetInternalKey(Slice(offset, reader_->user_key_length_),
-                             0, kTypeValue);
+    curr_key_.SetInternalKey(
+        ParsedInternalKey::MaxFromUserKeyAndType(
+            Slice(offset, reader_->user_key_length_), kTypeValue));
   } else {
     curr_key_.SetInternalKey(Slice(offset, reader_->key_length_));
   }

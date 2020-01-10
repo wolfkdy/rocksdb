@@ -404,7 +404,9 @@ Status SyncManifest(Env* env, const ImmutableDBOptions* db_options,
                     WritableFileWriter* file) {
   TEST_KILL_RANDOM("SyncManifest:0", rocksdb_kill_odds * REDUCE_ODDS2);
   StopWatch sw(env, db_options->statistics.get(), MANIFEST_FILE_SYNC_MICROS);
-  return file->Sync(db_options->use_fsync);
+  //  return file->Sync(db_options->use_fsync);
+  // resolve MANIFEST sync issue in hdfs.
+  return file->Sync(true);
 }
 
 }  // namespace rocksdb

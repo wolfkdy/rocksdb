@@ -6,8 +6,8 @@
 #include "rocksdb/status.h"
 #include "rocksdb/env.h"
 
-#include <vector>
 #include <fcntl.h>
+#include <vector>
 #include "util/coding.h"
 #include "util/testharness.h"
 
@@ -17,10 +17,12 @@ class LockTest : public testing::Test {
  public:
   static LockTest* current_;
   std::string file_;
+  std::string lock_result;
   rocksdb::Env* env_;
 
   LockTest()
       : file_(test::PerThreadDBPath("db_testlock_file")),
+        lock_result(test::PerThreadDBPath("db_testlock_result")),
         env_(rocksdb::Env::Default()) {
     current_ = this;
   }
@@ -36,19 +38,19 @@ class LockTest : public testing::Test {
     return env_->UnlockFile(db_lock);
   }
 
-  bool AssertFileIsLocked(){
-    return CheckFileLock( /* lock_expected = */ true);
+  bool AssertFileIsLocked() {
+    return CheckFileLock2(/* lock_expected = */ true);
   }
 
-  bool AssertFileIsNotLocked(){
-    return CheckFileLock( /* lock_expected = */ false);
+  bool AssertFileIsNotLocked() {
+    return CheckFileLock2(/* lock_expected = */ false);
   }
 
-  bool CheckFileLock(bool lock_expected){
-    // We need to fork to check the fcntl lock as we need
-    // to open and close the file from a different process
-    // to avoid either releasing the lock on close, or not
-    // contending for it when requesting a lock.
+  bool CheckFileLock(bool lock_expected) {
+// We need to fork to check the fcntl lock as we need
+// to open and close the file from a different process
+// to avoid either releasing the lock on close, or not
+// contending for it when requesting a lock.
 
 #ifdef OS_WIN
 
@@ -59,13 +61,13 @@ class LockTest : public testing::Test {
 #else
 
     pid_t pid = fork();
-    if ( 0 == pid ) {
+    if (0 == pid) {
       // child process
       int exit_val = EXIT_FAILURE;
       int fd = open(file_.c_str(), O_RDWR | O_CREAT, 0644);
       if (fd < 0) {
         // could not open file, could not check if it was locked
-        fprintf( stderr, "Open on on file %s failed.\n",file_.c_str());
+        fprintf(stderr, "Open on on file %s failed.\n", file_.c_str());
         exit(exit_val);
       }
 
@@ -74,23 +76,24 @@ class LockTest : public testing::Test {
       f.l_type = (F_WRLCK);
       f.l_whence = SEEK_SET;
       f.l_start = 0;
-      f.l_len = 0; // Lock/unlock entire file
+      f.l_len = 0;  // Lock/unlock entire file
       int value = fcntl(fd, F_SETLK, &f);
-      if( value == -1 ){
-        if( lock_expected ){
+      if (value == -1) {
+        if (lock_expected) {
           exit_val = EXIT_SUCCESS;
         }
       } else {
-        if( ! lock_expected ){
+        if (!lock_expected) {
           exit_val = EXIT_SUCCESS;
         }
       }
-      close(fd); // lock is released for child process
+      close(fd);  // lock is released for child process
       exit(exit_val);
     } else if (pid > 0) {
       // parent process
       int status;
-      while (-1 == waitpid(pid, &status, 0));
+      while (-1 == waitpid(pid, &status, 0))
+        ;
       if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
         // child process exited with non success status
         return false;
@@ -98,15 +101,143 @@ class LockTest : public testing::Test {
         return true;
       }
     } else {
-      fprintf( stderr, "Fork failed\n" );
+      fprintf(stderr, "Fork failed\n");
       return false;
     }
     return false;
 
 #endif
-
   }
 
+  bool CheckFileLock2(bool lock_expected) {
+// We need to fork to check the fcntl lock as we need
+// to open and close the file from a different process
+// to avoid either releasing the lock on close, or not
+// contending for it when requesting a lock.
+
+#ifdef OS_WIN
+
+    // WaitForSingleObject and GetExitCodeProcess can do what waitpid does.
+    // TODO - implement on Windows
+    return true;
+#else
+
+    pid_t pid = fork();
+    if (0 == pid) {
+      // child process
+      int exit_val = EXIT_FAILURE;
+      int fd = open(file_.c_str(), O_RDWR | O_CREAT, 0644);
+      if (fd < 0) {
+        // could not open file, could not check if it was locked
+        fprintf(stderr, "Open on on file %s failed.\n", file_.c_str());
+        exit(exit_val);
+      }
+      int fd2 = open(lock_result.c_str(), O_RDWR | O_CREAT, 0644);
+      if (fd2 < 0) {
+        // could not open file, could not check if it was locked
+        fprintf(stderr, "Open on lock resul file %s failed.\n",
+                lock_result.c_str());
+        exit(exit_val);
+      }
+      if (truncate(lock_result.c_str(), 0) != 0) {
+        std::cout << "ftruncate lock result file failed." << std::endl;
+        close(fd2);
+        close(fd);
+        exit(exit_val);
+      }
+
+      struct flock f;
+      memset(&f, 0, sizeof(f));
+      f.l_type = (F_WRLCK);
+      f.l_whence = SEEK_SET;
+      f.l_start = 0;
+      f.l_len = 0;  // Lock/unlock entire file
+      int value = fcntl(fd, F_SETLK, &f);
+      if (value == -1) {
+        if (lock_expected) {
+          exit_val = EXIT_SUCCESS;
+          const char* p1 = "success";
+          if ((write(fd2, p1, 7)) == 7) {
+            std::cout << "locked already, out to result file success. "
+                      << std::endl;
+          } else {
+            std::cout << "locked already, out to result file failed. "
+                      << std::endl;
+          }
+        }
+      } else {
+        if (!lock_expected) {
+          std::cout << "fcntl success return: " << value << std::endl;
+          exit_val = EXIT_SUCCESS;
+          const char* p1 = "success";
+          if ((write(fd2, p1, 7)) == 7) {
+            std::cout << "unlocked already, out to result file success."
+                      << std::endl;
+          } else {
+            std::cout << "unlocked already, out to result file success."
+                      << std::endl;
+          }
+        }
+      }
+      std::cout << "close fd " << value << std::endl;
+      close(fd);   // lock is released for child process
+      close(fd2);  // lock is released for child process
+      std::cout << "exit fd " << value << std::endl;
+      exit(exit_val);
+    } else if (pid > 0) {
+      // parent process
+      int status;
+      while (-1 == waitpid(pid, &status, 0))
+        ;
+      if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        // child process exited with non success status
+        std::cout << "child process exited with non success status."
+                  << std::endl;
+        int fd2 = open(lock_result.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd2 < 0) {
+          // could not open file, could not check if it was locked
+          fprintf(stderr, "Open on lock resul file %s failed.\n",
+                  lock_result.c_str());
+          return false;
+        }
+        char value[10];
+        memset(value, 0, 10);
+        int size = read(fd2, value, 10);
+        std::string result(value);
+        std::cout << "read lock file ,result is " << result << std::endl;
+        if (result == "success" && size == 7) {
+          return true;
+        } else {
+          std::cout << "read lock file ,result is not succes, real is: "
+                    << result << std::endl;
+          return false;
+        }
+      } else {
+        int fd2 = open(lock_result.c_str(), O_RDWR | O_CREAT, 0644);
+        if (fd2 < 0) {
+          // could not open file, could not check if it was locked
+          fprintf(stderr, "Open on lock resul file %s failed.\n",
+                  lock_result.c_str());
+          return false;
+        }
+        char value[10];
+        memset(value, 0, 10);
+        int size = read(fd2, value, 10);
+        std::string result(value);
+        std::cout << "read lock file ,result is " << result << std::endl;
+        if (result == "success" && size == 7) {
+          return true;
+        } else {
+          return false;
+        }
+      }
+    } else {
+      fprintf(stderr, "Fork failed\n");
+      return false;
+    }
+    return false;
+#endif
+  }
 };
 LockTest* LockTest::current_;
 
@@ -118,20 +249,19 @@ TEST_F(LockTest, LockBySameThread) {
   ASSERT_OK(LockFile(&lock1));
 
   // check the file is locked
-  ASSERT_TRUE( AssertFileIsLocked() );
+  ASSERT_TRUE(AssertFileIsLocked());
 
   // re-acquire the lock on the same file. This should fail.
   ASSERT_TRUE(LockFile(&lock2).IsIOError());
 
   // check the file is locked
-  ASSERT_TRUE( AssertFileIsLocked() );
+  ASSERT_TRUE(AssertFileIsLocked());
 
   // release the lock
   ASSERT_OK(UnlockFile(lock1));
 
   // check the file is not locked
-  ASSERT_TRUE( AssertFileIsNotLocked() );
-
+  ASSERT_TRUE(AssertFileIsNotLocked());
 }
 
 }  // namespace rocksdb

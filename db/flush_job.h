@@ -68,7 +68,13 @@ class FlushJob {
            LogBuffer* log_buffer, Directory* db_directory,
            Directory* output_file_directory, CompressionType output_compression,
            Statistics* stats, EventLogger* event_logger, bool measure_io_stats,
-           const bool sync_output_directory, const bool write_manifest);
+           const bool sync_output_directory, const bool write_manifest,
+           WriteThread* thread, ChangeStreams* change_streams
+#ifdef USE_TIMESTAMPS
+           ,
+           uint64_t pin_ts
+#endif  // USE_TIMESTAMPS
+           );
 
   ~FlushJob();
 
@@ -131,12 +137,16 @@ class FlushJob {
   // commit to the MANIFEST.
   const bool write_manifest_;
 
+  uint64_t pin_ts_;
+
   // Variables below are set by PickMemTable():
   FileMetaData meta_;
   autovector<MemTable*> mems_;
   VersionEdit* edit_;
   Version* base_;
   bool pick_memtable_called;
+  WriteThread* write_thread_;
+  ChangeStreams* change_streams_;
 };
 
 }  // namespace rocksdb

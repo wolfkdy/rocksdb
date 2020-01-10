@@ -195,7 +195,15 @@ Status MergeHelper::MergeUntil(InternalIterator* iter,
       // want. Also if we're in compaction and it's a put, it would be nice to
       // run compaction filter on it.
       const Slice val = iter->value();
-      const Slice* val_ptr = (kTypeValue == ikey.type) ? &val : nullptr;
+      const Slice* val_ptr;
+      if (kTypeValue == ikey.type &&
+          (range_del_agg == nullptr ||
+           !range_del_agg->ShouldDelete(
+               ikey, RangeDelPositioningMode::kForwardTraversal))) {
+        val_ptr = &val;
+      } else {
+        val_ptr = nullptr;
+      }
       std::string merge_result;
       s = TimedFullMerge(user_merge_operator_, ikey.user_key, val_ptr,
                          merge_context_.GetOperands(), &merge_result, logger_,
@@ -207,7 +215,12 @@ Status MergeHelper::MergeUntil(InternalIterator* iter,
         // The original key encountered
         original_key = std::move(keys_.back());
         orig_ikey.type = kTypeValue;
+#ifdef USE_TIMESTAMPS
+        UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type,
+                          orig_ikey.timestamp);
+#else
         UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type);
+#endif // USE_TIMESTAMPS
         keys_.clear();
         merge_context_.Clear();
         keys_.emplace_front(std::move(original_key));
@@ -312,7 +325,12 @@ Status MergeHelper::MergeUntil(InternalIterator* iter,
       // lines before).
       original_key = std::move(keys_.back());
       orig_ikey.type = kTypeValue;
+#ifdef USE_TIMESTAMPS
+      UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type,
+                        orig_ikey.timestamp);
+#else
       UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type);
+#endif // USE_TIMESTAMPS
       keys_.clear();
       merge_context_.Clear();
       keys_.emplace_front(std::move(original_key));
@@ -390,8 +408,7 @@ CompactionFilter::Decision MergeHelper::FilterMerge(const Slice& user_key,
       // Keep the key as per FilterV2 documentation.
       ret = CompactionFilter::Decision::kKeep;
     } else {
-      compaction_filter_skip_until_.ConvertFromUserKey(kMaxSequenceNumber,
-                                                       kValueTypeForSeek);
+      compaction_filter_skip_until_.ConvertFromUserKeyMinPossible(kValueTypeForSeek);
     }
   }
   total_filter_time_ += filter_timer_.ElapsedNanosSafe();

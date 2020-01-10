@@ -15,9 +15,31 @@
  */
 jlong Java_org_rocksdb_CassandraCompactionFilter_createNewCassandraCompactionFilter0(
     JNIEnv* /*env*/, jclass /*jcls*/, jboolean purge_ttl_on_expiration,
-    jint gc_grace_period_in_seconds) {
+    jboolean ignore_range_delete_on_read, jint gc_grace_period_in_seconds,
+    jint partition_key_length) {
   auto* compaction_filter = new rocksdb::cassandra::CassandraCompactionFilter(
-      purge_ttl_on_expiration, gc_grace_period_in_seconds);
+      purge_ttl_on_expiration, ignore_range_delete_on_read,
+      gc_grace_period_in_seconds, partition_key_length);
   // set the native handle to our native compaction filter
   return reinterpret_cast<jlong>(compaction_filter);
 }
+
+/*
+ * Class:     org_rocksdb_CassandraCompactionFilter
+ * Method:    setMetaCfHandle
+ * Signature: (JJ)V
+ */
+JNIEXPORT void JNICALL
+Java_org_rocksdb_CassandraCompactionFilter_setMetaCfHandle(
+    JNIEnv* /*env*/, jclass /*jcls*/, jlong compaction_filter_pointer,
+    jlong rocksdb_pointer, jlong meta_cf_handle_pointer) {
+  auto* compaction_filter =
+      reinterpret_cast<rocksdb::cassandra::CassandraCompactionFilter*>(
+          compaction_filter_pointer);
+  auto* db = reinterpret_cast<rocksdb::DB*>(rocksdb_pointer);
+  auto* meta_cf_handle =
+      reinterpret_cast<rocksdb::ColumnFamilyHandle*>(meta_cf_handle_pointer);
+
+  compaction_filter->SetMetaCfHandle(db, meta_cf_handle);
+}
+

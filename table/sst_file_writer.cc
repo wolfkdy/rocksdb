@@ -75,16 +75,16 @@ struct SstFileWriter::Rep {
     // TODO(tec) : For external SST files we could omit the seqno and type.
     switch (value_type) {
       case ValueType::kTypeValue:
-        ikey.Set(user_key, 0 /* Sequence Number */,
-                 ValueType::kTypeValue /* Put */);
+        ikey.Clear();
+        ikey.SetMaxPossibleForUserKeyAndType(user_key, ValueType::kTypeValue /* Put */);
         break;
       case ValueType::kTypeMerge:
-        ikey.Set(user_key, 0 /* Sequence Number */,
-                 ValueType::kTypeMerge /* Merge */);
+        ikey.Clear();
+        ikey.SetMaxPossibleForUserKeyAndType(user_key, ValueType::kTypeMerge /* Merge */);
         break;
       case ValueType::kTypeDeletion:
-        ikey.Set(user_key, 0 /* Sequence Number */,
-                 ValueType::kTypeDeletion /* Delete */);
+        ikey.Clear();
+        ikey.SetMaxPossibleForUserKeyAndType(user_key, ValueType::kTypeDeletion /* Delete */);
         break;
       default:
         return Status::InvalidArgument("Value type is not supported");
@@ -106,7 +106,11 @@ struct SstFileWriter::Rep {
       return Status::InvalidArgument("File is not opened");
     }
 
+#ifdef USE_TIMESTAMPS
+    RangeTombstone tombstone(begin_key, end_key, 0 /* Sequence Number */, 0);
+#else
     RangeTombstone tombstone(begin_key, end_key, 0 /* Sequence Number */);
+#endif  // USE_TIMESTAMPS
     if (file_info.num_range_del_entries == 0) {
       file_info.smallest_range_del_key.assign(tombstone.start_key_.data(),
                                               tombstone.start_key_.size());

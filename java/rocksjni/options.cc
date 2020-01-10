@@ -1590,6 +1590,48 @@ jlong Java_org_rocksdb_Options_delayedWriteRate(JNIEnv* /*env*/,
 
 /*
  * Class:     org_rocksdb_Options
+ * Method:    setEnablePipelinedWrite
+ * Signature: (JZ)V
+ */
+void Java_org_rocksdb_Options_setEnablePipelinedWrite(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle, jboolean enable) {
+  reinterpret_cast<rocksdb::Options*>(jhandle) ->enable_pipelined_write = static_cast<bool>(enable);
+}
+
+/*
+ * Class:     org_rocksdb_Options
+ * Method:    enablePipelinedWrite
+ * Signature: (J)Z
+ */
+jboolean Java_org_rocksdb_Options_enablePipelinedWrite(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle) {
+  return reinterpret_cast<rocksdb::Options*>(jhandle) ->enable_pipelined_write;
+}
+
+/*
+ * Class:     org_rocksdb_Options
+ * Method:    setTwoWriteQueues
+ * Signature: (JZ)V
+ */
+void Java_org_rocksdb_Options_setTwoWriteQueues(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle, jboolean two_write_queues) {
+  reinterpret_cast<rocksdb::Options*>(jhandle) ->two_write_queues = static_cast<bool>(two_write_queues);
+}
+
+/*
+ * Class:     org_rocksdb_Options
+ * Method:    twoWriteQueues
+ * Signature: (J)Z
+ */
+jboolean Java_org_rocksdb_Options_twoWriteQueues(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle) {
+  return reinterpret_cast<rocksdb::Options*>(jhandle) ->two_write_queues;
+}
+
+												
+
+/*
+ * Class:     org_rocksdb_Options
  * Method:    setAllowConcurrentMemtableWrite
  * Signature: (JZ)V
  */
@@ -5803,6 +5845,49 @@ jlong Java_org_rocksdb_DBOptions_delayedWriteRate(JNIEnv* /*env*/,
 }
 
 /*
+ *
+ * Class:     org_rocksdb_DBOptions
+ * Method:    setEnablePipelinedWrite
+ * Signature: (JZ)V
+ */
+void Java_org_rocksdb_DBOptions_setEnablePipelinedWrite(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle, jboolean enable) {
+  reinterpret_cast<rocksdb::DBOptions*>(jhandle) ->enable_pipelined_write = static_cast<bool>(enable);
+}
+
+/*
+ * Class:     org_rocksdb_DBOptions
+ * Method:    enablePipelinedWrite
+ * Signature: (J)Z
+ */
+jboolean Java_org_rocksdb_DBOptions_enablePipelinedWrite(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle) {
+  return reinterpret_cast<rocksdb::DBOptions*>(jhandle) ->enable_pipelined_write;
+}
+
+/*
+ * Class:     org_rocksdb_DBOptions
+ * Method:    setTwoWriteQueues
+ * Signature: (JZ)V
+ */
+void Java_org_rocksdb_DBOptions_setTwoWriteQueues(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle, jboolean two_write_queues) {
+  reinterpret_cast<rocksdb::DBOptions*>(jhandle) ->two_write_queues = static_cast<bool>(two_write_queues);
+}
+
+/*
+ * Class:     org_rocksdb_DBOptions
+ * Method:    twoWriteQueues
+ * Signature: (J)Z
+ */
+jboolean Java_org_rocksdb_DBOptions_twoWriteQueues(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle) {
+  return reinterpret_cast<rocksdb::DBOptions*>(jhandle) ->two_write_queues;
+}
+
+												  
+
+/*
  * Class:     org_rocksdb_DBOptions
  * Method:    setAllowConcurrentMemtableWrite
  * Signature: (JZ)V
@@ -6081,6 +6166,33 @@ jboolean Java_org_rocksdb_DBOptions_avoidFlushDuringShutdown(JNIEnv* /*env*/,
                                                              jlong jhandle) {
   auto* opt = reinterpret_cast<rocksdb::DBOptions*>(jhandle);
   return static_cast<jboolean>(opt->avoid_flush_during_shutdown);
+}
+
+															 
+/*
+ * Class:     org_rocksdb_DBOptions
+ * Method:    setManualWalFlush
+ * Signature: (JZ)V
+ */
+void Java_org_rocksdb_DBOptions_setManualWalFlush(
+        JNIEnv* /*env*/, jobject /*jobj*/, jlong jhandle,
+jboolean jmanual_wal_flush) {
+auto* opt = reinterpret_cast<rocksdb::Options*>(jhandle);
+opt->manual_wal_flush =
+static_cast<bool>(jmanual_wal_flush);
+}
+
+
+/*
+ * Class:     org_rocksdb_DBOptions
+ * Method:    manualWalFlush
+ * Signature: (J)Z
+ */
+jboolean Java_org_rocksdb_DBOptions_manualWalFlush(JNIEnv* /*env*/,
+                                                   jobject /*jobj*/,
+                                                   jlong jhandle) {
+auto* opt = reinterpret_cast<rocksdb::Options*>(jhandle);
+return static_cast<jboolean>(opt->manual_wal_flush);
 }
 
 //////////////////////////////////////////////////////////////////////////////

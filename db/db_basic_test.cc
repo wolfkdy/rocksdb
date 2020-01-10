@@ -19,6 +19,14 @@ namespace rocksdb {
 class DBBasicTest : public DBTestBase {
  public:
   DBBasicTest() : DBTestBase("/db_basic_test") {}
+
+  void GetReadReplicaParams(Options* opt) {
+    ChangeStream* streamproxy = nullptr;
+    ASSERT_OK(db_->CreateChangeStream(
+        ChangeStream::ManifestType::MANIFEST_FILE, &streamproxy,
+        &(opt->read_replica_manifest), &(opt->read_replica_start_lsn)));
+    ASSERT_OK(db_->ReleaseChangeStream(streamproxy));
+  }
 };
 
 TEST_F(DBBasicTest, OpenWhenOpen) {
@@ -41,7 +49,8 @@ TEST_F(DBBasicTest, ReadOnlyDB) {
   ASSERT_OK(Put("foo", "v3"));
   Close();
 
-  auto options = CurrentOptions();
+  auto options = CurrentOptions();  
+  options.avoid_flush_during_shutdown = true;
   assert(options.env == env_);
   ASSERT_OK(ReadOnlyReopen(options));
   ASSERT_EQ("v3", Get("foo"));
@@ -70,6 +79,7 @@ TEST_F(DBBasicTest, ReadOnlyDB) {
 TEST_F(DBBasicTest, CompactedDB) {
   const uint64_t kFileSize = 1 << 20;
   Options options = CurrentOptions();
+  options.avoid_flush_during_shutdown = true;
   options.disable_auto_compactions = true;
   options.write_buffer_size = kFileSize;
   options.target_file_size_base = kFileSize;
@@ -955,6 +965,281 @@ TEST_F(DBBasicTest, DBCloseFlushError) {
 
   Destroy(options);
 }
+
+TEST_F(DBBasicTest, ReadOnlyReplicaDB) {
+  ASSERT_OK(Put("foo", "v1"));
+  ASSERT_OK(Put("bar", "v2"));
+  ASSERT_OK(Put("foo", "v3"));
+  Flush();
+  auto options = CurrentOptions();
+  GetReadReplicaParams(&options);
+  Close();
+
+  options.avoid_flush_during_shutdown = true;
+  assert(options.env == env_);
+  options.open_read_replica = true;
+  ASSERT_OK(ReadOnlyReopen(options));
+ 
+  ASSERT_EQ("v3", Get("foo"));
+  ASSERT_EQ("v2", Get("bar"));
+  Iterator* iter = db_->NewIterator(ReadOptions());
+  int count = 0;
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    ASSERT_OK(iter->status());
+    ++count;
+  }
+  ASSERT_EQ(count, 2);
+  delete iter;
+  Close();
+
+  // Now check keys in read only mode.
+  ASSERT_OK(ReadOnlyReopen(options));
+  ASSERT_EQ("v3", Get("foo"));
+  ASSERT_EQ("v2", Get("bar"));
+  ASSERT_TRUE(db_->SyncWAL().IsNotSupported());
+}
+
+TEST_F(DBBasicTest, ReadOnlyReplicaDBFrobidWrite) {
+  const uint64_t kFileSize = 1 << 20;
+  Options options = CurrentOptions();
+  options.avoid_flush_during_shutdown = true;
+  options.disable_auto_compactions = true;
+  options.write_buffer_size = kFileSize;
+  options.target_file_size_base = kFileSize;
+  options.max_bytes_for_level_base = 1 << 30;
+  options.compression = kNoCompression;
+  Reopen(options);
+  // 1 L0 file, use CompactedDB if max_open_files = -1
+  ASSERT_OK(Put("aaa", DummyString(kFileSize / 2, '1')));
+  Flush();
+  GetReadReplicaParams(&options);
+  options.open_read_replica = true;
+  Close();
+  ASSERT_OK(ReadOnlyReopen(options));
+  Status s = Put("new", "value");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+  ASSERT_EQ(DummyString(kFileSize / 2, '1'), Get("aaa"));
+  Close();
+  options.max_open_files = -1;
+  ASSERT_OK(ReadOnlyReopen(options));
+  s = Put("new", "value");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+  ASSERT_EQ(DummyString(kFileSize / 2, '1'), Get("aaa"));
+  Close();
+  options.open_read_replica = false;
+  Reopen(options);
+  // Add more L0 files
+  ASSERT_OK(Put("bbb", DummyString(kFileSize / 2, '2')));
+  Flush();
+  ASSERT_OK(Put("aaa", DummyString(kFileSize / 2, 'a')));
+  Flush();
+  ASSERT_OK(Put("bbb", DummyString(kFileSize / 2, 'b')));
+  ASSERT_OK(Put("eee", DummyString(kFileSize / 2, 'e')));
+  Flush();
+  options.open_read_replica = true;
+  GetReadReplicaParams(&options);
+  Close();
+
+  ASSERT_OK(ReadOnlyReopen(options));
+  // Fallback to read-only DB
+  s = Put("new", "value");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+  Close();
+
+  // Full compaction
+  options.open_read_replica = false;
+  Reopen(options);
+  // Add more keys
+  ASSERT_OK(Put("fff", DummyString(kFileSize / 2, 'f')));
+  ASSERT_OK(Put("hhh", DummyString(kFileSize / 2, 'h')));
+  ASSERT_OK(Put("iii", DummyString(kFileSize / 2, 'i')));
+  ASSERT_OK(Put("jjj", DummyString(kFileSize / 2, 'j')));
+  db_->CompactRange(CompactRangeOptions(), nullptr, nullptr);
+  ASSERT_EQ(3, NumTableFilesAtLevel(1));
+  Flush();
+  options.open_read_replica = true;
+  GetReadReplicaParams(&options);
+  Close();
+
+  // CompactedDB
+  ASSERT_OK(ReadOnlyReopen(options));
+  s = Put("new", "value");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+  ASSERT_EQ("NOT_FOUND", Get("abc"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'a'), Get("aaa"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'b'), Get("bbb"));
+  ASSERT_EQ("NOT_FOUND", Get("ccc"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'e'), Get("eee"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'f'), Get("fff"));
+  ASSERT_EQ("NOT_FOUND", Get("ggg"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'h'), Get("hhh"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'i'), Get("iii"));
+  ASSERT_EQ(DummyString(kFileSize / 2, 'j'), Get("jjj"));
+  ASSERT_EQ("NOT_FOUND", Get("kkk"));
+
+  // MultiGet
+  std::vector<std::string> values;
+  std::vector<Status> status_list = dbfull()->MultiGet(
+      ReadOptions(),
+      std::vector<Slice>({Slice("aaa"), Slice("ccc"), Slice("eee"),
+                          Slice("ggg"), Slice("iii"), Slice("kkk")}),
+      &values);
+  ASSERT_EQ(status_list.size(), static_cast<uint64_t>(6));
+  ASSERT_EQ(values.size(), static_cast<uint64_t>(6));
+  ASSERT_OK(status_list[0]);
+  ASSERT_EQ(DummyString(kFileSize / 2, 'a'), values[0]);
+  ASSERT_TRUE(status_list[1].IsNotFound());
+  ASSERT_OK(status_list[2]);
+  ASSERT_EQ(DummyString(kFileSize / 2, 'e'), values[2]);
+  ASSERT_TRUE(status_list[3].IsNotFound());
+  ASSERT_OK(status_list[4]);
+  ASSERT_EQ(DummyString(kFileSize / 2, 'i'), values[4]);
+  ASSERT_TRUE(status_list[5].IsNotFound());
+
+  options.open_read_replica = false;
+  Reopen(options);
+  // Add a key
+  ASSERT_OK(Put("new", "value_readonly"));
+  Flush();
+  options.open_read_replica = true;
+  GetReadReplicaParams(&options);
+  Close();
+  ASSERT_OK(ReadOnlyReopen(options));
+  s = Put("new", "value_readonly");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+  ASSERT_EQ("value_readonly", Get("new"));
+}
+
+TEST_F(DBBasicTest, ReadOnlyReplicaMultiyColumnFamily) {
+  Options options = CurrentOptions();
+  CreateAndReopenWithCF({"pikachu", "ilya", "muromec", "dobrynia", "nikitich",
+                         "alyosha", "popovich"},
+                        options);
+
+  ASSERT_OK(Put(0, "Default", "Default"));
+  ASSERT_OK(Put(1, "pikachu", "pikachu"));
+  ASSERT_OK(Put(2, "ilya", "ilya"));
+  ASSERT_OK(Put(3, "muromec", "muromec"));
+  ASSERT_OK(Put(4, "dobrynia", "dobrynia"));
+  ASSERT_OK(Put(5, "nikitich", "nikitich"));
+  ASSERT_OK(Put(6, "alyosha", "alyosha"));
+  ASSERT_OK(Put(7, "popovich", "popovich"));
+
+  for (int i = 0; i < 8; ++i) {
+    Flush(i);
+    auto tables = ListTableFiles(env_, dbname_);
+    ASSERT_EQ(tables.size(), i + 1U);
+  }
+
+  GetReadReplicaParams(&options);
+  options.open_read_replica = true;
+  options.avoid_flush_during_shutdown = true;
+  Close();
+
+  ASSERT_OK(ReadOnlyReopenMuliCF({"default", "pikachu", "ilya", "muromec", "dobrynia", "nikitich",
+                         "alyosha", "popovich"}, options));
+  Status s = Put("new", "value_readonly");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+
+  ASSERT_EQ(8, handles_.size());
+  for(auto cfd:handles_ ){
+    printf("get a cfd %s", cfd->GetName().c_str());
+  }
+  ASSERT_EQ("Default", Get(0, "Default"));
+  ASSERT_EQ("pikachu", Get(1, "pikachu"));
+  ASSERT_EQ("ilya",    Get(2, "ilya"));
+  ASSERT_EQ("muromec", Get(3, "muromec"));
+  ASSERT_EQ("dobrynia", Get(4, "dobrynia"));
+  ASSERT_EQ("nikitich", Get(5, "nikitich"));
+  ASSERT_EQ("alyosha", Get(6, "alyosha"));
+  ASSERT_EQ("popovich", Get(7, "popovich"));
+  Close();
+}
+
+
+
+TEST_F(DBBasicTest, ReadOnlyReplicaDBGetVersions) {
+  ASSERT_OK(Put("foo", "v1"));
+  ASSERT_OK(Put("bar", "v2"));
+  ASSERT_OK(Put("foo", "v3"));
+  Flush();
+  auto options = CurrentOptions();
+  GetReadReplicaParams(&options);
+  Close();
+
+  options.avoid_flush_during_shutdown = true;
+  assert(options.env == env_);
+  options.open_read_replica = true;
+  ASSERT_OK(ReadOnlyReopen(options));
+ 
+  ASSERT_EQ("v3", Get("foo"));
+  ASSERT_EQ("v2", Get("bar"));
+  Iterator* iter = db_->NewIterator(ReadOptions());
+  int count = 0;
+  for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
+    ASSERT_OK(iter->status());
+    ++count;
+  }
+  delete iter;
+  ASSERT_EQ(count, 2);
+  std::map<uint32_t, std::vector<uint64_t>> availableVersions;
+  ASSERT_OK(dbfull()->GetAllVersionsCreateHint(&availableVersions));
+  printf("CF number: %ld", availableVersions.size());
+
+  ASSERT_EQ(1,  availableVersions.size());
+  ASSERT_EQ(1,  availableVersions[0].size());
+
+  Close();
+
+}
+
+    
+TEST_F(DBBasicTest, ReadOnlyReplicaDBGetMultyCFVersions) {
+  Options options = CurrentOptions();
+  CreateAndReopenWithCF({"pikachu", "ilya", "muromec", "dobrynia", "nikitich",
+                         "alyosha", "popovich"},
+                        options);
+
+  ASSERT_OK(Put(0, "Default", "Default"));
+  ASSERT_OK(Put(1, "pikachu", "pikachu"));
+  ASSERT_OK(Put(2, "ilya", "ilya"));
+  ASSERT_OK(Put(3, "muromec", "muromec"));
+  ASSERT_OK(Put(4, "dobrynia", "dobrynia"));
+  ASSERT_OK(Put(5, "nikitich", "nikitich"));
+  ASSERT_OK(Put(6, "alyosha", "alyosha"));
+  ASSERT_OK(Put(7, "popovich", "popovich"));
+
+  for (int i = 0; i < 8; ++i) {
+    Flush(i);
+    auto tables = ListTableFiles(env_, dbname_);
+    ASSERT_EQ(tables.size(), i + 1U);
+  }
+  GetReadReplicaParams(&options);
+  options.open_read_replica = true;
+  options.avoid_flush_during_shutdown = true;
+
+  Close();
+
+  ASSERT_OK(ReadOnlyReopenMuliCF({"default", "pikachu", "ilya", "muromec", "dobrynia", "nikitich",
+                         "alyosha", "popovich"}, options));
+  Status s = Put("new", "value_readonly");
+  ASSERT_EQ(s.ToString(),
+            "Not implemented: Not supported operation in read only mode.");
+
+  ASSERT_EQ(8, handles_.size());
+  std::map<uint32_t, std::vector<uint64_t>> availableVersions;
+  ASSERT_OK(dbfull()->GetAllVersionsCreateHint(&availableVersions));
+  printf("CF number: %ld", availableVersions.size());
+  ASSERT_EQ(8,  availableVersions.size());
+  Close();
+}
+
 
 }  // namespace rocksdb
 

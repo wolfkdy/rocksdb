@@ -102,8 +102,12 @@ struct SuperVersionContext {
 
 struct JobContext {
   inline bool HaveSomethingToDelete() const {
+    // NOTE(xxxxxxxx): we Sync logs in logs_to_free in PurgeObsoleteFiles
+    // so add logs_to_free as one condition of HaveSomethingToDelete
+    bool has_logs_to_sync = (!bg_purge) && (logs_to_free.size() > 0);
     return full_scan_candidate_files.size() || sst_delete_files.size() ||
-           log_delete_files.size() || manifest_delete_files.size();
+           log_delete_files.size() || manifest_delete_files.size() ||
+           has_logs_to_sync;
   }
 
   inline bool HaveSomethingToClean() const {
@@ -174,8 +178,10 @@ struct JobContext {
   uint64_t prev_total_log_size = 0;
   size_t num_alive_log_files = 0;
   uint64_t size_log_to_delete = 0;
+  bool bg_purge = false;
 
-  explicit JobContext(int _job_id, bool create_superversion = false) {
+  explicit JobContext(int _job_id, bool create_superversion = false,
+                      bool _bg_purge = false) {
     job_id = _job_id;
     manifest_file_number = 0;
     pending_manifest_file_number = 0;
@@ -183,6 +189,7 @@ struct JobContext {
     prev_log_number = 0;
     superversion_contexts.emplace_back(
         SuperVersionContext(create_superversion));
+    bg_purge = _bg_purge;
   }
 
   // For non-empty JobContext Clean() has to be called at least once before

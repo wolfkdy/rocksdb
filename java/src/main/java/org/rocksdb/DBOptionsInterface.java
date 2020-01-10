@@ -1310,6 +1310,69 @@ public interface DBOptionsInterface<T extends DBOptionsInterface> {
    */
   long delayedWriteRate();
 
+  
+  /**
+  * If true, allow multi-writers to update mem tables in parallel.
+  * Only some memtable factorys support concurrent writes; currently it
+  * is implemented only for SkipListFactory.  Concurrent memtable writes
+  * are not compatible with inplace_update_support or filter_deletes.
+  * It is strongly recommended to set
+  * {@link #setEnableWriteThreadAdaptiveYield(boolean)} if you are going to use
+  * this feature.
+  * Default: false
+  *
+  * @param enablePipelinedWrite true to enable concurrent writes
+  *     for the memtable
+  *
+  * @return the reference to the current options.
+  */
+  T setEnablePipelinedWrite(boolean enablePipelinedWrite);
+
+   /**
+  * If true, allow multi-writers to update mem tables in parallel.
+  * Only some memtable factorys support concurrent writes; currently it
+  * is implemented only for SkipListFactory.  Concurrent memtable writes
+  * are not compatible with inplace_update_support or filter_deletes.
+  * It is strongly recommended to set
+  * {@link #setEnableWriteThreadAdaptiveYield(boolean)} if you are going to use
+  * this feature.
+  * Default: false
+  *
+  * @return true if concurrent writes are enabled for the memtable
+  */
+  boolean enablePipelinedWrite();
+
+  /**
+   * If true, allow multi-writers to update mem tables in parallel.
+   * Only some memtable factorys support concurrent writes; currently it
+   * is implemented only for SkipListFactory.  Concurrent memtable writes
+   * are not compatible with inplace_update_support or filter_deletes.
+   * It is strongly recommended to set
+   * {@link #setEnableWriteThreadAdaptiveYield(boolean)} if you are going to use
+   * this feature.
+   * Default: false
+   *
+   * @param twoWriteQueues true to enable concurrent writes
+   *     for the memtable
+   *
+   * @return the reference to the current options.
+   */
+  T setTwoWriteQueues(boolean twoWriteQueues);
+
+  /**
+   * If true, allow multi-writers to update mem tables in parallel.
+   * Only some memtable factorys support concurrent writes; currently it
+   * is implemented only for SkipListFactory.  Concurrent memtable writes
+   * are not compatible with inplace_update_support or filter_deletes.
+   * It is strongly recommended to set
+   * {@link #setEnableWriteThreadAdaptiveYield(boolean)} if you are going to use
+   * this feature.
+   * Default: false
+   *
+   * @return true if concurrent writes are enabled for the memtable
+   */
+  boolean twoWriteQueues();
+
   /**
    * If true, allow multi-writers to update mem tables in parallel.
    * Only some memtable factorys support concurrent writes; currently it

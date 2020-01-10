@@ -885,6 +885,12 @@ uint64_t ColumnFamilyData::GetNumLiveVersions() const {
   return VersionSet::GetNumLiveVersions(dummy_versions_);
 }
 
+
+void ColumnFamilyData::GetVersionsCreateHint(std::vector<uint64_t>* vhint) const {
+  VersionSet::GetCreateHint(dummy_versions_, vhint);
+}
+
+
 uint64_t ColumnFamilyData::GetTotalSstFilesSize() const {
   return VersionSet::GetTotalSstFilesSize(dummy_versions_);
 }
@@ -957,8 +963,8 @@ Status ColumnFamilyData::RangesOverlapWithMemtables(
   for (size_t i = 0; i < ranges.size() && status.ok() && !*overlap; ++i) {
     auto* vstorage = super_version->current->storage_info();
     auto* ucmp = vstorage->InternalComparator()->user_comparator();
-    InternalKey range_start(ranges[i].start, kMaxSequenceNumber,
-                            kValueTypeForSeek);
+    InternalKey range_start;
+    range_start.SetMinPossibleForUserKeyAndType(ranges[i].start, kValueTypeForSeek);
     memtable_iter->Seek(range_start.Encode());
     status = memtable_iter->status();
     ParsedInternalKey seek_result;
@@ -1298,10 +1304,37 @@ ColumnFamilyData* ColumnFamilySet::CreateColumnFamily(
 
 // REQUIRES: DB mutex held
 void ColumnFamilySet::FreeDeadColumnFamilies() {
+  while (true) {
+    bool found = false;
+    for (auto cfd = dummy_cfd_->next_; cfd != dummy_cfd_; cfd = cfd->next_) {
+      if (cfd->refs_.load(std::memory_order_relaxed) == 0) {
+        delete cfd;
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      break;
+    }
+  }
+}
+
+/*
+// REQUIRES: DB mutex held
+void ColumnFamilySet::FreeDeadColumnFamilies() {
   autovector<ColumnFamilyData*> to_delete;
   for (auto cfd = dummy_cfd_->next_; cfd != dummy_cfd_; cfd = cfd->next_) {
     if (cfd->refs_.load(std::memory_order_relaxed) == 0) {
       to_delete.push_back(cfd);
+      ROCKS_LOG_WARN(db_options_->info_log.get(),
+                     "free deadCF name:%s, id:%d, droped:%d, curRef:%d,svCurRef:%d",
+                      cfd->GetName().c_str(),
+                      cfd->GetID(),
+                      cfd->IsDropped(),
+                      cfd->current() ? cfd->current()->TEST_refs() : 0,
+                      cfd->GetSuperVersion() ?
+                      (cfd->GetSuperVersion()->current ?
+                      cfd->GetSuperVersion()->current->TEST_refs() : 0) : 0);
     }
   }
   for (auto cfd : to_delete) {
@@ -1309,6 +1342,7 @@ void ColumnFamilySet::FreeDeadColumnFamilies() {
     delete cfd;
   }
 }
+*/
 
 // under a DB mutex AND from a write thread
 void ColumnFamilySet::RemoveColumnFamily(ColumnFamilyData* cfd) {

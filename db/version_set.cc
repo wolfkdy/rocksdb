@@ -9,10 +9,11 @@
 
 #include "db/version_set.h"
 
+#include <iostream>
+
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
-
 #include <inttypes.h>
 #include <stdio.h>
 #include <algorithm>
@@ -32,6 +33,7 @@
 #include "db/pinned_iterators_manager.h"
 #include "db/table_cache.h"
 #include "db/version_builder.h"
+#include "env/mock_env.h"
 #include "monitoring/file_read_sample.h"
 #include "monitoring/perf_context_imp.h"
 #include "rocksdb/env.h"
@@ -76,8 +78,8 @@ Status OverlapWithIterator(const Comparator* ucmp,
     const Slice& largest_user_key,
     InternalIterator* iter,
     bool* overlap) {
-  InternalKey range_start(smallest_user_key, kMaxSequenceNumber,
-                          kValueTypeForSeek);
+  InternalKey range_start;
+  range_start.SetMinPossibleForUserKeyAndType(smallest_user_key, kValueTypeForSeek);
   iter->Seek(range_start.Encode());
   if (!iter->status().ok()) {
     return iter->status();
@@ -367,6 +369,9 @@ Version::~Version() {
         assert(path_id < cfd_->ioptions()->cf_paths.size());
         vset_->obsolete_files_.push_back(
             ObsoleteFileInfo(f, cfd_->ioptions()->cf_paths[path_id].path));
+        ROCKS_LOG_INFO(info_log_, "version:%d, put file:%s.%llu into obsolete files",
+                       version_number_, cfd_->ioptions()->cf_paths[path_id].path.c_str(),
+                       f->fd.GetNumber());
       }
     }
   }
@@ -831,8 +836,9 @@ Status Version::GetPropertiesOfTablesInRange(
   for (int level = 0; level < storage_info_.num_non_empty_levels(); level++) {
     for (decltype(n) i = 0; i < n; i++) {
       // Convert user_key into a corresponding internal key.
-      InternalKey k1(range[i].start, kMaxSequenceNumber, kValueTypeForSeek);
-      InternalKey k2(range[i].limit, kMaxSequenceNumber, kValueTypeForSeek);
+      InternalKey k1, k2;
+      k1.SetMinPossibleForUserKeyAndType(range[i].start, kValueTypeForSeek);
+      k2.SetMinPossibleForUserKeyAndType(range[i].limit, kValueTypeForSeek);
       std::vector<FileMetaData*> files;
       storage_info_.GetOverlappingInputs(level, &k1, &k2, &files, -1, nullptr,
                                          false);
@@ -944,6 +950,27 @@ uint64_t Version::GetSstFilesSize() {
     }
   }
   return sst_files_size;
+}
+
+void Version::GetColumnFamilyStats(int64_t* num_record, int64_t* total_size) {
+  assert(cfd_);
+
+  uint64_t file_size   = 0;
+  uint64_t put_record = 0;
+  uint64_t del_record = 0;
+
+  auto* vstorage = storage_info();
+
+  for (int level = 0; level < cfd_->NumberLevels(); level++) {
+    for (const auto& file : vstorage->LevelFiles(level)) {
+      del_record += file->num_deletions;
+      put_record += file->num_entries;
+      file_size   += file->fd.GetFileSize();
+    }
+  }
+  assert(put_record >= del_record);
+  *num_record = put_record - del_record;
+  *total_size = file_size;
 }
 
 uint64_t VersionStorageInfo::GetEstimatedActiveKeys() const {
@@ -1185,7 +1212,8 @@ Version::Version(ColumnFamilyData* column_family_data, VersionSet* vset,
       refs_(0),
       env_options_(env_opt),
       mutable_cf_options_(mutable_cf_options),
-      version_number_(version_number) {}
+      version_number_(version_number),
+      create_since_seq_hint_(0) {}
 
 void Version::Get(const ReadOptions& read_options, const LookupKey& k,
                   PinnableSlice* value, Status* status,
@@ -2841,7 +2869,7 @@ void VersionSet::AppendVersion(ColumnFamilyData* column_family_data,
 Status VersionSet::ProcessManifestWrites(
     std::deque<ManifestWriter>& writers, InstrumentedMutex* mu,
     Directory* db_directory, bool new_descriptor_log,
-    const ColumnFamilyOptions* new_cf_options) {
+    const ColumnFamilyOptions* new_cf_options, bool is_persist) {
   assert(!writers.empty());
   ManifestWriter& first_writer = writers.front();
   ManifestWriter* last_writer = &first_writer;
@@ -3031,7 +3059,7 @@ Status VersionSet::ProcessManifestWrites(
 
     // This is fine because everything inside of this block is serialized --
     // only one thread can be here at the same time
-    if (new_descriptor_log) {
+    if (new_descriptor_log  && is_persist) {
       // create new manifest file
       ROCKS_LOG_INFO(db_options_->info_log, "Creating manifest %" PRIu64 "\n",
                      pending_manifest_file_number_);
@@ -3060,7 +3088,7 @@ Status VersionSet::ProcessManifestWrites(
     }
 
     // Write new records to MANIFEST log
-    if (s.ok()) {
+    if (s.ok() && is_persist) {
       for (auto& e : batch_edits) {
         std::string record;
         if (!e->EncodeTo(&record)) {
@@ -3086,30 +3114,32 @@ Status VersionSet::ProcessManifestWrites(
 
     // If we just created a new descriptor file, install it by writing a
     // new CURRENT file that points to it.
-    if (s.ok() && new_descriptor_log) {
+    if (s.ok() && new_descriptor_log && is_persist) {
       s = SetCurrentFile(env_, dbname_, pending_manifest_file_number_,
                          db_directory);
     }
 
-    if (s.ok()) {
+    if (s.ok() && is_persist) {
       // find offset in manifest file where this version is stored.
       new_manifest_file_size = descriptor_log_->file()->GetFileSize();
     }
-
+  
     if (first_writer.edit_list.front()->is_column_family_drop_) {
       TEST_SYNC_POINT("VersionSet::LogAndApply::ColumnFamilyDrop:0");
       TEST_SYNC_POINT("VersionSet::LogAndApply::ColumnFamilyDrop:1");
       TEST_SYNC_POINT("VersionSet::LogAndApply::ColumnFamilyDrop:2");
     }
-
-    LogFlush(db_options_->info_log);
+ 
+    if (is_persist) { 
+      LogFlush(db_options_->info_log);
+    }
     TEST_SYNC_POINT("VersionSet::LogAndApply:WriteManifestDone");
     mu->Lock();
   }
 
   // Append the old manifest file to the obsolete_manifest_ list to be deleted
   // by PurgeObsoleteFiles later.
-  if (s.ok() && new_descriptor_log) {
+  if (s.ok() && new_descriptor_log && is_persist) {
     obsolete_manifests_.emplace_back(
         DescriptorFileName("", manifest_file_number_));
   }
@@ -3177,7 +3207,7 @@ Status VersionSet::ProcessManifestWrites(
     for (auto v : versions) {
       delete v;
     }
-    if (new_descriptor_log) {
+    if (new_descriptor_log && is_persist) {
       ROCKS_LOG_INFO(db_options_->info_log,
                      "Deleting manifest %" PRIu64 " current manifest %" PRIu64
                      "\n",
@@ -3223,7 +3253,7 @@ Status VersionSet::LogAndApply(
     const autovector<const MutableCFOptions*>& mutable_cf_options_list,
     const autovector<autovector<VersionEdit*>>& edit_lists,
     InstrumentedMutex* mu, Directory* db_directory, bool new_descriptor_log,
-    const ColumnFamilyOptions* new_cf_options) {
+    const ColumnFamilyOptions* new_cf_options, bool is_persist) {
   mu->AssertHeld();
   int num_edits = 0;
   for (const auto& elist : edit_lists) {
@@ -3295,7 +3325,7 @@ Status VersionSet::LogAndApply(
   }
 
   return ProcessManifestWrites(writers, mu, db_directory, new_descriptor_log,
-                               new_cf_options);
+                               new_cf_options, is_persist);
 }
 
 void VersionSet::LogAndApplyCFHelper(VersionEdit* edit) {
@@ -3472,8 +3502,8 @@ Status VersionSet::ApplyOneVersionEdit(
 }
 
 Status VersionSet::Recover(
-    const std::vector<ColumnFamilyDescriptor>& column_families,
-    bool read_only) {
+    const std::vector<ColumnFamilyDescriptor>& column_families, bool read_only,
+    const std::string& manifest_content) {
   std::unordered_map<std::string, ColumnFamilyOptions> cf_name_to_options;
   for (auto cf : column_families) {
     cf_name_to_options.insert({cf.name, cf.options});
@@ -3485,34 +3515,58 @@ Status VersionSet::Recover(
 
   // Read "CURRENT" file, which contains a pointer to the current manifest file
   std::string manifest_filename;
-  Status s = ReadFileToString(
-      env_, CurrentFileName(dbname_), &manifest_filename
-  );
-  if (!s.ok()) {
-    return s;
-  }
-  if (manifest_filename.empty() ||
-      manifest_filename.back() != '\n') {
-    return Status::Corruption("CURRENT file does not end with newline");
-  }
-  // remove the trailing '\n'
-  manifest_filename.resize(manifest_filename.size() - 1);
-  FileType type;
-  bool parse_ok =
-      ParseFileName(manifest_filename, &manifest_file_number_, &type);
-  if (!parse_ok || type != kDescriptorFile) {
-    return Status::Corruption("CURRENT file corrupted");
-  }
-
-  ROCKS_LOG_INFO(db_options_->info_log, "Recovering from manifest file: %s\n",
+  Status s = Status::OK();
+  Env* local_env = nullptr;
+  std::unique_ptr<Env> env_wrapper;
+  if (!manifest_content.empty()) {
+    ROCKS_LOG_INFO(db_options_->info_log, "read node Recovering from manifest file: %s\n",
                  manifest_filename.c_str());
+    env_wrapper.reset(new MockEnv(Env::Default()));
+    local_env = env_wrapper.get();
+    manifest_filename = "tmp";
+    s = WriteStringToFile(local_env, manifest_content, manifest_filename, true);
+    if (!s.ok()) {
+      return s;
+    }
+  }else{
+    local_env = env_;
+    s = ReadFileToString(local_env, CurrentFileName(dbname_),
+                         &manifest_filename);
+    if (!s.ok()) {
+      return s;
+    }
+    if (manifest_filename.empty() ||
+        manifest_filename.back() != '\n') {
+      return Status::Corruption("CURRENT file does not end with newline");
+    }
+    // remove the trailing '\n'
+    manifest_filename.resize(manifest_filename.size() - 1);
+  }
+ 
+  FileType type;
 
-  manifest_filename = dbname_ + "/" + manifest_filename;
+  if (manifest_content.empty()) {
+    bool parse_ok =
+        ParseFileName(manifest_filename, &manifest_file_number_, &type);
+    if (!parse_ok || type != kDescriptorFile) {
+      return Status::Corruption("CURRENT file corrupted");
+    }
+    ROCKS_LOG_INFO(db_options_->info_log, "Recovering from manifest file: %s\n",
+                     manifest_filename.c_str());
+    manifest_filename = dbname_ + "/" + manifest_filename;
+  }
+
   std::unique_ptr<SequentialFileReader> manifest_file_reader;
   {
     std::unique_ptr<SequentialFile> manifest_file;
-    s = env_->NewSequentialFile(manifest_filename, &manifest_file,
-                                env_->OptimizeForManifestRead(env_options_));
+    s = local_env->RecoverLease(manifest_filename);
+    if (!s.ok()) {
+      return s;
+    }
+
+    s = local_env->NewSequentialFile(
+        manifest_filename, &manifest_file,
+        local_env->OptimizeForManifestRead(env_options_));
     if (!s.ok()) {
       return s;
     }
@@ -3520,7 +3574,7 @@ Status VersionSet::Recover(
         new SequentialFileReader(std::move(manifest_file), manifest_filename));
   }
   uint64_t current_manifest_file_size;
-  s = env_->GetFileSize(manifest_filename, &current_manifest_file_size);
+  s = local_env->GetFileSize(manifest_filename, &current_manifest_file_size);
   if (!s.ok()) {
     return s;
   }
@@ -3704,7 +3758,7 @@ Status VersionSet::Recover(
     }
 
     manifest_file_size_ = current_manifest_file_size;
-    next_file_number_.store(next_file + 1);
+    next_file_number_.store(next_file + 500);
     last_allocated_sequence_ = last_sequence;
     last_published_sequence_ = last_sequence;
     last_sequence_ = last_sequence;
@@ -3740,32 +3794,271 @@ Status VersionSet::Recover(
   return s;
 }
 
+Status VersionSet::DumpManifestSnapshot(std::string* res, uint64_t* lsn) {
+  std::unique_ptr<Env> env_wrapper;
+  env_wrapper.reset(new MockEnv(Env::Default()));
+  Env* local_env = env_wrapper.get();
+  std::string descriptor_fname = "tmp";
+  std::unique_ptr<WritableFile> descriptor_file;
+  EnvOptions opt_env_opts = env_->OptimizeForManifestWrite(env_options_);
+  auto s = NewWritableFile(local_env, descriptor_fname, &descriptor_file,
+                           opt_env_opts);
+  if (!s.ok()) {
+    return s;
+  }
+  std::unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
+      std::move(descriptor_file), descriptor_fname, opt_env_opts));
+  auto logger = std::unique_ptr<log::Writer>(
+      new log::Writer(std::move(file_writer), 0, false));
+  s = WriteSnapshot(logger.get());
+  if (!s.ok()) {
+    return s;
+  }
+  s = ReadFileToString(local_env, "tmp", res);
+  if (!s.ok()) {
+    return s;
+  }
+  *lsn = last_sequence_.load();
+  return Status::OK();
+}
+
+Status VersionSet::ReloadReadOnly(const std::string& manifest_content,
+                                  uint64_t last_sequence, EventCFOptionFn fn,
+                                  std::vector<std::string>* new_cfs,
+                                  std::vector<std::string>* del_cfs) {
+  if (last_sequence < last_sequence_) {
+    ROCKS_LOG_ERROR(db_options_->info_log,
+                    "VersionSet::ReloadReadOnly travels back, cur lsn:%llu, "
+                    "remote lsn:%llu",
+                    last_sequence_.load(), last_sequence);
+    return Status::Corruption("lsn travels back");
+  }
+
+  std::unique_ptr<Env> env_wrapper;
+  env_wrapper.reset(new MockEnv(Env::Default()));
+  Env* local_env = env_wrapper.get();
+  const std::string manifest_filename = "tmp";
+  auto s =
+      WriteStringToFile(local_env, manifest_content, manifest_filename, true);
+  if (!s.ok()) {
+    return s;
+  }
+  std::unique_ptr<SequentialFileReader> manifest_file_reader;
+  {
+    std::unique_ptr<SequentialFile> manifest_file;
+    s = local_env->RecoverLease(manifest_filename);
+    if (!s.ok()) {
+      return s;
+    }
+
+    s = local_env->NewSequentialFile(
+        manifest_filename, &manifest_file,
+        local_env->OptimizeForManifestRead(env_options_));
+    if (!s.ok()) {
+      return s;
+    }
+    manifest_file_reader.reset(
+        new SequentialFileReader(std::move(manifest_file), manifest_filename));
+  }
+  VersionSet::LogReporter reporter;
+  reporter.status = &s;
+  log::Reader reader(nullptr, std::move(manifest_file_reader), &reporter,
+                     true /* checksum */, 0 /* log_number */,
+                     false /* retry_after_eof */);
+  Slice record;
+  std::string scratch;
+  std::map<uint32_t, std::list<std::unique_ptr<VersionEdit>>> cf_edits;
+
+  // classify ve into groups by cfid, and remove a group if not exist
+  while (reader.ReadRecord(&record, &scratch) && s.ok()) {
+    auto edit = std::unique_ptr<VersionEdit>(new VersionEdit);
+    s = edit->DecodeFrom(record);
+    if (!s.ok()) {
+      break;
+    }
+    if (edit->has_max_column_family_) {
+      ROCKS_LOG_WARN(db_options_->info_log, "try update max cf to:%u",
+                     edit->max_column_family_);
+      column_family_set_->UpdateMaxColumnFamily(edit->max_column_family_);
+    }
+    const std::string editStr = edit->DebugString(true);
+    for (size_t i = 0; i < editStr.size(); i += 1000) {
+      ROCKS_LOG_WARN(db_options_->info_log, "parse edit from manifest:%s",
+                     editStr.substr(i, 1000).c_str());
+    }
+    if (edit->is_in_atomic_group_) {
+      ROCKS_LOG_ERROR(
+          db_options_->info_log,
+          "VersionSet::ReloadReadOnly cannot handle atomic group:%s",
+          edit->DebugString(true).c_str());
+      return Status::Corruption("meet atomic group");
+    } else {
+      uint32_t cf_id = edit->column_family_;
+      assert(!edit->is_column_family_drop_);
+      // default cf creation will not be written by WriteSnapshot
+      if (cf_id != 0 && cf_edits.find(cf_id) == cf_edits.end()) {
+        assert(edit->is_column_family_add_);
+      }
+      cf_edits[cf_id].emplace_back(std::move(edit));
+    }
+  }
+  // NOTE(xxxxxxxx): we should update last_sequence_ before applying any cf-add
+  // because newly created memtables should start from new lsn.
+  last_sequence_ = last_sequence;
+  std::vector<uint32_t> to_del_cfs;
+  for (auto cfd : *column_family_set_) {
+    if (cf_edits.find(cfd->GetID()) == cf_edits.end()) {
+      if (column_family_set_->GetColumnFamily(cfd->GetID()) == nullptr) {
+        assert(cfd->IsDropped());
+        ROCKS_LOG_WARN(db_options_->info_log,
+                       "cf:%d, name:%s has already dropped when reload",
+                       cfd->GetID(), cfd->GetName().c_str());
+        continue;
+      }
+      to_del_cfs.emplace_back(cfd->GetID());
+      del_cfs->emplace_back(cfd->GetName());
+    }
+  }
+  for (auto v : to_del_cfs) {
+    auto cfd = column_family_set_->GetColumnFamily(v);
+    assert(cfd);
+    cfd->SetDropped();
+    if (cfd->Unref()) {
+      ROCKS_LOG_WARN(db_options_->info_log, "cf:%d, name:%s unrefed succ", v,
+                     cfd->GetName().c_str());
+      // delete cfd will remove cfd from column_family_set_
+      delete cfd;
+    } else {
+      ROCKS_LOG_WARN(db_options_->info_log,
+                     "cf:%d, name:%s unrefed still exists", v,
+                     cfd->GetName().c_str());
+    }
+  }
+
+  for (auto& kv : cf_edits) {
+    assert(kv.second.size() > 0 &&
+           (kv.first == 0 || kv.second.front()->is_column_family_add_));
+    if (column_family_set_->GetColumnFamily(kv.first) == nullptr) {
+      assert(kv.second.front()->is_column_family_add_);
+      const std::string& cfname = kv.second.front()->column_family_name_;
+      assert(cfname != "");
+      auto cfd = CreateColumnFamily(fn(cfname), kv.second.front().get());
+      cfd->set_initialized();
+      new_cfs->emplace_back(cfname);
+    }
+
+    auto cfd = column_family_set_->GetColumnFamily(kv.first);
+    auto builder = std::unique_ptr<BaseReferencedVersionBuilder>(
+        new BaseReferencedVersionBuilder(cfd));
+
+    // calc diff
+    std::set<std::pair<uint32_t, uint64_t>> mine;
+    std::set<std::pair<uint32_t, uint64_t>> remote;
+    VersionStorageInfo* storage_info = cfd->current()->storage_info();
+    {
+      for (int level = 0; level < storage_info->num_levels(); ++level) {
+        auto& files = storage_info->LevelFiles(level);
+        for (auto& f : files) {
+          mine.insert({level, f->fd.GetNumber()});
+        }
+      }
+
+      for (auto& e : kv.second) {
+        auto& files = e->GetNewFiles();
+        for (auto& f : files) {
+          remote.insert({f.first, f.second.fd.GetNumber()});
+        }
+      }
+    }
+    // clear fileinfo not in remote version, add fileinfo not in mine
+    {
+      VersionEdit ve;
+      for (int level = 0; level < storage_info->num_levels(); ++level) {
+        auto& files = storage_info->LevelFiles(level);
+        for (auto& f : files) {
+          if (remote.find({level, f->fd.GetNumber()}) != remote.end()) {
+            continue;
+          }
+          ve.DeleteFile(level, f->fd.GetNumber());
+          ROCKS_LOG_WARN(db_options_->info_log,
+                         "reloadReadReplica unref file:%lld not in remote",
+                         f->fd.GetNumber());
+        }
+      }
+      for (auto& e : kv.second) {
+        auto& files = e->GetNewFiles();
+        for (auto& f : files) {
+          if (mine.find({f.first, f.second.fd.GetNumber()}) != mine.end()) {
+            continue;
+          }
+          ve.AddFile(f.first, f.second);
+          ROCKS_LOG_WARN(db_options_->info_log,
+                         "reloadReadReplica ref file:%d,%lld not in mine",
+                         f.first, f.second.fd.GetNumber());
+        }
+      }
+
+      builder->version_builder()->Apply(&ve);
+      Version* v = new Version(cfd, this, env_options_,
+                               *cfd->GetLatestMutableCFOptions(),
+                               current_version_number_++);
+      v->HintCreatedSinceLsn(last_sequence);
+      builder->version_builder()->SaveTo(v->storage_info());
+      v->PrepareApply(*cfd->GetLatestMutableCFOptions(),
+                      true /* update_stats */);
+      AppendVersion(cfd, v);
+    }
+  }
+
+  ROCKS_LOG_WARN(db_options_->info_log,
+                 "after ReloadReadOnly max_column_family is %u,"
+                 "last_sequence is %llu",
+                 column_family_set_->GetMaxColumnFamily(), last_sequence);
+
+  return Status::OK();
+}
+
 Status VersionSet::ListColumnFamilies(std::vector<std::string>* column_families,
-                                      const std::string& dbname, Env* env) {
+                                      const std::string& dbname, Env* env,
+                                      const std::string& manifest_content) {
   // these are just for performance reasons, not correcntes,
   // so we're fine using the defaults
   EnvOptions soptions;
   // Read "CURRENT" file, which contains a pointer to the current manifest file
   std::string current;
-  Status s = ReadFileToString(env, CurrentFileName(dbname), &current);
-  if (!s.ok()) {
-    return s;
+  Status s = Status::OK();
+  std::string dscname = "";
+  Env* local_env = nullptr;
+  std::unique_ptr<Env> env_wrapper;
+  if (manifest_content.empty()) {
+    local_env = env;
+    s = ReadFileToString(local_env, CurrentFileName(dbname), &current);
+    if (!s.ok()) {
+      return s;
+    }
+    if (current.empty() || current[current.size()-1] != '\n') {
+      return Status::Corruption("CURRENT file does not end with newline");
+    }
+    current.resize(current.size() - 1);
+    dscname = dbname + "/" + current;
+  } else {
+    env_wrapper.reset(new MockEnv(Env::Default()));
+    local_env = env_wrapper.get();
+    dscname = "tmp";
+    s = WriteStringToFile(local_env, manifest_content, dscname, true);
+    if (!s.ok()) {
+      return s;
+    }
   }
-  if (current.empty() || current[current.size()-1] != '\n') {
-    return Status::Corruption("CURRENT file does not end with newline");
-  }
-  current.resize(current.size() - 1);
-
-  std::string dscname = dbname + "/" + current;
-
+  
   std::unique_ptr<SequentialFileReader> file_reader;
   {
     std::unique_ptr<SequentialFile> file;
-    s = env->NewSequentialFile(dscname, &file, soptions);
+    s = local_env->NewSequentialFile(dscname, &file, soptions);
     if (!s.ok()) {
       return s;
-  }
-  file_reader.reset(new SequentialFileReader(std::move(file), dscname));
+    }
+    file_reader.reset(new SequentialFileReader(std::move(file), dscname));
   }
 
   std::map<uint32_t, std::string> column_family_names;
@@ -4556,6 +4849,12 @@ uint64_t VersionSet::GetNumLiveVersions(Version* dummy_versions) {
     count++;
   }
   return count;
+}
+
+void VersionSet::GetCreateHint(Version* dummy_versions, std::vector<uint64_t>* vhint) {
+  for (Version* v = dummy_versions->next_; v != dummy_versions; v = v->next_) {
+    vhint->push_back(v->GetCreatedSinceLsnHint());
+  }
 }
 
 uint64_t VersionSet::GetTotalSstFilesSize(Version* dummy_versions) {

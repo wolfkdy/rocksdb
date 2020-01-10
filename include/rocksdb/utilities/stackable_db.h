@@ -288,6 +288,10 @@ class StackableDB : public DB {
     return db_->SyncWAL();
   }
 
+  virtual Status FSyncWAL(bool/* update_meta*/) {
+    return Status::NotSupported();
+  }
+
   virtual Status FlushWAL(bool sync) override { return db_->FlushWAL(sync); }
 
 #ifndef ROCKSDB_LITE
@@ -311,6 +315,12 @@ class StackableDB : public DB {
     db_->GetColumnFamilyMetaData(column_family, cf_meta);
   }
 
+  virtual void GetColumnFamilyStats(
+      ColumnFamilyHandle* column_family,
+      int64_t* num_record, int64_t* size) override {
+    db_->GetColumnFamilyStats(column_family, num_record, size);
+  }
+
 #endif  // ROCKSDB_LITE
 
   virtual Status GetLiveFiles(std::vector<std::string>& vec, uint64_t* mfs,
@@ -324,6 +334,11 @@ class StackableDB : public DB {
 
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) override {
     return db_->SetPreserveDeletesSequenceNumber(seqnum);
+  }
+
+  virtual Status SetOldestWalSequenceNumber(SequenceNumber seqnum,
+                                            bool round) override {
+    return db_->SetOldestWalSequenceNumber(seqnum, round);
   }
 
   virtual Status GetSortedWalFiles(VectorLogPtr& files) override {

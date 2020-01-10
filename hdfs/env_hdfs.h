@@ -169,8 +169,16 @@ class HdfsEnv : public Env {
   virtual uint64_t GetThreadID() const override {
     return HdfsEnv::gettid();
   }
+  
+  void SetSplitOption(std::shared_ptr<Logger> logger, const std::string & name) {
+    info_log_= logger;
+    db_name_ = name;
+    return;
+  }
 
  private:
+  std::shared_ptr<Logger> info_log_;
+  std::string db_name_;
   std::string fsname_;  // string of the form "hdfs://hostname:port/"
   hdfsFS fileSys_;      //  a single FileSystem object for all files
   Env*  posixEnv;       // This object is derived from Env, but not from

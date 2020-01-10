@@ -229,7 +229,8 @@ void ForwardIterator::SVCleanup(DBImpl* db, SuperVersion* sv,
   if (sv->Unref()) {
     // Job id == 0 means that this is not our background process, but rather
     // user thread
-    JobContext job_context(0);
+    JobContext job_context(0, false /* create_superversion */,
+                           background_purge_on_iterator_cleanup);
     db->mutex_.Lock();
     sv->Cleanup();
     db->FindObsoleteFiles(&job_context, false, true);

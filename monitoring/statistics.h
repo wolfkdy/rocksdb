@@ -56,8 +56,18 @@ class StatisticsImpl : public Statistics {
 
   virtual Status Reset() override;
   virtual std::string ToString() const override;
+  virtual std::vector<std::string> ToFormatString() const override;
   virtual bool HistEnabledForType(uint32_t type) const override;
-
+  
+  virtual Status getStreamStatistics();
+  virtual void resetStreamStatistics();
+  virtual long getStreamCount(uint32_t metric_value);
+  static long* getStreamStatsArray()
+  {
+    static long streamStatsValueArray[STREAM_METRIC_ENUM_MAX] = {0};
+    return streamStatsValueArray;
+  }
+  
  private:
   // If non-nullptr, forwards updates to the object pointed to by `stats_`.
   std::shared_ptr<Statistics> stats_;

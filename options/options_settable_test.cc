@@ -200,6 +200,11 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
        sizeof(std::vector<std::shared_ptr<EventListener>>)},
       {offsetof(struct DBOptions, row_cache), sizeof(std::shared_ptr<Cache>)},
       {offsetof(struct DBOptions, wal_filter), sizeof(const WalFilter*)},
+      {offsetof(struct DBOptions, open_read_replica), sizeof(bool)},
+      {offsetof(struct DBOptions, disable_file_del_until), sizeof(uint64_t)},
+      {offsetof(struct DBOptions, read_replica_manifest), sizeof(std::string)},
+      {offsetof(struct DBOptions, read_replica_start_lsn), sizeof(uint64_t)},
+      {offsetof(struct DBOptions, db_lock_), sizeof(FileLock*)},
   };
 
   char* options_ptr = new char[sizeof(DBOptions)];
@@ -286,12 +291,14 @@ TEST_F(OptionsSettableTest, DBOptionsAllFieldsSettable) {
                              "allow_2pc=false;"
                              "avoid_flush_during_recovery=false;"
                              "avoid_flush_during_shutdown=false;"
+                             "recover_lease_during_open=false;"
                              "allow_ingest_behind=false;"
                              "preserve_deletes=false;"
                              "concurrent_prepare=false;"
                              "two_write_queues=false;"
                              "manual_wal_flush=false;"
                              "seq_per_batch=false;"
+                             "oldest_wal_seq_number=0;"
                              "atomic_flush=false",
                              new_options));
 

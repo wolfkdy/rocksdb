@@ -8,7 +8,6 @@
 
 #include "db/db_test_util.h"
 #include "db/memtable.h"
-#include "db/range_del_aggregator.h"
 #include "port/stack_trace.h"
 #include "rocksdb/memtablerep.h"
 #include "rocksdb/slice_transform.h"
@@ -137,7 +136,7 @@ TEST_F(DBMemTableTest, DuplicateSeq) {
   Options options;
   InternalKeyComparator ikey_cmp(options.comparator);
   ReadRangeDelAggregator range_del_agg(&ikey_cmp,
-                                       kMaxSequenceNumber /* upper_bound */);
+        kMaxSequenceNumber /* upper_bound */);
 
   // Create a MemTable
   InternalKeyComparator cmp(BytewiseComparator());
@@ -150,20 +149,20 @@ TEST_F(DBMemTableTest, DuplicateSeq) {
 
   // Write some keys and make sure it returns false on duplicates
   bool res;
-  res = mem->Add(seq, kTypeValue, "key", "value2");
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key"), "value2");
   ASSERT_TRUE(res);
-  res = mem->Add(seq, kTypeValue, "key", "value2");
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key"), "value2");
   ASSERT_FALSE(res);
   // Changing the type should still cause the duplicatae key
-  res = mem->Add(seq, kTypeMerge, "key", "value2");
+  res = mem->Add(seq, kTypeMerge, Userkey2Timestamped("key"), "value2");
   ASSERT_FALSE(res);
   // Changing the seq number will make the key fresh
-  res = mem->Add(seq + 1, kTypeMerge, "key", "value2");
+  res = mem->Add(seq + 1, kTypeMerge, Userkey2Timestamped("key"), "value2");
   ASSERT_TRUE(res);
   // Test with different types for duplicate keys
-  res = mem->Add(seq, kTypeDeletion, "key", "");
+  res = mem->Add(seq, kTypeDeletion, Userkey2Timestamped("key"), "");
   ASSERT_FALSE(res);
-  res = mem->Add(seq, kTypeSingleDeletion, "key", "");
+  res = mem->Add(seq, kTypeSingleDeletion, Userkey2Timestamped("key"), "");
   ASSERT_FALSE(res);
 
   // Test the duplicate keys under stress
@@ -172,7 +171,7 @@ TEST_F(DBMemTableTest, DuplicateSeq) {
     if (!insert_dup) {
       seq++;
     }
-    res = mem->Add(seq, kTypeValue, "foo", "value" + ToString(seq));
+    res = mem->Add(seq, kTypeValue, Userkey2Timestamped("foo"), "value" + ToString(seq));
     if (insert_dup) {
       ASSERT_FALSE(res);
     } else {
@@ -188,9 +187,9 @@ TEST_F(DBMemTableTest, DuplicateSeq) {
   mem = new MemTable(cmp, ioptions, MutableCFOptions(options), &wb,
                      kMaxSequenceNumber, 0 /* column_family_id */);
   // Insert a duplicate key with _ in it
-  res = mem->Add(seq, kTypeValue, "key_1", "value");
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key_1"), "value");
   ASSERT_TRUE(res);
-  res = mem->Add(seq, kTypeValue, "key_1", "value");
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key_1"), "value");
   ASSERT_FALSE(res);
   delete mem;
 
@@ -200,9 +199,9 @@ TEST_F(DBMemTableTest, DuplicateSeq) {
   mem = new MemTable(cmp, ioptions, MutableCFOptions(options), &wb,
                      kMaxSequenceNumber, 0 /* column_family_id */);
   MemTablePostProcessInfo post_process_info;
-  res = mem->Add(seq, kTypeValue, "key", "value", true, &post_process_info);
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key"), "value", true, &post_process_info);
   ASSERT_TRUE(res);
-  res = mem->Add(seq, kTypeValue, "key", "value", true, &post_process_info);
+  res = mem->Add(seq, kTypeValue, Userkey2Timestamped("key"), "value", true, &post_process_info);
   ASSERT_FALSE(res);
   delete mem;
 }

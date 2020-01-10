@@ -11,6 +11,10 @@
 #include "include/org_rocksdb_RocksEnv.h"
 #include "include/org_rocksdb_RocksMemEnv.h"
 
+#include <stdio.h>
+#include "rocksjni/portal.h"
+
+
 /*
  * Class:     org_rocksdb_Env
  * Method:    getDefaultEnvInternal

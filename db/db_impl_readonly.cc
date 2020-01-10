@@ -29,6 +29,9 @@ DBImplReadOnly::~DBImplReadOnly() {}
 Status DBImplReadOnly::Get(const ReadOptions& read_options,
                            ColumnFamilyHandle* column_family, const Slice& key,
                            PinnableSlice* pinnable_val) {
+  if (initial_db_options_.open_read_replica) {
+    return GetImpl(read_options, column_family, key, pinnable_val);
+  }
   assert(pinnable_val != nullptr);
   // TODO: stopwatch DB_GET needed?, perf timer needed?
   PERF_TIMER_GUARD(get_snapshot_time);
@@ -45,7 +48,11 @@ Status DBImplReadOnly::Get(const ReadOptions& read_options,
   SuperVersion* super_version = cfd->GetSuperVersion();
   MergeContext merge_context;
   SequenceNumber max_covering_tombstone_seq = 0;
+#ifdef USE_TIMESTAMPS
+  LookupKey lkey(key, snapshot, read_options.read_timestamp);
+#else
   LookupKey lkey(key, snapshot);
+#endif  // USE_TIMESTAMPS
   PERF_TIMER_STOP(get_snapshot_time);
   if (super_version->mem->Get(lkey, pinnable_val->GetSelf(), &s, &merge_context,
                               &max_covering_tombstone_seq, read_options)) {
@@ -67,6 +74,9 @@ Status DBImplReadOnly::Get(const ReadOptions& read_options,
 
 Iterator* DBImplReadOnly::NewIterator(const ReadOptions& read_options,
                                       ColumnFamilyHandle* column_family) {
+  if (initial_db_options_.open_read_replica) {
+    return DBImpl::NewIterator(read_options, column_family);
+  }
   auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family);
   auto cfd = cfh->cfd();
   SuperVersion* super_version = cfd->GetSuperVersion()->Ref();
@@ -93,6 +103,9 @@ Status DBImplReadOnly::NewIterators(
     const ReadOptions& read_options,
     const std::vector<ColumnFamilyHandle*>& column_families,
     std::vector<Iterator*>* iterators) {
+  if (initial_db_options_.open_read_replica) {
+    return DBImpl::NewIterators(read_options, column_families, iterators);
+  }
   ReadCallback* read_callback = nullptr;  // No read callback provided.
   if (iterators == nullptr) {
     return Status::InvalidArgument("iterators not allowed to be nullptr");
@@ -129,19 +142,25 @@ Status DB::OpenForReadOnly(const Options& options, const std::string& dbname,
 
   // Try to first open DB as fully compacted DB
   Status s;
-  s = CompactedDBImpl::Open(options, dbname, dbptr);
-  if (s.ok()) {
-    return s;
+  if (!options.open_read_replica) {
+    // CompactedDBImpl::Open will delete wals, open_read_replica should passthough it
+    s = CompactedDBImpl::Open(options, dbname, dbptr);
+    if (s.ok()) {
+      return s;
+    }
   }
 
   DBOptions db_options(options);
+  if (options.open_read_replica) {
+    db_options.avoid_flush_during_shutdown = true;
+  }
   ColumnFamilyOptions cf_options(options);
   std::vector<ColumnFamilyDescriptor> column_families;
   column_families.push_back(
       ColumnFamilyDescriptor(kDefaultColumnFamilyName, cf_options));
   std::vector<ColumnFamilyHandle*> handles;
-
-  s = DB::OpenForReadOnly(db_options, dbname, column_families, &handles, dbptr);
+  s = DB::OpenForReadOnly(db_options, dbname, column_families, &handles, dbptr,
+                          false);
   if (s.ok()) {
     assert(handles.size() == 1);
     // i can delete the handle since DBImpl is always holding a
@@ -162,8 +181,14 @@ Status DB::OpenForReadOnly(
   SuperVersionContext sv_context(/* create_superversion */ true);
   DBImplReadOnly* impl = new DBImplReadOnly(db_options, dbname);
   impl->mutex_.Lock();
-  Status s = impl->Recover(column_families, true /* read only */,
+  Status s = Status::OK();
+  if(db_options.open_read_replica){
+    s = impl->RecoverReadOnly(column_families, db_options.read_replica_manifest,
+                              db_options.read_replica_start_lsn);
+  }else{
+    s = impl->Recover(column_families, true /* read only */,
                            error_if_log_file_exist);
+  }
   if (s.ok()) {
     // set column family handles
     for (auto cf : column_families) {

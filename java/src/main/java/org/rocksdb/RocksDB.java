@@ -1966,6 +1966,7 @@ public class RocksDB extends RocksObject {
   public void deleteRange(final byte[] beginKey, final byte[] endKey) throws RocksDBException {
     deleteRange(nativeHandle_, beginKey, 0, beginKey.length, endKey, 0, endKey.length);
   }
+  
 
   /**
    * Removes the database entries in the range ["beginKey", "endKey"), i.e.,
@@ -2043,6 +2044,34 @@ public class RocksDB extends RocksObject {
     deleteRange(nativeHandle_, writeOpt.nativeHandle_, beginKey, 0, beginKey.length, endKey, 0,
         endKey.length, columnFamilyHandle.nativeHandle_);
   }
+
+  public void deleteFilesInRange(final byte[] beginKey, final byte[] endKey) throws RocksDBException {
+    deleteFilesInRange(nativeHandle_, beginKey, 0, beginKey.length, endKey, 0, endKey.length);
+  }
+
+  public void deleteFilesInRange(final ColumnFamilyHandle columnFamilyHandle, final byte[] beginKey, final byte[] endKey) throws RocksDBException {
+    deleteFilesInRange(nativeHandle_, beginKey, 0, beginKey.length, endKey, 0, endKey.length,  columnFamilyHandle.nativeHandle_);
+  }
+
+  public long getLiveFilesSize() throws RocksDBException {
+    return getLiveFilesSize(nativeHandle_);
+  }
+
+  public String getDBPath() throws RocksDBException {
+    return getDBPath(nativeHandle_);
+  }
+
+    public void syncWal() throws RocksDBException {
+      syncWal(nativeHandle_);
+    }
+
+  public void fSyncWal() throws RocksDBException {
+    fSyncWal(nativeHandle_);
+  }
+
+  public void FastClose() throws RocksDBException {
+    FastClose(nativeHandle_);
+  }	  
 
   /**
    * DB implementations can export properties about their state
@@ -2857,6 +2886,25 @@ public class RocksDB extends RocksObject {
   }
 
   /**
+  * support for backup
+  */
+  public void recoverSyncOldWal() throws RocksDBException {
+    recoverSyncOldWal(nativeHandle_);
+  }
+
+  public String switchAndSyncWal() throws RocksDBException {
+    return switchAndSyncWal(nativeHandle_);
+  }
+
+  public void continueBackgroundCompaction() throws RocksDBException {
+    continueBackgroundCompaction(nativeHandle_);
+  }
+
+  public void pauseBackgroundCompaction() throws RocksDBException {
+    pauseBackgroundCompaction(nativeHandle_);
+  }	  
+
+  /**
    * Private constructor.
    *
    * @param nativeHandle The native handle of the C++ RocksDB object
@@ -3009,6 +3057,10 @@ public class RocksDB extends RocksObject {
   protected native void deleteRange(long handle, long writeOptHandle, byte[] beginKey,
       int beginKeyOffset, int beginKeyLength, byte[] endKey, int endKeyOffset, int endKeyLength,
       long cfHandle) throws RocksDBException;
+  protected native void deleteFilesInRange(long handle, byte[] beginKey, int beginKeyOffset, int beginKeyLength, byte[] endKey, int endKeyOffset, int endKeyLength)
+      throws RocksDBException;
+  protected native void deleteFilesInRange(long handle, byte[] beginKey, int beginKeyOffset, int beginKeyLength, byte[] endKey, int endKeyOffset, int endKeyLength, long cfHandle)
+        throws RocksDBException;
   protected native String getProperty0(long nativeHandle,
       String property, int propertyLength) throws RocksDBException;
   protected native String getProperty0(long nativeHandle, long cfHandle,
@@ -3071,4 +3123,13 @@ public class RocksDB extends RocksObject {
   private native static void destroyDB(final String path,
       final long optionsHandle) throws RocksDBException;
   protected DBOptionsInterface options_;
+  public native String getDBPath(long handle) throws RocksDBException;
+  private native long getLiveFilesSize(long handle) throws RocksDBException;
+  public native void syncWal(long handle) throws RocksDBException;
+  private native void recoverSyncOldWal(long handle) throws RocksDBException;
+  private native String switchAndSyncWal(long handle) throws RocksDBException;
+  private native void continueBackgroundCompaction(long handle) throws RocksDBException;
+  private native void pauseBackgroundCompaction(long handle) throws RocksDBException;
+  protected native void fSyncWal(long handle) throws RocksDBException;
+  protected native void FastClose(long handle) throws RocksDBException;
 }

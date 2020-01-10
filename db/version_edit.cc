@@ -633,6 +633,7 @@ std::string VersionEdit::DebugJSON(int edit_num, bool hex_key) const {
       const FileMetaData& f = new_files_[i].second;
       jw << "FileNumber" << f.fd.GetNumber();
       jw << "FileSize" << f.fd.GetFileSize();
+      jw << "LargestSeq" << f.fd.largest_seqno;
       jw << "SmallestIKey" << f.smallest.DebugString(hex_key);
       jw << "LargestIKey" << f.largest.DebugString(hex_key);
       jw.EndArrayedObject();

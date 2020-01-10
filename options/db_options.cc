@@ -232,7 +232,8 @@ MutableDBOptions::MutableDBOptions()
       max_open_files(-1),
       bytes_per_sync(0),
       wal_bytes_per_sync(0),
-      compaction_readahead_size(0) {}
+      compaction_readahead_size(0),
+      oldest_wal_seq_number(0) {}
 
 MutableDBOptions::MutableDBOptions(const DBOptions& options)
     : max_background_jobs(options.max_background_jobs),
@@ -248,7 +249,8 @@ MutableDBOptions::MutableDBOptions(const DBOptions& options)
       max_open_files(options.max_open_files),
       bytes_per_sync(options.bytes_per_sync),
       wal_bytes_per_sync(options.wal_bytes_per_sync),
-      compaction_readahead_size(options.compaction_readahead_size) {}
+      compaction_readahead_size(options.compaction_readahead_size),
+      oldest_wal_seq_number(options.oldest_wal_seq_number) {}
 
 void MutableDBOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(log, "            Options.max_background_jobs: %d",

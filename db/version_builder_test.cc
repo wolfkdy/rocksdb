@@ -49,7 +49,11 @@ class VersionBuilderTest : public testing::Test {
 
   InternalKey GetInternalKey(const char* ukey,
                              SequenceNumber smallest_seq = 100) {
+#ifdef USE_TIMESTAMPS
+    return InternalKey(ukey, smallest_seq, kTypeValue, 0);
+#else
     return InternalKey(ukey, smallest_seq, kTypeValue);
+#endif
   }
 
   void Add(int level, uint32_t file_number, const char* smallest,

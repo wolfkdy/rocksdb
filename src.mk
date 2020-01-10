@@ -58,6 +58,7 @@ LIB_SOURCES =                                                   \
   db/write_batch_base.cc                                        \
   db/write_controller.cc                                        \
   db/write_thread.cc                                            \
+  db/change_stream_impl.cc                                      \
   env/env.cc                                                    \
   env/env_chroot.cc                                             \
   env/env_encryption.cc                                         \
@@ -218,9 +219,13 @@ LIB_SOURCES =                                                   \
   utilities/transactions/write_prepared_txn_db.cc               \
   utilities/transactions/write_unprepared_txn.cc                \
   utilities/transactions/write_unprepared_txn_db.cc             \
+  utilities/transactions/totransaction_db_impl.cc               \
+  utilities/transactions/totransaction_impl.cc                  \
   utilities/ttl/db_ttl_impl.cc                                  \
   utilities/write_batch_with_index/write_batch_with_index.cc    \
   utilities/write_batch_with_index/write_batch_with_index_internal.cc    \
+  utilities/fs_snapshot/fs_snapshot_impl.cc                             \
+  config/config_reader.cc
 
 ifeq (,$(shell $(CXX) -fsyntax-only -maltivec -xc /dev/null 2>&1))
 LIB_SOURCES_ASM =\
@@ -343,6 +348,7 @@ MAIN_SOURCES =                                                          \
   db/write_batch_test.cc                                                \
   db/write_callback_test.cc                                             \
   db/write_controller_test.cc                                           \
+  db/change_stream_impl_test.cc                                         \
   env/env_basic_test.cc                                                 \
   env/env_test.cc                                                       \
   env/mock_env_test.cc                                                  \
@@ -414,10 +420,10 @@ MAIN_SOURCES =                                                          \
   utilities/table_properties_collectors/compact_on_deletion_collector_test.cc  \
   utilities/transactions/optimistic_transaction_test.cc                 \
   utilities/transactions/transaction_test.cc                            \
-  utilities/transactions/write_prepared_transaction_test.cc             \
   utilities/transactions/write_unprepared_transaction_test.cc           \
   utilities/ttl/ttl_test.cc                                             \
   utilities/write_batch_with_index/write_batch_with_index_test.cc       \
+  utilities/fs_snapshot/fs_snapshot_test.cc                               \
 
 JNI_NATIVE_SOURCES =                                          \
   java/rocksjni/backupenginejni.cc                            \
@@ -454,6 +460,7 @@ JNI_NATIVE_SOURCES =                                          \
   java/rocksjni/remove_emptyvalue_compactionfilterjni.cc      \
   java/rocksjni/cassandra_compactionfilterjni.cc              \
   java/rocksjni/cassandra_value_operator.cc                   \
+  java/rocksjni/cassandra_partition_meta_merge_operator.cc    \
   java/rocksjni/restorejni.cc                                 \
   java/rocksjni/rocks_callback_object.cc                      \
   java/rocksjni/rocksjni.cc                                   \

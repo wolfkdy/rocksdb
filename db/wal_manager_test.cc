@@ -43,11 +43,17 @@ class WalManagerTest : public testing::Test {
   void Init() {
     ASSERT_OK(env_->CreateDirIfMissing(dbname_));
     ASSERT_OK(env_->CreateDirIfMissing(ArchivalDirectory(dbname_)));
+    std::shared_ptr<Logger> log = nullptr;
+    Status s = Env::Default()->NewLogger("/ut.log", &log);
+    ASSERT_TRUE(s.ok());
+    db_options_.info_log = log;
+    db_options_.info_log_level = rocksdb::DEBUG_LEVEL;
+
+    ASSERT_TRUE(db_options_.info_log.get() != NULL);
     db_options_.db_paths.emplace_back(dbname_,
                                       std::numeric_limits<uint64_t>::max());
     db_options_.wal_dir = dbname_;
     db_options_.env = env_.get();
-
     versions_.reset(new VersionSet(dbname_, &db_options_, env_options_,
                                    table_cache_.get(), &write_buffer_manager_,
                                    &write_controller_));
@@ -62,7 +68,7 @@ class WalManagerTest : public testing::Test {
   // NOT thread safe
   void Put(const std::string& key, const std::string& value) {
     assert(current_log_writer_.get() != nullptr);
-    uint64_t seq =  versions_->LastSequence() + 1;
+    uint64_t seq = versions_->LastSequence() + 1;
     WriteBatch batch;
     batch.Put(key, value);
     WriteBatchInternal::SetSequence(&batch, seq);
@@ -80,7 +86,8 @@ class WalManagerTest : public testing::Test {
     ASSERT_OK(env_->NewWritableFile(fname, &file, env_options_));
     std::unique_ptr<WritableFileWriter> file_writer(
         new WritableFileWriter(std::move(file), fname, env_options_));
-    current_log_writer_.reset(new log::Writer(std::move(file_writer), 0, false));
+    current_log_writer_.reset(
+        new log::Writer(std::move(file_writer), 0, false));
   }
 
   void CreateArchiveLogs(int num_logs, int entries_per_log) {
@@ -185,9 +192,11 @@ std::vector<std::uint64_t> ListSpecificFiles(
     if (ParseFileName(files[i], &number, &type)) {
       if (type == expected_file_type) {
         file_numbers.push_back(number);
+        // std::cout << "get a file :" << files[i];
       }
     }
   }
+
   return file_numbers;
 }
 
@@ -291,6 +300,469 @@ TEST_F(WalManagerTest, TransactionLogIteratorJustEmptyFile) {
   auto iter = OpenTransactionLogIter(0);
   // Check that an empty iterator is returned
   ASSERT_TRUE(!iter->Valid());
+}
+TEST_F(WalManagerTest, GetOldestWal) {
+  Init();
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+  SequenceNumber seq(1);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(1 == wal_manager_->GetOldestWalSeqNum());
+
+  seq = 2;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(2 == wal_manager_->GetOldestWalSeqNum());
+
+  seq = 6;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(6 == wal_manager_->GetOldestWalSeqNum());
+
+  seq = 4;
+  Status s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(s.IsInvalidArgument());
+
+  seq = 5;
+  s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(s.IsInvalidArgument());
+
+  seq = 6;
+  s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(s.ok());
+
+  seq = 7;
+  s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(s.ok());
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, OneWal) {
+  Init();
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  SequenceNumber seq(1);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(1, 3000);
+  auto iter = OpenTransactionLogIter(0);
+  BatchResult res;
+  SequenceNumber lastSequence = 0;
+  int count = 0;
+  while (iter->Valid()) {
+    res = iter->GetBatch();
+    EXPECT_TRUE(res.sequence > lastSequence);
+    ++count;
+    lastSequence = res.sequence;
+    // std::cout << "get a seq: " << lastSequence;
+    EXPECT_OK(iter->status());
+    iter->Next();
+  }
+  std::cout << "OneWal seq count : " << count;
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+  db_options_.wal_size_limit_mb = 1;
+  Reopen();
+
+  seq = 4;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 2999;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  // log_files.clear();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 3000;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 3001;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  LogFlush(db_options_.info_log.get());
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, TwoWal) {
+  Init();
+
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  SequenceNumber seq(1);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(2, 3000);
+  auto iter = OpenTransactionLogIter(0);
+  BatchResult res;
+  int count = 0;
+  SequenceNumber lastSequence = 0;
+  while (iter->Valid()) {
+    res = iter->GetBatch();
+    EXPECT_TRUE(res.sequence > lastSequence);
+    ++count;
+    lastSequence = res.sequence;
+    // std::cout << "get a seq: " << lastSequence;
+    EXPECT_OK(iter->status());
+    iter->Next();
+  }
+  std::cout << "TwoWal seq count : " << count;
+
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 2);
+  db_options_.wal_size_limit_mb = 1;
+  Reopen();
+  seq = 10;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  uint64_t archive_size = GetLogDirSize(archive_dir, env_.get());
+  ASSERT_TRUE(archive_size > db_options_.wal_size_limit_mb * 1024 * 1024);
+  std::cout << "archive_size : " << archive_size;
+
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+
+  wal_manager_->PurgeObsoleteWALFiles();
+  archive_size = GetLogDirSize(archive_dir, env_.get());
+  ASSERT_TRUE(archive_size > db_options_.wal_size_limit_mb * 1024 * 1024);
+
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+
+  std::cout << "TwoWal log count : " << log_files.size();
+  ASSERT_TRUE(log_files.size() == 2);
+
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+
+  seq = 2999;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 2);
+
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+
+  seq = 3000;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 2);
+
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+
+  seq = 3001;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 6000;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 6001;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  seq = 6002;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 1);
+
+  ASSERT_OK(wal_manager_->TEST_ReadFirstRecord(kAliveLogFile, 1, &seq));
+  std::cout << "file num: " << 1 << " start seq" << seq;
+
+  ASSERT_OK(wal_manager_->TEST_ReadFirstRecord(kAliveLogFile, 2, &seq));
+  std::cout << "file num: " << 2 << " start seq" << seq;
+  LogFlush(db_options_.info_log.get());
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, ThreeWal) {
+  Init();
+
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  SequenceNumber seq(1);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(3, 3000);
+  auto iter = OpenTransactionLogIter(0);
+  BatchResult res;
+  int count = 0;
+  SequenceNumber lastSequence = 0;
+  while (iter->Valid()) {
+    res = iter->GetBatch();
+    EXPECT_TRUE(res.sequence > lastSequence);
+    ++count;
+    lastSequence = res.sequence;
+    // std::cout << "get a seq: " << lastSequence;
+    EXPECT_OK(iter->status());
+    iter->Next();
+  }
+  std::cout << "ThreeWal seq count : " << count;
+  db_options_.wal_size_limit_mb = 1;
+  Reopen();
+  seq = 1;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  seq = 2999;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  seq = 3000;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  seq = 3001;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  seq = 5000;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, FiveWal) {
+  Init();
+
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  SequenceNumber seq(1);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(5, 3000);
+  auto iter = OpenTransactionLogIter(0);
+  BatchResult res;
+  int count = 0;
+  SequenceNumber lastSequence = 0;
+  while (iter->Valid()) {
+    res = iter->GetBatch();
+    EXPECT_TRUE(res.sequence > lastSequence);
+    ++count;
+    lastSequence = res.sequence;
+    // std::cout << "get a seq: " << lastSequence;
+    EXPECT_OK(iter->status());
+    iter->Next();
+  }
+  std::cout << "ThreeWal seq count : " << count;
+  db_options_.wal_size_limit_mb = 1;
+  Reopen();
+
+  seq = 1;
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  // uint64_t archive_size = GetLogDirSize(archive_dir, env_.get());
+  // ASSERT_TRUE(archive_size <= db_options_.wal_size_limit_mb * 1024 * 1024);
+
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 5);
+
+  seq = 3001;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 4);
+
+  seq = 5000;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 4);
+
+  seq = 6001;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 3);
+
+  seq = 9001;
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  wal_manager_->PurgeObsoleteWALFiles();
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 2);
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, IsLargerthanCurOldestLsn) {
+  Init();
+
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(5, 3000);
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 5);
+  db_options_.wal_size_limit_mb = 14;
+  Reopen();
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->PurgeObsoleteWALFiles();
+
+  SequenceNumber seq;
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_LT(1000, seq);
+
+  seq = 1000;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_LT(2000, seq);
+
+  seq = 1000;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_LT(3000, seq);
+
+  seq = 1000;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_TRUE(3001 >= seq);
+
+  log_files = ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  std::cout << "log_files size now is " << log_files.size() << std::endl;
+  seq = 3001;
+  ASSERT_OK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  db_options_.wal_size_limit_mb = 10;
+  Reopen();
+  env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+  wal_manager_->PurgeObsoleteWALFiles();
+  seq = 4000;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_LT(4000, seq);
+
+  seq = 6000;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_LT(6000, seq);
+
+  ASSERT_OK(wal_manager_->GetOldestOnDiskLsn(&seq));
+  ASSERT_TRUE(6001 >= seq);
+
+  seq = 6001;
+  ASSERT_OK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, SetOldestParallel) {
+  Init();
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(5, 1000);
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_TRUE(log_files.size() == 5);
+  db_options_.wal_size_limit_mb = 10;
+  Reopen();
+  int count = 0;
+  SequenceNumber seq(5000);
+  Status s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_TRUE(s.ok());
+  std::cout << "this ok" << std::endl;
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+    "PurgeObsoleteWALFiles::DeleteFileEnd", [&](void* arg) {count++;});
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+    "SetOldestWalSequenceNumber::SetSeqSuccess", [&](void* arg) {count++;});
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+
+  auto t = port::Thread([&] {
+    for (size_t i = 0; i < 10000; i++) {
+      seq = 5001 + i;
+      s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+    }
+  });
+  auto t1 = port::Thread([&] {
+    for (size_t i = 0; i < 10000; i++) {
+      env_->FakeSleepForMicroseconds(800 * 1000 * 1000);
+      wal_manager_->PurgeObsoleteWALFiles();
+    }
+  });
+  t1.join();
+  t.join();
+  std::cout << "log_files size now is " << log_files.size() << std::endl;
+  std::cout << ",count now is " << count << std::endl;
+  ASSERT_TRUE(20000 == count);
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
+}
+
+TEST_F(WalManagerTest, RoundToOldest) {
+  Init();
+
+  auto old_wal_size_limit_mb = db_options_.wal_size_limit_mb;
+  db_options_.wal_size_limit_mb = 1;
+
+  std::string archive_dir = ArchivalDirectory(dbname_);
+  CreateArchiveLogs(3, 3000);
+
+  Reopen();
+  SequenceNumber seq(3001);
+  auto s = wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */);
+  ASSERT_OK(s) << s.ToString();
+
+  wal_manager_->PurgeObsoleteWALFiles();
+  std::vector<std::uint64_t> log_files =
+      ListSpecificFiles(env_.get(), archive_dir, kLogFile);
+  ASSERT_EQ(log_files.size(), 2);
+
+  Reopen();
+
+  seq = 1;
+  ASSERT_NOK(wal_manager_->SetOldestWalSequenceNumber(&seq, false /* round */));
+  ASSERT_OK(wal_manager_->SetOldestWalSequenceNumber(&seq, true /* round */));
+  ASSERT_GT(seq, 1);
+  db_options_.wal_size_limit_mb = old_wal_size_limit_mb;
 }
 
 }  // namespace rocksdb

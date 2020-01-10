@@ -25,6 +25,11 @@
 #include "rocksdb/transaction_log.h"
 #include "rocksdb/types.h"
 #include "rocksdb/version.h"
+#include "rocksdb/change_stream.h"
+
+
+
+
 
 #ifdef _WIN32
 // Windows API macro interference
@@ -127,6 +132,13 @@ class DB {
                      const std::string& name,
                      DB** dbptr);
 
+  // FastClose the DB by releasing lease, cancel the BG job. This should be
+  // called before calling the destructor.
+  // If the returnstatus is NotSupported(), then the DB implementation does
+  // cleanup in the destructor
+  virtual Status FastClose() { return Status::NotSupported(); }
+  
+
   // Open the database for read only. All DB interfaces
   // that modify data, like put/delete, will return error.
   // If the db is opened in read only mode, then no compactions
@@ -134,9 +146,9 @@ class DB {
   //
   // Not supported in ROCKSDB_LITE, in which case the function will
   // return Status::NotSupported.
-  static Status OpenForReadOnly(const Options& options,
-      const std::string& name, DB** dbptr,
-      bool error_if_log_file_exist = false);
+  static Status OpenForReadOnly(const Options& options, const std::string& name,
+                                DB** dbptr,
+                                bool error_if_log_file_exist = false);
 
   // Open the database for read only with column families. When opening DB with
   // read only, you can specify only a subset of column families in the
@@ -190,6 +202,10 @@ class DB {
                                    const std::string& name,
                                    std::vector<std::string>* column_families);
 
+  static Status ListColumnFamiliesInManifest(
+      const DBOptions& db_options, const std::string& name,
+      const std::string& manifest_content,
+      std::vector<std::string>* column_families);
   DB() { }
   virtual ~DB();
 
@@ -235,6 +251,10 @@ class DB {
   // deletes the column family handle by default. Use this method to
   // close column family instead of deleting column family handle directly
   virtual Status DestroyColumnFamilyHandle(ColumnFamilyHandle* column_family);
+
+  virtual Status GetReadReplicaColumnFamily(const std::string& cfd_name, ColumnFamilyHandle** column_family){
+    return Status::NotSupported("Not supported.");
+  }
 
   // Set the database entry for "key" to "value".
   // If "key" already exists, it will be overwritten.
@@ -929,6 +949,7 @@ class DB {
   // visible until the sync is done.
   // Currently only works if allow_mmap_writes = false in Options.
   virtual Status SyncWAL() = 0;
+  virtual Status FSyncWAL(bool /* update_meta*/) = 0;
 
   // The sequence number of the most recent transaction.
   virtual SequenceNumber GetLatestSequenceNumber() const = 0;
@@ -940,6 +961,15 @@ class DB {
   // hasn't been already processed); returns true if the value was successfully
   // updated, false if user attempted to call if with seqnum <= current value.
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) = 0;
+
+  // Set oldestWalSeq to seqnum
+  // if seqnum is smaller than the oldestLsn on disk, if round == true,
+  // oldestWalSeq will be rounded to "oldestLsn on disk", otherwise, an
+  // InvalidArgument will be thrown out.
+  virtual Status SetOldestWalSequenceNumber(SequenceNumber seqnum, bool round) {
+    return Status::NotSupported("Not Impl.");
+  }
+
 
 #ifndef ROCKSDB_LITE
 
@@ -1007,6 +1037,28 @@ class DB {
   // and end key
   virtual void GetLiveFilesMetaData(
       std::vector<LiveFileMetaData>* /*metadata*/) {}
+
+  uint64_t GetLiveFilesSize() {
+	  uint64_t size = 0;
+
+	  std::vector<LiveFileMetaData> metadata;
+	  GetLiveFilesMetaData(&metadata);
+
+	  for (const auto& md : metadata) {
+	    size += md.size;
+	  }
+
+	  return size;
+  }	  
+
+  // Obtains the stats data of the specified column family of the DB.
+  virtual void GetColumnFamilyStats(ColumnFamilyHandle* /*column_family*/,
+                                   int64_t* /*num_record*/, int64_t* /*size*/) {}
+
+  // Get the stats data of the default column family.
+  void GetColumnFamilyStats(int64_t* num_record, int64_t* size) {
+    GetColumnFamilyStats(DefaultColumnFamily(), num_record, size);
+  }
 
   // Obtains the meta data of the specified column family of the DB.
   virtual void GetColumnFamilyMetaData(ColumnFamilyHandle* /*column_family*/,
@@ -1194,6 +1246,59 @@ class DB {
 
   // Needed for StackableDB
   virtual DB* GetRootDB() { return this; }
+  
+ // feature: support backup for mongodb
+  virtual Status RecoverSyncOldWal(){
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status SwitchAndSyncWal(uint64_t& backup_log_number){
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status ContinueBackgroundCompation(){
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status PauseBackgroundCompation(){
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status ApplyEvent(const ChangeEvent& event, EventCFOptionFn) {
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status ReloadReadOnly(const std::string& version_snapshot,
+                                uint64_t snapshot_lsn, EventCFOptionFn fn,
+                                std::vector<std::string>* new_cfs,
+                                std::vector<std::string>* del_cfs) {
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status DumpManifestSnapshot(std::string* res, uint64_t* lsn) {
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status GetAllVersionsCreateHint(
+      std::map<uint32_t, std::vector<uint64_t>>* hints) {
+    return Status::NotSupported("Not supported.");
+  }
+
+  /* start changestream(a merge iterator of wal&manifest) at
+   * db's GetLatestSequenceNumber(), you'd better call FlushAll before
+   * CreateChangeStream
+   * to get a consistent lsn of memtables and ssts
+   */
+  virtual Status CreateChangeStream(ChangeStream::ManifestType type,
+                                    ChangeStream** handler,
+                                    std::string* manifest, uint64_t* lsn) {
+    return Status::NotSupported("Not supported.");
+  }
+
+  virtual Status ReleaseChangeStream(ChangeStream* handler) {
+
+    return Status::NotSupported("Not supported.");
+  }
 
  private:
   // No copying allowed

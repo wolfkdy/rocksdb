@@ -501,6 +501,8 @@ bool DataBlockIter::ParseNextDataKey(const char* limit) {
         key_pinned_ = false;
       }
 
+      // Noticed about timestamp:
+      // UpdateInternalKey from file, no need to update timestamp
       key_.UpdateInternalKey(global_seqno_, value_type);
     }
 

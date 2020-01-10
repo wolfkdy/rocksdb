@@ -875,6 +875,28 @@ public class Options extends RocksObject
   }
 
   @Override
+  public Options setEnablePipelinedWrite(final boolean enablePipelinedWrite) {
+    setEnablePipelinedWrite(nativeHandle_, enablePipelinedWrite);
+    return this;
+  }
+
+  @Override
+  public boolean enablePipelinedWrite() {
+    return enablePipelinedWrite(nativeHandle_);
+  }
+
+  @Override
+  public Options setTwoWriteQueues(final boolean twoWriteQueues) {
+    setTwoWriteQueues(nativeHandle_, twoWriteQueues);
+    return this;
+  }
+
+  @Override
+  public boolean twoWriteQueues() {
+    return twoWriteQueues(nativeHandle_);
+  }
+
+  @Override
   public Options setAllowConcurrentMemtableWrite(
       final boolean allowConcurrentMemtableWrite) {
     setAllowConcurrentMemtableWrite(nativeHandle_,
@@ -1736,6 +1758,10 @@ public class Options extends RocksObject
   private native boolean enableThreadTracking(long handle);
   private native void setDelayedWriteRate(long handle, long delayedWriteRate);
   private native long delayedWriteRate(long handle);
+  private native void setEnablePipelinedWrite(long handle, boolean enablePipelinedWrite);
+  private native boolean enablePipelinedWrite(long handle);
+  private native void setTwoWriteQueues(long handle, boolean twoWriteQueues);
+  private native boolean twoWriteQueues(long handle);
   private native void setAllowConcurrentMemtableWrite(long handle,
       boolean allowConcurrentMemtableWrite);
   private native boolean allowConcurrentMemtableWrite(long handle);

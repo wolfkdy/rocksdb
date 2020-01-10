@@ -10,6 +10,7 @@
 #if !defined(ROCKSDB_LITE) && !defined(OS_WIN)
 
 #include <algorithm>
+#include <iostream>
 #include <string>
 
 #include "db/db_impl.h"
@@ -531,6 +532,9 @@ static void AssertEmpty(DB* db, int from, int to) {
 class BackupableDBTest : public testing::Test {
  public:
   BackupableDBTest() {
+    std::cout << "BackupableDBTest fails due to this commit:"
+              << "http://code-cbu.huawei.com/str/DFV-Rocks/commit/b01590e7de3f6c43dc7a0916be58c6b92edd44c7"
+              << std::endl;
     // set up files
     std::string db_chroot = test::PerThreadDBPath("backupable_db");
     std::string backup_chroot = test::PerThreadDBPath("backupable_db_backup");

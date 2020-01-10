@@ -638,9 +638,20 @@ class Version {
 
   void GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta);
 
+  void GetColumnFamilyStats(int64_t* num_record, int64_t* total_size);
+
   uint64_t GetSstFilesSize();
 
   MutableCFOptions GetMutableCFOptions() { return mutable_cf_options_; }
+
+  void HintCreatedSinceLsn(uint64_t lsn) {
+    assert(create_since_seq_hint_ == 0);
+    create_since_seq_hint_ = lsn;
+  }
+
+  uint64_t GetCreatedSinceLsnHint() {
+    return create_since_seq_hint_;
+  }
 
  private:
   Env* env_;
@@ -694,6 +705,10 @@ class Version {
   // A version number that uniquely represents this version. This is
   // used for debugging and logging purposes only.
   uint64_t version_number_;
+
+  // NOTE(xxxxxxxx): currently create_since_seq_hint_ is a hint about when
+  // this version is created. do not guarantee exact order.
+  uint64_t create_since_seq_hint_;
 
   Version(ColumnFamilyData* cfd, VersionSet* vset, const EnvOptions& env_opt,
           MutableCFOptions mutable_cf_options, uint64_t version_number = 0);
@@ -797,18 +812,28 @@ class VersionSet {
       const autovector<autovector<VersionEdit*>>& edit_lists,
       InstrumentedMutex* mu, Directory* db_directory = nullptr,
       bool new_descriptor_log = false,
-      const ColumnFamilyOptions* new_cf_options = nullptr);
+      const ColumnFamilyOptions* new_cf_options = nullptr, bool is_persist =true);
 
   // Recover the last saved descriptor from persistent storage.
   // If read_only == true, Recover() will not complain if some column families
   // are not opened
+
   Status Recover(const std::vector<ColumnFamilyDescriptor>& column_families,
-                 bool read_only = false);
+                 bool read_only = false,
+                 const std::string& replica_manifest_content = "");
+
+  Status ReloadReadOnly(const std::string& manifest_content,
+                        uint64_t last_sequence, EventCFOptionFn fn,
+                        std::vector<std::string>* new_cfs,
+                        std::vector<std::string>* del_cfs);
+
+  Status DumpManifestSnapshot(std::string* res, uint64_t* lsn);
 
   // Reads a manifest file and returns a list of column families in
   // column_families.
   static Status ListColumnFamilies(std::vector<std::string>* column_families,
-                                   const std::string& dbname, Env* env);
+                                   const std::string& dbname, Env* env,
+                                   const std::string& replica_manifest_path = "");
 
 #ifndef ROCKSDB_LITE
   // Try to reduce the number of levels. This call is valid when
@@ -978,7 +1003,7 @@ class VersionSet {
   static uint64_t GetNumLiveVersions(Version* dummy_versions);
 
   static uint64_t GetTotalSstFilesSize(Version* dummy_versions);
-
+  static void GetCreateHint(Version* dummy_versions, std::vector<uint64_t>* vhint);
  private:
   struct ManifestWriter;
 
@@ -1017,10 +1042,13 @@ class VersionSet {
       bool* have_last_sequence, SequenceNumber* last_sequence,
       uint64_t* min_log_number_to_keep, uint32_t* max_column_family);
 
+
+  Status ApplyCFVersionEdit(     VersionEdit *edit);
+
   Status ProcessManifestWrites(std::deque<ManifestWriter>& writers,
                                InstrumentedMutex* mu, Directory* db_directory,
                                bool new_descriptor_log,
-                               const ColumnFamilyOptions* new_cf_options);
+                               const ColumnFamilyOptions* new_cf_options ,bool is_persist=true);
 
   std::unique_ptr<ColumnFamilySet> column_family_set_;
 

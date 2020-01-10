@@ -77,12 +77,22 @@ struct CompactionOptionsFIFO {
   // Default: false;
   bool allow_compaction = false;
 
+  // If the prfix not empty, the FIFO compaction will not delete the file,
+  // which contain this prefix key in this file.
+  std::string exclude_prefix = "";
+
   CompactionOptionsFIFO() : max_table_files_size(1 * 1024 * 1024 * 1024) {}
   CompactionOptionsFIFO(uint64_t _max_table_files_size, bool _allow_compaction,
                         uint64_t _ttl = 0)
       : max_table_files_size(_max_table_files_size),
         ttl(_ttl),
         allow_compaction(_allow_compaction) {}
+  CompactionOptionsFIFO(uint64_t _max_table_files_size, bool _allow_compaction,
+                        std::string _prefix)
+      : max_table_files_size(_max_table_files_size),
+        ttl(0),
+        allow_compaction(_allow_compaction),
+        exclude_prefix(_prefix) {}
 };
 
 // Compression options for different compression algorithms like Zlib

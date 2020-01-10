@@ -4,6 +4,8 @@
 //  (found in the LICENSE.Apache file in the root directory).
 
 #pragma once
+
+#include <chrono>
 #include "rocksdb/merge_operator.h"
 #include "rocksdb/slice.h"
 
@@ -15,30 +17,54 @@ namespace cassandra {
  */
 class CassandraValueMergeOperator : public MergeOperator {
 public:
- explicit CassandraValueMergeOperator(int32_t gc_grace_period_in_seconds,
-                                      size_t operands_limit = 0)
-     : gc_grace_period_in_seconds_(gc_grace_period_in_seconds),
-       operands_limit_(operands_limit) {}
+  explicit CassandraValueMergeOperator(int32_t gc_grace_period_in_seconds,
+                                       size_t operands_limit = 0)
+    : gc_grace_period_(gc_grace_period_in_seconds),
+      operands_limit_(operands_limit) {}
 
- virtual bool FullMergeV2(const MergeOperationInput& merge_in,
-                          MergeOperationOutput* merge_out) const override;
+  virtual bool FullMergeV2(const MergeOperationInput& merge_in,
+                           MergeOperationOutput* merge_out) const override;
 
- virtual bool PartialMergeMulti(const Slice& key,
-                                const std::deque<Slice>& operand_list,
-                                std::string* new_value,
-                                Logger* logger) const override;
+  virtual bool PartialMergeMulti(const Slice& key,
+                                 const std::deque<Slice>& operand_list,
+                                 std::string* new_value,
+                                 Logger* logger) const override;
 
- virtual const char* Name() const override;
+  virtual const char* Name() const override;
 
- virtual bool AllowSingleOperand() const override { return true; }
+  virtual bool AllowSingleOperand() const override { return true; }
 
- virtual bool ShouldMerge(const std::vector<Slice>& operands) const override {
-   return operands_limit_ > 0 && operands.size() >= operands_limit_;
- }
+  virtual bool ShouldMerge(const std::vector<Slice>& operands) const override {
+    return operands_limit_ > 0 && operands.size() >= operands_limit_;
+  }
 
 private:
- int32_t gc_grace_period_in_seconds_;
- size_t operands_limit_;
+  std::chrono::seconds gc_grace_period_;
+  size_t operands_limit_;
 };
+
+/**
+ * A MergeOperator implements Cassandra partition meta data merge.
+ */
+class CassandraPartitionMetaMergeOperator : public MergeOperator {
+public:
+  explicit CassandraPartitionMetaMergeOperator(
+    int32_t gc_grace_period_in_seconds) : gc_grace_period_(
+    gc_grace_period_in_seconds) {};
+
+  virtual bool FullMergeV2(const MergeOperationInput& merge_in,
+                           MergeOperationOutput* merge_out) const override;
+
+  virtual bool PartialMergeMulti(const Slice& key,
+                                 const std::deque<Slice>& operand_list,
+                                 std::string* new_value,
+                                 Logger* logger) const override;
+
+  virtual const char* Name() const override;
+
+private:
+  std::chrono::seconds gc_grace_period_;
+};
+
 } // namespace cassandra
 } // namespace rocksdb

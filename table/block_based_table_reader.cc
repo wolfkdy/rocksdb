@@ -2010,7 +2010,8 @@ bool BlockBasedTable::PrefixMayMatch(
         return true;
       }
       auto prefix = prefix_extractor->Transform(user_key);
-      InternalKey internal_key_prefix(prefix, kMaxSequenceNumber, kTypeValue);
+      InternalKey internal_key_prefix;
+      internal_key_prefix.SetMinPossibleForUserKeyAndType(prefix, kTypeValue);
       auto internal_prefix = internal_key_prefix.Encode();
 
       // To prevent any io operation in this method, we set `read_tier` to make
@@ -2498,7 +2499,11 @@ Status BlockBasedTable::Get(const ReadOptions& read_options, const Slice& key,
           if (!ParseInternalKey(biter.key(), &parsed_key)) {
             s = Status::Corruption(Slice());
           }
-
+#ifdef USE_TIMESTAMPS
+          if (parsed_key.timestamp > read_options.read_timestamp) {
+            continue;
+          }
+#endif  // USE_TIMESTAMPS
           if (!get_context->SaveValue(
                   parsed_key, biter.value(), &matched,
                   biter.IsValuePinned() ? &biter : nullptr)) {
