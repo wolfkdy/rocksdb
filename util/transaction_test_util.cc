@@ -41,7 +41,6 @@ RandomTransactionInserter::RandomTransactionInserter(
       num_sets_(num_sets),
       readpercent_(readpercent),
       deletepercent_(deletepercent),
-      putpercent_(putpercent),
       conflict_level_(conflict_level),
       txn_id_(0) {}
 
@@ -222,7 +221,6 @@ class RandomGenerator {
   std::string data_;
   unsigned int pos_;
   const int value_size_ = 1000; 
-  const double compression_ratio_ = 0.5;
 
  public:
   RandomGenerator() {
@@ -234,7 +232,6 @@ class RandomGenerator {
     while (data_.size() < (unsigned)std::max(1048576, value_size_)) {
       // Add a short fragment that is as compressible as specified
       // by FLAGS_compression_ratio.
-      //test::CompressibleString(&rnd, compression_ratio_, 100, &piece);
       data_.append(piece);
     }
     pos_ = 0;

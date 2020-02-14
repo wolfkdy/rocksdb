@@ -131,7 +131,6 @@ class RandomTransactionInserter {
   
   const int readpercent_ ;
   const int deletepercent_ ;
-  const int putpercent_ ;
   const int conflict_level_;
 
   // Number of successful insert batches performed

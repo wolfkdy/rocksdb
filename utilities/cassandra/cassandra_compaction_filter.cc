@@ -215,7 +215,7 @@ bool CassandraCompactionFilter::ShouldDropByMarker(const rocksdb::Slice& key,
   int32_t size = 0;
   int32_t index = 0;
   for (auto& marker : markers_) {
-    res[index] = compareRangeTombstone(cluster_key.data(), cluster_key.size(), ck_size,marker);
+    res[index] = compareRangeTombstone(cluster_key.data(), static_cast<int32_t>(cluster_key.size()), ck_size,marker);
     index++;
   }
   for (auto& pair : res) {

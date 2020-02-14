@@ -243,7 +243,7 @@ class InternalKeyComparator
   }
 };
 
-Slice UserKeyFromRawInternalKey(const char* key, uint32_t klen);
+Slice UserKeyFromRawInternalKey(const char* key, size_t klen);
 uint32_t I2ULen(uint32_t);
 uint32_t U2ILen(uint32_t);
 std::string Userkey2Timestamped(const std::string& uk, uint64_t ts = 0);

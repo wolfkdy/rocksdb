@@ -9,7 +9,7 @@
 BASH_EXISTS := $(shell which bash)
 SHELL := $(shell which bash)
 
-#USE_TIMESTAMPS := 1
+USE_TIMESTAMPS := 1
 ifdef USE_TIMESTAMPS
 CFLAGS += -DUSE_TIMESTAMPS
 CXXFLAGS += -DUSE_TIMESTAMPS
@@ -28,8 +28,6 @@ CXXFLAGS += -DPILE_UT
 endif
 
 LDFLAGS += $(EXTRA_LDFLAGS)
-LDFLAGS += -lftdsclient
-LDFLAGS += -lilayerftds
 LDFLAGS += -O2
 MACHINE ?= $(shell uname -m)
 ARFLAGS = ${EXTRA_ARFLAGS} rs
@@ -367,11 +365,10 @@ ifeq ($(NO_THREEWAY_CRC32C), 1)
 	CXXFLAGS += -DNO_THREEWAY_CRC32C
 endif
 
-CFLAGS += $(WARNING_FLAGS) -I. -I./include -I/opt/stream/libstream/include/stream $(PLATFORM_CCFLAGS) $(OPT)
-CXXFLAGS += $(WARNING_FLAGS) -I. -I./include -I/opt/stream/libstream/include/stream $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers
+CFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CCFLAGS) $(OPT)
+CXXFLAGS += $(WARNING_FLAGS) -I. -I./include $(PLATFORM_CXXFLAGS) $(OPT) -Woverloaded-virtual -Wnon-virtual-dtor -Wno-missing-field-initializers
 
 LDFLAGS += $(PLATFORM_LDFLAGS)
-LDFLAGS	+=	-L/opt/stream/libstream/lib -lstream -lsecurec
 
 # If NO_UPDATE_BUILD_VERSION is set we don't update util/build_version.cc, but
 # the file needs to already exist or else the build will fail
@@ -1777,7 +1774,6 @@ rocksdbjavastatic: $(java_static_all_libobjects)
 	  -o ./java/target/$(ROCKSDBJNILIB) $(JNI_NATIVE_SOURCES) \
 	  $(java_static_all_libobjects) $(COVERAGEFLAGS) \
 	  $(JAVA_COMPRESSIONS) $(JAVA_STATIC_LDFLAGS)  \
-	  /opt/stream/libstream/lib/libstream.so
 	cd java/target;if [ "$(DEBUG_LEVEL)" == "0" ]; then \
 		strip $(STRIPFLAGS) $(ROCKSDBJNILIB); \
 	fi

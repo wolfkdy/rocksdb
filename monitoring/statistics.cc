@@ -14,7 +14,6 @@
 #include "port/likely.h"
 #include <algorithm>
 #include <cstdio>
-#include "common/common.h"
 
 namespace rocksdb {
 
@@ -333,17 +332,6 @@ Status StatisticsImpl::Reset() {
   return Status::OK();
 }
 
-Status StatisticsImpl::getStreamStatistics(){
-  return Status::OK();
-}
-
-void StatisticsImpl::resetStreamStatistics(){
-}
-
-long StatisticsImpl::getStreamCount(uint32_t metric_value){
-  return getStreamStatsArray()[metric_value];
-}
-
 namespace {
 
 // a buffer size used for temp string buffers
@@ -393,7 +381,7 @@ std::vector<std::string> StatisticsImpl::ToFormatString() const{
   for (const auto& t : TickersNameMap) {
     assert(t.first < TICKER_ENUM_MAX);
     char buffer[kTmpStrBufferSize];
-    CommonSnprintf(buffer, kTmpStrBufferSize, kTmpStrBufferSize-1, "%s COUNT : %" PRIu64 "\n",
+    snprintf(buffer, kTmpStrBufferSize, "%s COUNT : %" PRIu64 "\n",
                    t.second.c_str(), getTickerCountLocked(t.first));
     vs.push_back((std::string)buffer);
   }
@@ -404,8 +392,8 @@ std::vector<std::string> StatisticsImpl::ToFormatString() const{
     getHistogramImplLocked(h.first)->Data(&hData);
     // don't handle failures - buffer should always be big enough and arguments
     // should be provided correctly
-    int ret = CommonSnprintf(
-        buffer, kTmpStrBufferSize, kTmpStrBufferSize-1,
+    int ret = snprintf(
+        buffer, kTmpStrBufferSize,
         "%s P50 : %f P95 : %f P99 : %f P100 : %f COUNT : %" PRIu64 " SUM : %"
         PRIu64 "\n", h.second.c_str(), hData.median, hData.percentile95,
         hData.percentile99, hData.max, hData.count, hData.sum);

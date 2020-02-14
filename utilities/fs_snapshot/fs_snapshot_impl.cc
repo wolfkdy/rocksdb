@@ -10,7 +10,6 @@
 #ifndef ROCKSDB_LITE
 
 #include <iostream>
-#include "common/common.h"
 #include "utilities/fs_snapshot/fs_snapshot_impl.h"
 #include "util/filename.h"
 #include "util/file_util.h"
@@ -41,10 +40,10 @@ Status FsSnapshotRandomReaderImpl::Read(
     assert(files_[name] == content.size());
     slice->resize(content.size());
     char *p = slice->data();
-    CommonMemCopy(p, content.size(), content.c_str(), content.size());
+    memcpy(p, content.c_str(), content.size());
     return Status::OK();
   }
-  uint64_t size = 0;
+  size_t size = 0;
   auto it = files_.find(name);
   if (it == files_.end()) {
     return Status::InvalidArgument("fname not found");
@@ -60,7 +59,7 @@ Status FsSnapshotRandomReaderImpl::Read(
   if (!s.ok()) {
     return s;
   }
-  size_t chunk_size = std::min(size - offset, chunk_size_);
+  size_t chunk_size = std::min(static_cast<size_t>(size - offset), chunk_size_);
   slice->resize(chunk_size);
   Slice tmp;
   return file->Read(offset, chunk_size, &tmp, slice->data());
@@ -87,7 +86,7 @@ void FsSnapshotIteratorImpl::PositionAtCrurentFile() {
   assert(valid_);
   assert(status_.ok());
   std::string content = manifest_fname_.substr(1) + "\n";
-  CommonMemCopy(buf_, content.size(), content.c_str(), content.size());
+  memcpy(buf_, content.c_str(), content.size());
   slice_.reset(new FileSlice{current_fname_, content.size(), 0, Slice(buf_, content.size())});
 }
 
@@ -109,7 +108,7 @@ void FsSnapshotIteratorImpl::PositionAtFileFront(const std::string& name) {
     return;
   }
   curr_file_.reset(new SequentialFileReader(std::move(file), rela_path));
-  uint64_t file_size = files_[name];
+  size_t file_size = files_[name];
   // TODO(xxxxxxxx): hook and test manifest filesize changes
   slice_.reset(new FileSlice{name, file_size, 0, Slice()});
   size_t chunk_size = std::min(chunk_size_, file_size);
@@ -226,7 +225,9 @@ Status FsSnapshotImpl::Init() {
       fsize = manifest_file_size;
     } else {
       auto rela_path = db_->GetName() + v;
-      s = db_->GetEnv()->GetFileSize(rela_path, &fsize);
+      uint64_t tmp = 0;
+      s = db_->GetEnv()->GetFileSize(rela_path, &tmp);
+      fsize = static_cast<size_t>(tmp);
       if (!s.ok()) {
         return s;
       }

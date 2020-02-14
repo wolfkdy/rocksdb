@@ -398,31 +398,31 @@ class DBImpl : public DB {
   }
 
   // feature: support backup for mongodb
-  Status RecoverSyncOldWal();
+  Status RecoverSyncOldWal() override;
 
-  Status SwitchAndSyncWal(uint64_t& backup_log_number);
+  Status SwitchAndSyncWal(uint64_t& backup_log_number) override;
 
-  Status ContinueBackgroundCompation();
+  Status ContinueBackgroundCompation() override;
 
-  Status PauseBackgroundCompation();
+  Status PauseBackgroundCompation() override;
 
-  Status ApplyEvent(const ChangeEvent& event, EventCFOptionFn fn);
+  Status ApplyEvent(const ChangeEvent& event, EventCFOptionFn fn) override;
 
   Status ReloadReadOnly(const std::string& version_snapshot,
                         uint64_t snapshot_lsn, EventCFOptionFn fn,
                         std::vector<std::string>* new_cfs,
-                        std::vector<std::string>* del_cfs);
+                        std::vector<std::string>* del_cfs) override;
 
-  Status DumpManifestSnapshot(std::string* res, uint64_t* lsn);
+  Status DumpManifestSnapshot(std::string* res, uint64_t* lsn) override;
 
   Status GetAllVersionsCreateHint(
-      std::map<std::uint32_t, std::vector<uint64_t>>* versions);
+      std::map<std::uint32_t, std::vector<uint64_t>>* versions) override;
 
   Status CreateChangeStream(ChangeStream::ManifestType type,
                             ChangeStream** handler, std::string* manifest,
-                            uint64_t* lsn);
+                            uint64_t* lsn) override;
 
-  Status ReleaseChangeStream(ChangeStream* handler);
+  Status ReleaseChangeStream(ChangeStream* handler) override;
 
   void ReadReplicaEvictMemtables(ColumnFamilyData* cfd,
                                  const MutableCFOptions& cf_opt,
@@ -617,7 +617,7 @@ class DBImpl : public DB {
   std::unique_ptr<ColumnFamilyHandle> GetColumnFamilyHandleUnlocked(
       uint32_t column_family_id);
 
-  Status GetReadReplicaColumnFamily(const std::string& cfd_name, ColumnFamilyHandle** column_family);
+  Status GetReadReplicaColumnFamily(const std::string& cfd_name, ColumnFamilyHandle** column_family) override;
 
   // Returns the number of currently running flushes.
   // REQUIREMENT: mutex_ must be held when calling this function.

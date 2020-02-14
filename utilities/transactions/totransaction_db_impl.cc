@@ -93,7 +93,7 @@ Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(const Slice& k
     // Check whether the key is modified by the same txn
     if (iter->second != txn_id) {
       ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict another txn id(%llu) is modifying key(%s) \n",
-        iter->second, key.ToString());
+        iter->second, key.ToString().c_str());
       return Status::Busy();
     } else {
       return Status::OK();
@@ -235,7 +235,7 @@ Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family
   // Check whether the commit ts of latest committed txn for key is less than my read ts
   Status s = committed_keys_.CheckKeyInLock(key, txn_id, readts, stripe_num);
   if (!s.ok()) {
-	ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck \n", txn_id, key.ToString(true));
+	ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck \n", txn_id, key.ToString(true).c_str());
     return s;
   }
 
@@ -244,7 +244,7 @@ Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family
   s = uncommitted_keys_.CheckKeyAndAddInLock(key, txn_id, stripe_num,
                                              max_conflict_bytes_, &current_conflict_bytes_);
   if (!s.ok()) {
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk \n", txn_id, key.ToString(true));
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk \n", txn_id, key.ToString(true).c_str());
     return s;
   }
 

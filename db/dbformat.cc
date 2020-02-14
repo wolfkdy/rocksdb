@@ -55,7 +55,7 @@ EntryType GetEntryType(ValueType value_type) {
   }
 }
 
-Slice UserKeyFromRawInternalKey(const char* key, uint32_t klen) {
+Slice UserKeyFromRawInternalKey(const char* key, size_t klen) {
 #ifdef USE_TIMESTAMPS
   assert(klen >= 16);
   return {key, klen-16};
