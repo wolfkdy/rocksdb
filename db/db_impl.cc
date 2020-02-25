@@ -707,10 +707,10 @@ void DBImpl::DumpStats() {
   PrintStatistics();
 }
 
-Status DBImpl::AdvancePinTs(uint64_t pinTs) {
+Status DBImpl::AdvancePinTs(uint64_t pinTs, bool force) {
 #ifdef USE_TIMESTAMPS
   InstrumentedMutexLock l(&mutex_);
-  if (pinTs < pin_timestamp_.load(std::memory_order_relaxed)) {
+  if (pinTs < pin_timestamp_.load(std::memory_order_relaxed) && !force) {
     return Status::InvalidArgument("pinTs can not travel back");
   }
   pin_timestamp_.store(pinTs, std::memory_order_relaxed);

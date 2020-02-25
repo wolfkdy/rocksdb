@@ -48,10 +48,11 @@ struct TOTransactionDBOptions {
 };
 
 enum TimeStampType {
-    kOldest = 0,
-    kStable = 1,
-    kAllCommitted = 2,
-    kTimeStampMax, 
+  kOldest = 0,
+  kStable = 1,  // kStable is not used
+  kCommitted = 2,
+  kAllCommitted = 3,
+  kTimeStampMax,
 };
 
 //TimeStamp Ordering Transaction Options
@@ -83,8 +84,9 @@ class TOTransactionDB : public StackableDB {
   virtual TOTransaction* BeginTransaction(
       const WriteOptions& write_options,
       const TOTransactionOptions& txn_options) = 0;
- 
-  virtual Status SetTimeStamp(const TimeStampType& ts_type, const RocksTimeStamp& ts) = 0;
+
+  virtual Status SetTimeStamp(const TimeStampType& ts_type,
+                              const RocksTimeStamp& ts, bool force) = 0;
 
   virtual Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) = 0;
 

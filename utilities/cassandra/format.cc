@@ -470,7 +470,8 @@ void ComplexColumn::Serialize(std::string* dest) const {
   ColumnBase::Serialize(dest);
   rocksdb::cassandra::Serialize<int32_t>(local_deletion_time_, dest);
   rocksdb::cassandra::Serialize<int64_t>(marked_for_delete_at_, dest);
-  rocksdb::cassandra::Serialize<int32_t>(static_cast<int32_t>(columns_.size()), dest);
+  rocksdb::cassandra::Serialize<int32_t>(static_cast<int32_t>(columns_.size()),
+                                         dest);
   for (auto& pair : columns_) {
     pair.second->Serialize(dest);
   }
@@ -1000,7 +1001,8 @@ PartitionHeader::Deserialize(const char* src, std::size_t size) {
 void PartitionHeader::Serialize(std::string* dest) const {
   rocksdb::cassandra::Serialize<int8_t>(PartitionHeaderMask::ALL_MASK, dest);
   partition_deletion_.Serialize(dest);
-  rocksdb::cassandra::Serialize<int32_t>(static_cast<int32_t>(RowValue::Size()), dest);
+  rocksdb::cassandra::Serialize<int32_t>(static_cast<int32_t>(RowValue::Size()),
+                                         dest);
   int32_t marker_size = 0;
   for (auto& m : markers_) {
     marker_size += m->Size();

@@ -617,7 +617,8 @@ class DBImpl : public DB {
   std::unique_ptr<ColumnFamilyHandle> GetColumnFamilyHandleUnlocked(
       uint32_t column_family_id);
 
-  Status GetReadReplicaColumnFamily(const std::string& cfd_name, ColumnFamilyHandle** column_family) override;
+  Status GetReadReplicaColumnFamily(
+      const std::string& cfd_name, ColumnFamilyHandle** column_family) override;
 
   // Returns the number of currently running flushes.
   // REQUIREMENT: mutex_ must be held when calling this function.
@@ -766,7 +767,7 @@ class DBImpl : public DB {
 
   virtual Status Close() override;
 
-  Status AdvancePinTs(uint64_t);
+  Status AdvancePinTs(uint64_t pinTs, bool force);
 
   static Status CreateAndNewDirectory(Env* env, const std::string& dirname,
                                       std::unique_ptr<Directory>* directory);

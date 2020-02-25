@@ -288,7 +288,7 @@ class StackableDB : public DB {
     return db_->SyncWAL();
   }
 
-  virtual Status FSyncWAL(bool/* update_meta*/) override {
+  virtual Status FSyncWAL(bool /* update_meta*/) override {
     return Status::NotSupported();
   }
 

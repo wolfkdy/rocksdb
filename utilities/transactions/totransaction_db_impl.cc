@@ -92,8 +92,10 @@ Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(const Slice& k
   if (iter != stripe->uncommitted_keys_map_.end()) {
     // Check whether the key is modified by the same txn
     if (iter->second != txn_id) {
-      ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict another txn id(%llu) is modifying key(%s) \n",
-        iter->second, key.ToString().c_str());
+      ROCKS_LOG_WARN(
+          info_log_,
+          "TOTDB WriteConflict another txn id(%llu) is modifying key(%s) \n",
+          iter->second, key.ToString().c_str());
       return Status::Busy();
     } else {
       return Status::OK();
@@ -235,7 +237,8 @@ Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family
   // Check whether the commit ts of latest committed txn for key is less than my read ts
   Status s = committed_keys_.CheckKeyInLock(key, txn_id, readts, stripe_num);
   if (!s.ok()) {
-	ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck \n", txn_id, key.ToString(true).c_str());
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck \n",
+                    txn_id, key.ToString(true).c_str());
     return s;
   }
 
@@ -244,7 +247,8 @@ Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family
   s = uncommitted_keys_.CheckKeyAndAddInLock(key, txn_id, stripe_num,
                                              max_conflict_bytes_, &current_conflict_bytes_);
   if (!s.ok()) {
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk \n", txn_id, key.ToString(true).c_str());
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk \n",
+                    txn_id, key.ToString(true).c_str());
     return s;
   }
 
@@ -587,27 +591,45 @@ Status TOTransactionDBImpl::RollbackTransaction(std::shared_ptr<ATN> core,
   }
 
   return Status::OK();
-} 
+}
 
 Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
-                                         const RocksTimeStamp& ts) {
-  if (ts_type == kAllCommitted) {
-    // TODO:
-    // NOTE; actually, it should be called kCommittedTimestamp
-    // and kCommittedTimestamp can be set backwards in wt.
-    // But currently, we dont have this need.
-    return Status::InvalidArgument("kAllCommittedTs can not set");
+                                         const RocksTimeStamp& ts, bool force) {
+  if (ts_type == kCommitted) {
+    // NOTE(wolfkdy): committed_max_ts_ is not protected by ts_meta_mutex_,
+    // its change is by atomic cas. So here it's meaningless to Wlock
+    // ts_meta_mutex_ it's app-level's duty to guarantee that when updating
+    // kCommitted-timestamp, there is no paralllel running txns that will also
+    // change it.
+    if (force) {
+      ROCKS_LOG_WARN(info_log_, "kCommittedTs force set from:%llu to %llu",
+                     has_commit_ts_.load() ? committed_max_ts_.load() : 0, ts);
+    }
+    ReadLock rl(&ts_meta_mutex_);
+    if ((oldest_ts_ == nullptr || *oldest_ts_ > ts) && !force) {
+      return Status::InvalidArgument(
+          "kCommittedTs should not be less than kOldestTs");
+    }
+    committed_max_ts_.store(ts);
+    has_commit_ts_.store(true);
+    return Status::OK();
   }
 
   if (ts_type == kOldest) {
-    // NOTE: here we must take lock, every txn's readTs-setting
+    // NOTE(wolfkdy): here we must take lock, every txn's readTs-setting
     // has to be in the same critical area within the set of kOldest
+    uint64_t original = 0;
     {
       WriteLock wl(&ts_meta_mutex_);
-      if (oldest_ts_ != nullptr && *oldest_ts_ > ts) {
+      if ((oldest_ts_ != nullptr && *oldest_ts_ > ts) && !force) {
         return Status::InvalidArgument("oldestTs can not travel back");
       }
+      original = (oldest_ts_ == nullptr) ? 0 : *oldest_ts_;
       oldest_ts_.reset(new RocksTimeStamp(ts));
+    }
+    if (force) {
+      ROCKS_LOG_WARN(info_log_, "kOldestTs force set from:%llu to %llu",
+                     original, ts);
     }
     auto pin_ts = ts;
     {
@@ -625,7 +647,7 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
       read_q_walk_len_sum_.fetch_add(read_q_.size(), std::memory_order_relaxed);
       read_q_walk_times_.fetch_add(walk_cnt, std::memory_order_relaxed);
     }
-    dbimpl_->AdvancePinTs(pin_ts);
+    dbimpl_->AdvancePinTs(pin_ts, force);
     ROCKS_LOG_DEBUG(info_log_, "TOTDB set TS type(%d) value(%llu)\n", ts_type, ts);
     return Status::OK();
   }

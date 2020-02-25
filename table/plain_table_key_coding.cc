@@ -150,7 +150,8 @@ Status PlainTableKeyEncoder::AppendKey(const Slice& key,
   // in this buffer to safe one file append call, which takes 1 byte.
   if (parsed_key.sequence == 0 && parsed_key.type == kTypeValue) {
     Status s =
-        file->Append(Slice(key_to_write.data(), I2ULen(static_cast<uint32_t>(key_to_write.size()))));
+        file->Append(Slice(key_to_write.data(),
+                           I2ULen(static_cast<uint32_t>(key_to_write.size()))));
     if (!s.ok()) {
       return s;
     }

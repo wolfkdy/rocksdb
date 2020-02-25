@@ -125,9 +125,10 @@ class TOTransactionDBImpl : public TOTransactionDB {
 
   Status RollbackTransaction(std::shared_ptr<ATN> core,
                              const std::set<std::string>& written_keys);
-	 
-  Status SetTimeStamp(const TimeStampType& ts_type, const RocksTimeStamp& ts) override;
- 
+
+  Status SetTimeStamp(const TimeStampType& ts_type, const RocksTimeStamp& ts,
+                      bool force) override;
+
   Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) override;
 
   Status Stat(TOTransactionStat* stat) override;
@@ -311,8 +312,6 @@ class TOTransactionDBImpl : public TOTransactionDB {
   port::RWMutex ts_meta_mutex_;
   // protected by ts_meta_mutex_
   std::unique_ptr<RocksTimeStamp> oldest_ts_;
-  // protected by ts_meta_mutex_
-  std::unique_ptr<RocksTimeStamp> pinned_ts_;
 };
 
 }  //  namespace rocksdb
