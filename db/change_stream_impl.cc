@@ -23,6 +23,7 @@
 #endif  // __STDC_FORMAT_MACROS
 
 #include "db/change_stream_impl.h"
+#include <unistd.h>
 #include <inttypes.h>
 #include <iostream>
 #include <sstream>
