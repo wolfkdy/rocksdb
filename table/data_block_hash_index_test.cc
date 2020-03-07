@@ -273,7 +273,12 @@ TEST(DataBlockHashIndex, BlockRestartIndexExceedMax) {
   // #restarts <= 253. HashIndex is valid
   for (int i = 0; i <= 253; i++) {
     std::string ukey = "key" + std::to_string(i);
-    InternalKey ikey(ukey, 0, kTypeValue);
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue, 0);
+#else
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue);
+#endif
+    
     builder.Add(ikey.Encode().ToString(), "value");
   }
 
@@ -295,7 +300,12 @@ TEST(DataBlockHashIndex, BlockRestartIndexExceedMax) {
   // #restarts > 253. HashIndex is not used
   for (int i = 0; i <= 254; i++) {
     std::string ukey = "key" + std::to_string(i);
-    InternalKey ikey(ukey, 0, kTypeValue);
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue, 0);
+#else
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue);
+#endif
+    
     builder.Add(ikey.Encode().ToString(), "value");
   }
 
@@ -316,7 +326,11 @@ TEST(DataBlockHashIndex, BlockRestartIndexExceedMax) {
 TEST(DataBlockHashIndex, BlockSizeExceedMax) {
   Options options = Options();
   std::string ukey(10, 'k');
-  InternalKey ikey(ukey, 0, kTypeValue);
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue, 0);
+#else
+      auto ikey = InternalKey(ukey, 0, ValueType::kTypeValue);
+#endif  
 
   BlockBuilder builder(1 /* block_restart_interval */,
                        false /* use_delta_encoding */,
@@ -379,7 +393,11 @@ TEST(DataBlockHashIndex, BlockTestSingleKey) {
 
   std::string ukey("gopher");
   std::string value("gold");
-  InternalKey ikey(ukey, 10, kTypeValue);
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(ukey, 10, ValueType::kTypeValue, 0);
+#else
+      auto ikey = InternalKey(ukey, 10, ValueType::kTypeValue);
+#endif  
   builder.Add(ikey.Encode().ToString(), value /*value*/);
 
   // read serialized contents of the block
@@ -395,7 +413,12 @@ TEST(DataBlockHashIndex, BlockTestSingleKey) {
   bool may_exist;
   // search in block for the key just inserted
   {
-    InternalKey seek_ikey(ukey, 10, kValueTypeForSeek);
+#ifdef USE_TIMESTAMPS
+	 InternalKey seek_ikey(ukey, 10, kValueTypeForSeek, 0);
+
+#else
+     InternalKey seek_ikey(ukey, 10, kValueTypeForSeek);
+#endif 	
     may_exist = iter->SeekForGet(seek_ikey.Encode().ToString());
     ASSERT_TRUE(may_exist);
     ASSERT_TRUE(iter->Valid());
@@ -406,7 +429,12 @@ TEST(DataBlockHashIndex, BlockTestSingleKey) {
 
   // search in block for the existing ukey, but with higher seqno
   {
-    InternalKey seek_ikey(ukey, 20, kValueTypeForSeek);
+#ifdef USE_TIMESTAMPS
+	 InternalKey seek_ikey(ukey, 20, kValueTypeForSeek, 0);
+
+#else
+     InternalKey seek_ikey(ukey, 20, kValueTypeForSeek);
+#endif 		
 
     // HashIndex should be able to set the iter correctly
     may_exist = iter->SeekForGet(seek_ikey.Encode().ToString());
@@ -431,7 +459,13 @@ TEST(DataBlockHashIndex, BlockTestSingleKey) {
   // iter->Valid() == false indicates that we've reached to the end of
   // the block and the caller should continue searching the next block.
   {
-    InternalKey seek_ikey(ukey, 5, kValueTypeForSeek);
+
+#ifdef USE_TIMESTAMPS
+	 InternalKey seek_ikey(ukey, 5, kValueTypeForSeek, 0);
+
+#else
+     InternalKey seek_ikey(ukey, 5, kValueTypeForSeek);
+#endif 	
     may_exist = iter->SeekForGet(seek_ikey.Encode().ToString());
     ASSERT_TRUE(may_exist);
     ASSERT_FALSE(iter->Valid());  // should have reached to the end of block
@@ -459,7 +493,14 @@ TEST(DataBlockHashIndex, BlockTestLarge) {
   // non-existent keys.
   for (int i = 0; i < num_records; i++) {
     std::string ukey(keys[i] + "1" /* existing key marker */);
-    InternalKey ikey(ukey, 0, kTypeValue);
+
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(ukey, 0, kTypeValue, 0);
+#else
+	InternalKey ikey(ukey, 0, kTypeValue);
+#endif
+
     builder.Add(ikey.Encode().ToString(), values[i]);
   }
 
@@ -479,7 +520,11 @@ TEST(DataBlockHashIndex, BlockTestLarge) {
     // find a random key in the lookaside array
     int index = rnd.Uniform(num_records);
     std::string ukey(keys[index] + "1" /* existing key marker */);
-    InternalKey ikey(ukey, 0, kTypeValue);
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(ukey, 0, kTypeValue, 0);
+#else
+	InternalKey ikey(ukey, 0, kTypeValue);
+#endif	
 
     // search in block for this key
     bool may_exist = iter->SeekForGet(ikey.Encode().ToString());
@@ -517,7 +562,11 @@ TEST(DataBlockHashIndex, BlockTestLarge) {
     // find a random key in the lookaside array
     int index = rnd.Uniform(num_records);
     std::string ukey(keys[index] + "0" /* non-existing key marker */);
-    InternalKey ikey(ukey, 0, kTypeValue);
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(ukey, 0, kTypeValue, 0);
+#else
+	InternalKey ikey(ukey, 0, kTypeValue);
+#endif	
 
     // search in block for this key
     bool may_exist = iter->SeekForGet(ikey.Encode().ToString());
@@ -621,16 +670,29 @@ TEST(DataBlockHashIndex, BlockBoundary) {
     // | Block  N  ][ Block N+1 ]
     // seek for "axy"@60
     std::string uk1("aab");
-    InternalKey ik1(uk1, 100, kTypeValue);
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ik1(uk1, 100, kTypeValue, 0);
+#else
+	InternalKey ik1(uk1, 100, kTypeValue);
+#endif	
     std::string v1(4100, '1');  // large value
 
     std::string uk2("axy");
-    InternalKey ik2(uk2, 10, kTypeValue);
+#ifdef USE_TIMESTAMPS
+    InternalKey ik2(uk2, 10, kTypeValue, 0);
+#else
+	InternalKey ik2(uk2, 10, kTypeValue);
+#endif	
     std::string v2(4100, '2');  // large value
 
     PinnableSlice value;
     std::string seek_ukey("axy");
-    InternalKey seek_ikey(seek_ukey, 60, kTypeValue);
+#ifdef USE_TIMESTAMPS
+    InternalKey seek_ikey(seek_ukey, 60, kTypeValue, 0);
+#else
+	InternalKey seek_ikey(seek_ukey, 60, kTypeValue);
+#endif	
     GetContext get_context(options.comparator, nullptr, nullptr, nullptr,
                            GetContext::kNotFound, seek_ukey, &value, nullptr,
                            nullptr, nullptr, nullptr);
@@ -646,16 +708,30 @@ TEST(DataBlockHashIndex, BlockBoundary) {
     // | Block  N  ][ Block N+1 ]
     // seek for "axy"@60
     std::string uk1("axy");
-    InternalKey ik1(uk1, 100, kTypeValue);
+ 
+#ifdef USE_TIMESTAMPS
+      InternalKey ik1(uk1, 100, kTypeValue,0);
+#else
+      InternalKey ik1(uk1, 100, kTypeValue);
+#endif	
     std::string v1(4100, '1');  // large value
 
     std::string uk2("axy");
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ik2(uk2, 10, kTypeValue, 0);
+#else
     InternalKey ik2(uk2, 10, kTypeValue);
+#endif	
     std::string v2(4100, '2');  // large value
 
     PinnableSlice value;
     std::string seek_ukey("axy");
+#ifdef USE_TIMESTAMPS
+    InternalKey seek_ikey(seek_ukey, 60, kTypeValue, 0);
+#else
     InternalKey seek_ikey(seek_ukey, 60, kTypeValue);
+#endif	
     GetContext get_context(options.comparator, nullptr, nullptr, nullptr,
                            GetContext::kNotFound, seek_ukey, &value, nullptr,
                            nullptr, nullptr, nullptr);
@@ -671,16 +747,32 @@ TEST(DataBlockHashIndex, BlockBoundary) {
     // | Block  N  ][ Block N+1 ]
     // seek for "axy"@120
     std::string uk1("axy");
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ik1(uk1, 100, kTypeValue, 0);
+#else
     InternalKey ik1(uk1, 100, kTypeValue);
+#endif		
     std::string v1(4100, '1');  // large value
 
     std::string uk2("axy");
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ik2(uk2, 10, kTypeValue, 0);
+#else
     InternalKey ik2(uk2, 10, kTypeValue);
+#endif		
     std::string v2(4100, '2');  // large value
 
     PinnableSlice value;
     std::string seek_ukey("axy");
+
+
+#ifdef USE_TIMESTAMPS
+    InternalKey seek_ikey(seek_ukey, 120, kTypeValue, 0);
+#else
     InternalKey seek_ikey(seek_ukey, 120, kTypeValue);
+#endif	
     GetContext get_context(options.comparator, nullptr, nullptr, nullptr,
                            GetContext::kNotFound, seek_ukey, &value, nullptr,
                            nullptr, nullptr, nullptr);
@@ -696,16 +788,32 @@ TEST(DataBlockHashIndex, BlockBoundary) {
     // | Block  N  ][ Block N+1 ]
     // seek for "axy"@5
     std::string uk1("axy");
-    InternalKey ik1(uk1, 100, kTypeValue);
+ 
+#ifdef USE_TIMESTAMPS
+      InternalKey ik1(uk1, 100, kTypeValue, 0);
+#else
+      InternalKey ik1(uk1, 100, kTypeValue);
+#endif	
     std::string v1(4100, '1');  // large value
 
     std::string uk2("axy");
-    InternalKey ik2(uk2, 10, kTypeValue);
+	
+#ifdef USE_TIMESTAMPS
+      InternalKey ik2(uk2, 10, kTypeValue, 0);
+#else
+      InternalKey ik2(uk2, 10, kTypeValue);
+#endif		
     std::string v2(4100, '2');  // large value
 
     PinnableSlice value;
     std::string seek_ukey("axy");
-    InternalKey seek_ikey(seek_ukey, 5, kTypeValue);
+
+#ifdef USE_TIMESTAMPS
+      InternalKey seek_ikey(seek_ukey, 5, kTypeValue, 0);
+#else
+      InternalKey seek_ikey(seek_ukey, 5, kTypeValue);
+#endif	
+
     GetContext get_context(options.comparator, nullptr, nullptr, nullptr,
                            GetContext::kNotFound, seek_ukey, &value, nullptr,
                            nullptr, nullptr, nullptr);

@@ -131,7 +131,12 @@ Status DBImpl::FlushMemTableToOutputFile(
       GetDataDir(cfd, 0U),
       GetCompressionFlush(*cfd->ioptions(), mutable_cf_options), stats_,
       &event_logger_, mutable_cf_options.report_bg_io_stats,
-      true /* sync_output_directory */, true /* write_manifest */);
+      true /* sync_output_directory */, true /* write_manifest */
+#ifdef USE_TIMESTAMPS
+      ,
+      pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+          );
 
   FileMetaData file_meta;
 
@@ -299,6 +304,7 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
     all_mutable_cf_options.emplace_back(*cfd->GetLatestMutableCFOptions());
     const MutableCFOptions& mutable_cf_options = all_mutable_cf_options.back();
     const uint64_t* max_memtable_id = &(bg_flush_args[i].max_memtable_id_);
+
     jobs.emplace_back(
         dbname_, cfds[i], immutable_db_options_, mutable_cf_options,
         max_memtable_id, env_options_for_compaction_, versions_.get(), &mutex_,
@@ -306,7 +312,12 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         snapshot_checker, job_context, log_buffer, directories_.GetDbDir(),
         data_dir, GetCompressionFlush(*cfd->ioptions(), mutable_cf_options),
         stats_, &event_logger_, mutable_cf_options.report_bg_io_stats,
-        false /* sync_output_directory */, false /* write_manifest */);
+        false /* sync_output_directory */, false /* write_manifest */
+#ifdef USE_TIMESTAMPS
+        ,
+        pin_timestamp_.load()
+#endif
+            );
     jobs.back().PickMemTable();
   }
 
@@ -928,7 +939,7 @@ Status DBImpl::CompactFilesImpl(
       snapshot_checker, table_cache_, &event_logger_,
       c->mutable_cf_options()->paranoid_file_checks,
       c->mutable_cf_options()->report_bg_io_stats, dbname_,
-      nullptr);  // Here we pass a nullptr for CompactionJobStats because
+      nullptr    // Here we pass a nullptr for CompactionJobStats because
                  // CompactFiles does not trigger OnCompactionCompleted(),
                  // which is the only place where CompactionJobStats is
                  // returned.  The idea of not triggering OnCompationCompleted()
@@ -941,6 +952,10 @@ Status DBImpl::CompactFilesImpl(
                  // support for CompactFiles, we should have CompactFiles API
                  // pass a pointer of CompactionJobStats as the out-value
                  // instead of using EventListener.
+#ifdef USE_TIMESTAMPS
+      ,pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+  );
 
   // Creating a compaction influences the compaction score because the score
   // takes running compactions into account (by skipping files that are already
@@ -2420,6 +2435,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
     for (const auto& f : *c->inputs(0)) {
       c->edit()->DeleteFile(c->level(), f->fd.GetNumber());
     }
+
     status = versions_->LogAndApply(c->column_family_data(),
                                     *c->mutable_cf_options(), c->edit(),
                                     &mutex_, directories_.GetDbDir());
@@ -2540,7 +2556,11 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         snapshot_checker, table_cache_, &event_logger_,
         c->mutable_cf_options()->paranoid_file_checks,
         c->mutable_cf_options()->report_bg_io_stats, dbname_,
-        &compaction_job_stats);
+        &compaction_job_stats
+#ifdef USE_TIMESTAMPS
+        ,pin_timestamp_.load()
+#endif  // USE_TIMESTAMPS
+    );
     compaction_job.Prepare();
 
     NotifyOnCompactionBegin(c->column_family_data(), c.get(), status,

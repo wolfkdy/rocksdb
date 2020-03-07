@@ -32,4 +32,5 @@ struct CompactionIterationStats {
   // Single-Delete diagnostics for exceptional situations
   uint64_t num_single_del_fallthru = 0;
   uint64_t num_single_del_mismatch = 0;
+  uint64_t num_record_pined_by_ts = 0;
 };

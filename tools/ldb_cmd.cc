@@ -1249,8 +1249,14 @@ void InternalDumpCommand::DoCommand() {
 
   long long count = 0;
   for (auto& key_version : key_versions) {
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(key_version.user_key, key_version.sequence,
+                     static_cast<ValueType>(key_version.type),
+                     key_version.timestamp);
+#else
     InternalKey ikey(key_version.user_key, key_version.sequence,
                      static_cast<ValueType>(key_version.type));
+#endif  // USE_TIMESTAMPS
     if (has_to_ && ikey.user_key() == to_) {
       // GetAllKeyVersions() includes keys with user key `to_`, but idump has
       // traditionally excluded such keys.

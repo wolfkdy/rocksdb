@@ -1210,9 +1210,15 @@ TEST_F(BlobDBTest, InlineSmallValues) {
       ASSERT_OK(blob_db_->PutUntil(WriteOptions(), key, value, expiration));
     }
     ASSERT_EQ(blob_db_->GetLatestSequenceNumber(), sequence);
-    versions[key] =
-        KeyVersion(key, value, sequence,
-                   (is_small_value && !has_ttl) ? kTypeValue : kTypeBlobIndex);
+	versions[key] =
+#ifdef USE_TIMESTAMPS
+	KeyVersion(key, value, sequence,
+					(is_small_value && !has_ttl) ? kTypeValue : kTypeBlobIndex, 0);
+#else
+	KeyVersion(key, value, sequence,
+					(is_small_value && !has_ttl) ? kTypeValue : kTypeBlobIndex);
+#endif
+
   }
   VerifyDB(data);
   VerifyBaseDB(versions);

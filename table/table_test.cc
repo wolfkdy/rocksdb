@@ -263,13 +263,17 @@ class KeyConvertingIterator : public InternalIterator {
   }
   virtual bool Valid() const override { return iter_->Valid() && status_.ok(); }
   virtual void Seek(const Slice& target) override {
-    ParsedInternalKey ikey(target, kMaxSequenceNumber, kTypeValue);
+   
+	ParsedInternalKey ikey =
+        ParsedInternalKey::MinFromUserKeyAndType(target, kTypeValue);
     std::string encoded;
     AppendInternalKey(&encoded, ikey);
     iter_->Seek(encoded);
   }
   virtual void SeekForPrev(const Slice& target) override {
-    ParsedInternalKey ikey(target, kMaxSequenceNumber, kTypeValue);
+   
+	ParsedInternalKey ikey =
+        ParsedInternalKey::MinFromUserKeyAndType(target, kTypeValue);
     std::string encoded;
     AppendInternalKey(&encoded, ikey);
     iter_->SeekForPrev(encoded);
@@ -339,7 +343,8 @@ class TableConstructor: public Constructor {
 
     for (const auto kv : kv_map) {
       if (convert_to_internal_key_) {
-        ParsedInternalKey ikey(kv.first, kMaxSequenceNumber, kTypeValue);
+        ParsedInternalKey ikey =
+            ParsedInternalKey::MinFromUserKeyAndType(kv.first, kTypeValue);
         std::string encoded;
         AppendInternalKey(&encoded, ikey);
         builder->Add(encoded, kv.second);
@@ -381,7 +386,8 @@ class TableConstructor: public Constructor {
 
   uint64_t ApproximateOffsetOf(const Slice& key) const {
     if (convert_to_internal_key_) {
-      InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+      InternalKey ikey;
+      ikey.SetMinPossibleForUserKeyAndType(key, kTypeValue);
       const Slice skey = ikey.Encode();
       return table_reader_->ApproximateOffsetOf(skey);
     }
@@ -567,15 +573,18 @@ class DBConstructor: public Constructor {
 
 enum TestType {
   BLOCK_BASED_TABLE_TEST,
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
   PLAIN_TABLE_SEMI_FIXED_PREFIX,
   PLAIN_TABLE_FULL_STR_PREFIX,
   PLAIN_TABLE_TOTAL_ORDER,
 #endif  // !ROCKSDB_LITE
   BLOCK_TEST,
+#if !defined(USE_TIMESTAMPS)
   MEMTABLE_TEST,
+#endif  // USE_TIMESTAMPS
   DB_TEST
 };
+
 
 struct TestArgs {
   TestType type;
@@ -590,13 +599,17 @@ static std::vector<TestArgs> GenerateArgList() {
   std::vector<TestArgs> test_args;
   std::vector<TestType> test_types = {
       BLOCK_BASED_TABLE_TEST,
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
       PLAIN_TABLE_SEMI_FIXED_PREFIX,
       PLAIN_TABLE_FULL_STR_PREFIX,
       PLAIN_TABLE_TOTAL_ORDER,
 #endif  // !ROCKSDB_LITE
       BLOCK_TEST,
-      MEMTABLE_TEST, DB_TEST};
+#if !defined(USE_TIMESTAMPS)
+      MEMTABLE_TEST,
+#endif  // USE_TIMESTAMPS
+      DB_TEST};
+
   std::vector<bool> reverse_compare_types = {false, true};
   std::vector<int> restart_intervals = {16, 1, 1024};
 
@@ -631,7 +644,8 @@ static std::vector<TestArgs> GenerateArgList() {
 
   for (auto test_type : test_types) {
     for (auto reverse_compare : reverse_compare_types) {
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
+
       if (test_type == PLAIN_TABLE_SEMI_FIXED_PREFIX ||
           test_type == PLAIN_TABLE_FULL_STR_PREFIX ||
           test_type == PLAIN_TABLE_TOTAL_ORDER) {
@@ -740,7 +754,9 @@ class HarnessTest : public testing::Test {
             new InternalKeyComparator(options_.comparator));
         break;
 // Plain table is not supported in ROCKSDB_LITE
-#ifndef ROCKSDB_LITE
+
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
+
       case PLAIN_TABLE_SEMI_FIXED_PREFIX:
         support_prev_ = false;
         only_support_prefix_seek_ = true;
@@ -787,6 +803,7 @@ class HarnessTest : public testing::Test {
             new BlockBasedTableFactory(table_options_));
         constructor_ = new BlockConstructor(options_.comparator);
         break;
+#if !defined(USE_TIMESTAMPS)
       case MEMTABLE_TEST:
         table_options_.block_size = 256;
         options_.table_factory.reset(
@@ -794,6 +811,7 @@ class HarnessTest : public testing::Test {
         constructor_ = new MemTableConstructor(options_.comparator,
                                                &write_buffer_);
         break;
+#endif  // USE_TIMESTAMPS
       case DB_TEST:
         table_options_.block_size = 256;
         options_.table_factory.reset(
@@ -1133,7 +1151,14 @@ TEST_P(BlockBasedTableTest, BasicBlockBasedTableProperties) {
   c.Add("g7", "val7");
   c.Add("h8", "val8");
   c.Add("j9", "val9");
-  uint64_t diff_internal_user_bytes = 9 * 8;  // 8 is seq size, 9 k-v totally
+  
+#ifdef USE_TIMESTAMPS
+	uint64_t diff_internal_user_bytes =
+		9 * (8 + 8);  // 8 is seq size, 8 is timestamp size, 9 k-v totally
+#else
+	uint64_t diff_internal_user_bytes = 9 * 8;	// 8 is seq size, 9 k-v totally
+#endif  // USE_TIMESTAMPS
+
 
   std::vector<std::string> keys;
   stl_wrappers::KVMap kvmap;
@@ -1272,11 +1297,12 @@ TEST_P(BlockBasedTableTest, BlockBasedTableProperties2) {
   }
 }
 
+/*
 TEST_P(BlockBasedTableTest, RangeDelBlock) {
   TableConstructor c(BytewiseComparator());
   std::vector<std::string> keys = {"1pika", "2chu"};
   std::vector<std::string> vals = {"p", "c"};
-
+  
   std::vector<RangeTombstone> expected_tombstones = {
       {"1pika", "2chu", 0},
       {"2chu", "c", 1},
@@ -1284,8 +1310,14 @@ TEST_P(BlockBasedTableTest, RangeDelBlock) {
       {"c", "p", 0},
   };
 
+
   for (int i = 0; i < 2; i++) {
-    RangeTombstone t(keys[i], vals[i], i);
+#ifdef USE_TIMESTAMPS
+		RangeTombstone t(keys[i], vals[i], i, i);
+#else
+		RangeTombstone t(keys[i], vals[i], i);
+#endif  // USE_TIMESTAMPS
+
     std::pair<InternalKey, Slice> p = t.Serialize();
     c.Add(p.first.Encode().ToString(), p.second);
   }
@@ -1330,6 +1362,7 @@ TEST_P(BlockBasedTableTest, RangeDelBlock) {
     ASSERT_TRUE(!iter->Valid());
   }
 }
+*/
 
 TEST_P(BlockBasedTableTest, FilterPolicyNameProperties) {
   TableConstructor c(BytewiseComparator(), true /* convert_to_internal_key_ */);
@@ -1359,11 +1392,13 @@ void AssertKeysInCache(BlockBasedTable* table_reader,
                        bool convert = false) {
   if (convert) {
     for (auto key : keys_in_cache) {
-      InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+      InternalKey ikey;
+      ikey.SetMinPossibleForUserKeyAndType(key, kTypeValue);
       ASSERT_TRUE(table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
     }
     for (auto key : keys_not_in_cache) {
-      InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+      InternalKey ikey;
+      ikey.SetMinPossibleForUserKeyAndType(key, kTypeValue);
       ASSERT_TRUE(!table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
     }
   } else {
@@ -1396,7 +1431,8 @@ void PrefetchRange(TableConstructor* c, Options* opt,
   std::unique_ptr<InternalKey> i_begin, i_end;
   if (key_begin != nullptr) {
     if (c->ConvertToInternalKey()) {
-      i_begin.reset(new InternalKey(key_begin, kMaxSequenceNumber, kTypeValue));
+      i_begin.reset(new InternalKey);
+      i_begin->SetMinPossibleForUserKeyAndType(key_begin, kTypeValue);
       begin.reset(new Slice(i_begin->Encode()));
     } else {
       begin.reset(new Slice(key_begin));
@@ -1404,7 +1440,8 @@ void PrefetchRange(TableConstructor* c, Options* opt,
   }
   if (key_end != nullptr) {
     if (c->ConvertToInternalKey()) {
-      i_end.reset(new InternalKey(key_end, kMaxSequenceNumber, kTypeValue));
+      i_end.reset(new InternalKey);
+      i_end->SetMinPossibleForUserKeyAndType(key_end, kTypeValue);
       end.reset(new Slice(i_end->Encode()));
     } else {
       end.reset(new Slice(key_end));
@@ -1551,7 +1588,9 @@ TEST_P(BlockBasedTableTest, TotalOrderSeekOnHashIndex) {
     std::unique_ptr<InternalIterator> iter(
         reader->NewIterator(ro, moptions.prefix_extractor.get()));
 
-    iter->Seek(InternalKey("b", 0, kTypeValue).Encode());
+    InternalKey a;
+    a.SetMaxPossibleForUserKeyAndType("b", kTypeValue);
+    iter->Seek(a.Encode());
     ASSERT_OK(iter->status());
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ("baaa1", ExtractUserKey(iter->key()).ToString());
@@ -1560,7 +1599,9 @@ TEST_P(BlockBasedTableTest, TotalOrderSeekOnHashIndex) {
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ("bbaa1", ExtractUserKey(iter->key()).ToString());
 
-    iter->Seek(InternalKey("bb", 0, kTypeValue).Encode());
+    InternalKey b;
+    b.SetMaxPossibleForUserKeyAndType("bb", kTypeValue);
+    iter->Seek(b.Encode());
     ASSERT_OK(iter->status());
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ("bbaa1", ExtractUserKey(iter->key()).ToString());
@@ -1569,7 +1610,10 @@ TEST_P(BlockBasedTableTest, TotalOrderSeekOnHashIndex) {
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ("bbbb1", ExtractUserKey(iter->key()).ToString());
 
-    iter->Seek(InternalKey("bbb", 0, kTypeValue).Encode());
+    InternalKey d;
+    d.SetMaxPossibleForUserKeyAndType("bbb", kTypeValue);
+    iter->Seek(d.Encode());
+	
     ASSERT_OK(iter->status());
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ("bbbb1", ExtractUserKey(iter->key()).ToString());
@@ -1593,7 +1637,12 @@ TEST_P(BlockBasedTableTest, NoopTransformSeek) {
   // To tickle the PrefixMayMatch bug it is important that the
   // user-key is a single byte so that the index key exactly matches
   // the user-key.
-  InternalKey key("a", 1, kTypeValue);
+#ifdef USE_TIMESTAMPS
+	InternalKey key("a", 1, kTypeValue, 1);
+#else
+	InternalKey key("a", 1, kTypeValue);
+#endif  // USE_TIMESTAMPS
+
   c.Add(key.Encode().ToString(), "b");
   std::vector<std::string> keys;
   stl_wrappers::KVMap kvmap;
@@ -1630,7 +1679,12 @@ TEST_P(BlockBasedTableTest, SkipPrefixBloomFilter) {
   options.prefix_extractor.reset(NewFixedPrefixTransform(1));
 
   TableConstructor c(options.comparator);
-  InternalKey key("abcdefghijk", 1, kTypeValue);
+#ifdef USE_TIMESTAMPS
+	InternalKey key("abcdefghijk", 1, kTypeValue, 1);
+#else
+	InternalKey key("abcdefghijk", 1, kTypeValue);
+#endif  // USE_TIMESTAMPS
+
   c.Add(key.Encode().ToString(), "test");
   std::vector<std::string> keys;
   stl_wrappers::KVMap kvmap;
@@ -1668,7 +1722,10 @@ static std::string RandomString(Random* rnd, int len) {
 void AddInternalKey(TableConstructor* c, const std::string& prefix,
                     int /*suffix_len*/ = 800) {
   static Random rnd(1023);
-  InternalKey k(prefix + RandomString(&rnd, 800), 0, kTypeValue);
+  
+  InternalKey k;
+  k.SetMaxPossibleForUserKeyAndType(prefix + RandomString(&rnd, 800), kTypeValue);
+
   c->Add(k.Encode().ToString(), "v");
 }
 
@@ -1722,7 +1779,9 @@ void TableTest::IndexTest(BlockBasedTableOptions table_options) {
 
   // find the lower bound of the prefix
   for (size_t i = 0; i < prefixes.size(); ++i) {
-    index_iter->Seek(InternalKey(prefixes[i], 0, kTypeValue).Encode());
+        InternalKey k;
+    k.SetMaxPossibleForUserKeyAndType(prefixes[i], kTypeValue);
+    index_iter->Seek(k.Encode());
     ASSERT_OK(index_iter->status());
     ASSERT_TRUE(index_iter->Valid());
 
@@ -1752,7 +1811,11 @@ void TableTest::IndexTest(BlockBasedTableOptions table_options) {
   for (size_t i = 0; i < prefixes.size(); ++i) {
     // the key is greater than any existing keys.
     auto key = prefixes[i] + "9";
-    index_iter->Seek(InternalKey(key, 0, kTypeValue).Encode());
+	
+	InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType(key, kTypeValue);
+    index_iter->Seek(ik.Encode());
+   ;
 
     ASSERT_OK(index_iter->status());
     if (i == prefixes.size() - 1) {
@@ -1769,7 +1832,9 @@ void TableTest::IndexTest(BlockBasedTableOptions table_options) {
   // find keys with prefix that don't match any of the existing prefixes.
   std::vector<std::string> non_exist_prefixes = {"002", "004", "006", "008"};
   for (const auto& prefix : non_exist_prefixes) {
-    index_iter->Seek(InternalKey(prefix, 0, kTypeValue).Encode());
+    InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType(prefix, kTypeValue);
+    index_iter->Seek(ik.Encode());
     // regular_iter->Seek(prefix);
 
     ASSERT_OK(index_iter->status());
@@ -1979,7 +2044,8 @@ TEST_P(BlockBasedTableTest, BlockCacheDisabledTest) {
                            GetContext::kNotFound, Slice(), nullptr, nullptr,
                            nullptr, nullptr, nullptr);
     // a hack that just to trigger BlockBasedTable::GetFilter.
-    reader->Get(ReadOptions(), "non-exist-key", &get_context,
+    // make sure the key is at least 16 bytes.
+    reader->Get(ReadOptions(), "non-more-exist-key", &get_context,
                 moptions.prefix_extractor.get());
     BlockCachePropertiesSnapshot props(options.statistics.get());
     props.AssertIndexBlockStat(0, 0);
@@ -2127,7 +2193,8 @@ TEST_P(BlockBasedTableTest, FilterBlockInBlockCache) {
 
   TableConstructor c3(BytewiseComparator());
   std::string user_key = "k01";
-  InternalKey internal_key(user_key, 0, kTypeValue);
+  InternalKey internal_key;
+  internal_key.SetMaxPossibleForUserKeyAndType(user_key, kTypeValue);
   c3.Add(internal_key.Encode().ToString(), "hello");
   ImmutableCFOptions ioptions3(options);
   MutableCFOptions moptions3(options);
@@ -2221,7 +2288,8 @@ TEST_P(BlockBasedTableTest, BlockReadCountTest) {
 
       TableConstructor c(BytewiseComparator());
       std::string user_key = "k04";
-      InternalKey internal_key(user_key, 0, kTypeValue);
+      InternalKey internal_key;
+      internal_key.SetMaxPossibleForUserKeyAndType(user_key, kTypeValue);
       std::string encoded_key = internal_key.Encode().ToString();
       c.Add(encoded_key, "hello");
       ImmutableCFOptions ioptions(options);
@@ -2249,7 +2317,8 @@ TEST_P(BlockBasedTableTest, BlockReadCountTest) {
 
       // Get non-existing key
       user_key = "does-not-exist";
-      internal_key = InternalKey(user_key, 0, kTypeValue);
+      internal_key = InternalKey();
+      internal_key.SetMaxPossibleForUserKeyAndType(user_key, kTypeValue);
       encoded_key = internal_key.Encode().ToString();
 
       value.Reset();
@@ -2374,8 +2443,10 @@ TEST_P(BlockBasedTableTest, NoObjectInCacheAfterTableClose) {
               TableConstructor c(BytewiseComparator(), convert_to_internal_key,
                                  level);
               std::string user_key = "k01";
+              InternalKey ik;
+              ik.SetMaxPossibleForUserKeyAndType(user_key, kTypeValue);
               std::string key =
-                  InternalKey(user_key, 0, kTypeValue).Encode().ToString();
+                ik.Encode().ToString();
               c.Add(key, "hello");
               std::vector<std::string> keys;
               stl_wrappers::KVMap kvmap;
@@ -2391,7 +2462,8 @@ TEST_P(BlockBasedTableTest, NoObjectInCacheAfterTableClose) {
               GetContext get_context(opt.comparator, nullptr, nullptr, nullptr,
                                      GetContext::kNotFound, user_key, &value,
                                      nullptr, nullptr, nullptr, nullptr);
-              InternalKey ikey(user_key, 0, kTypeValue);
+              InternalKey ikey;
+              ikey.SetMaxPossibleForUserKeyAndType(user_key, kTypeValue);
               auto s = table_reader->Get(ReadOptions(), key, &get_context,
                                          moptions.prefix_extractor.get());
               ASSERT_EQ(get_context.State(), GetContext::kFound);
@@ -2465,7 +2537,12 @@ TEST_P(BlockBasedTableTest, BlockCacheLeak) {
   ASSERT_OK(c.Reopen(ioptions1, moptions1));
   auto table_reader = dynamic_cast<BlockBasedTable*>(c.GetTableReader());
   for (const std::string& key : keys) {
-    InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+    
+#ifdef USE_TIMESTAMPS
+  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue, 0);
+#else
+  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+#endif  // USE_TIMESTAMPS	
     ASSERT_TRUE(table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
   }
   c.ResetTableReader();
@@ -2478,7 +2555,14 @@ TEST_P(BlockBasedTableTest, BlockCacheLeak) {
   ASSERT_OK(c.Reopen(ioptions2, moptions2));
   table_reader = dynamic_cast<BlockBasedTable*>(c.GetTableReader());
   for (const std::string& key : keys) {
-    InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+
+#ifdef USE_TIMESTAMPS
+	  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue, 0);
+#else
+	  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
+#endif  // USE_TIMESTAMPS	
+
+  
     ASSERT_TRUE(!table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
   }
   c.ResetTableReader();
@@ -2602,7 +2686,9 @@ TEST_P(BlockBasedTableTest, NewIndexIteratorLeak) {
     // TODO(Zhongyi): update test to use MutableCFOptions
     std::unique_ptr<InternalIterator> iter(
         reader->NewIterator(ro, moptions.prefix_extractor.get()));
-    iter->Seek(InternalKey("a1", 0, kTypeValue).Encode());
+       InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType("a1", kTypeValue);
+    iter->Seek(ik.Encode());
   };
 
   std::function<void()> func2 = [&]() {
@@ -2620,7 +2706,8 @@ TEST_P(BlockBasedTableTest, NewIndexIteratorLeak) {
 }
 
 // Plain table is not supported in ROCKSDB_LITE
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
+
 TEST_F(PlainTableTest, BasicPlainTableProperties) {
   PlainTableOptions plain_table_options;
   plain_table_options.user_key_len = 8;
@@ -2844,7 +2931,8 @@ TEST_F(HarnessTest, Randomized8) {
   RandomizedHarnessTest(part, total);
 }
 
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
+
 TEST_F(HarnessTest, RandomizedLongDB) {
   Random rnd(test::RandomSeed());
   TestArgs args = {DB_TEST, false, 16, kNoCompression, 0, false};
@@ -2893,9 +2981,15 @@ TEST_F(MemTableTest, Simple) {
   batch.DeleteRange(std::string("chi"), std::string("xigua"));
   batch.DeleteRange(std::string("begin"), std::string("end"));
   ColumnFamilyMemTablesDefault cf_mems_default(memtable);
+ #ifdef USE_TIMESTAMPS
+  WriteBatch rewrite_batch;
+  WriteBatchInternal::RewriteBatch(&rewrite_batch, &batch, WriteOptions());
+  ASSERT_TRUE(
+      WriteBatchInternal::InsertInto(&rewrite_batch, &cf_mems_default, nullptr).ok());
+#else
   ASSERT_TRUE(
       WriteBatchInternal::InsertInto(&batch, &cf_mems_default, nullptr).ok());
-
+#endif  // USE_TIMESTAMPS
   for (int i = 0; i < 2; ++i) {
     Arena arena;
     ScopedArenaIterator arena_iter_guard;
@@ -3027,7 +3121,8 @@ TEST_F(HarnessTest, FooterTests) {
     ASSERT_EQ(decoded_footer.version(), 1U);
   }
 // Plain table is not supported in ROCKSDB_LITE
-#ifndef ROCKSDB_LITE
+#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
+
   {
     // upconvert legacy plain table
     std::string encoded;
@@ -3124,8 +3219,10 @@ TEST_P(IndexBlockRestartIntervalTest, IndexBlockRestartInterval) {
   TableConstructor c(BytewiseComparator());
   static Random rnd(301);
   for (int i = 0; i < kKeysInTable; i++) {
-    InternalKey k(RandomString(&rnd, kKeySize), 0, kTypeValue);
-    c.Add(k.Encode().ToString(), RandomString(&rnd, kValSize));
+    InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType(RandomString(&rnd, kKeySize), kTypeValue);
+    c.Add(ik.Encode().ToString(), RandomString(&rnd, kValSize));
+ 
   }
 
   std::vector<std::string> keys;
@@ -3277,7 +3374,8 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
   for (char c = 'a'; c <= 'z'; ++c) {
     std::string key(8, c);
     std::string value = key;
-    InternalKey ik(key, 0, kTypeValue);
+    InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType(key, kTypeValue);
 
     builder->Add(ik.Encode(), value);
   }
@@ -3377,7 +3475,11 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
   // Verify Seek
   for (char c = 'a'; c <= 'z'; c++) {
     std::string k = std::string(8, c);
+    #ifdef USE_TIMESTAMPS
+    InternalKey ik(k, 10, kValueTypeForSeek, 10);
+#else
     InternalKey ik(k, 10, kValueTypeForSeek);
+#endif  // USE_TIMESTAMPS
     iter->Seek(ik.Encode());
     ASSERT_TRUE(iter->Valid());
 
@@ -3415,7 +3517,11 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
   for (char c = 'a'; c <= 'z'; c++) {
     std::string k = std::string(8, c);
     // seqno=4 is less than 3 so we still should get our key
+#ifdef USE_TIMESTAMPS
+    InternalKey ik(k, 4, kValueTypeForSeek, 4);
+#else
     InternalKey ik(k, 4, kValueTypeForSeek);
+#endif // USE_TIMESTAMPS
     iter->Seek(ik.Encode());
     ASSERT_TRUE(iter->Valid());
 
@@ -3459,7 +3565,8 @@ TEST_P(BlockBasedTableTest, BlockAlignTest) {
     ostr << std::setfill('0') << std::setw(5) << i;
     std::string key = ostr.str();
     std::string value = "val";
-    InternalKey ik(key, 0, kTypeValue);
+    InternalKey ik;
+    ik.SetMaxPossibleForUserKeyAndType(key, kTypeValue);
 
     builder->Add(ik.Encode(), value);
   }
@@ -3552,7 +3659,13 @@ TEST_P(BlockBasedTableTest, PropertiesBlockRestartPointTest) {
     ostr << std::setfill('0') << std::setw(5) << i;
     std::string key = ostr.str();
     std::string value = "val";
+
+	#ifdef USE_TIMESTAMPS
+    InternalKey ik(key, 0, kTypeValue, 0);
+
+#else
     InternalKey ik(key, 0, kTypeValue);
+#endif // USE_TIMESTAMPS
 
     builder->Add(ik.Encode(), value);
   }
@@ -3780,8 +3893,13 @@ TEST_P(BlockBasedTableTest, DataBlockHashIndex) {
   for (int i = 0; i < kNumKeys; i++) {
     // padding one "0" to mark existent keys.
     std::string random_key(RandomString(&rnd, kKeySize - 1) + "1");
-    InternalKey k(random_key, 0, kTypeValue);
-    c.Add(k.Encode().ToString(), RandomString(&rnd, kValSize));
+
+#ifdef USE_TIMESTAMPS
+    InternalKey ik(random_key, 10, kTypeValue, 0);
+#else
+	InternalKey ik(random_key, 10, kTypeValue);
+#endif  // USE_TIMESTAMPS
+    c.Add(ik.Encode().ToString(), RandomString(&rnd, kValSize));
   }
 
   std::vector<std::string> keys;
@@ -3833,7 +3951,16 @@ TEST_P(BlockBasedTableTest, DataBlockHashIndex) {
     for (auto& kv : kvmap) {
       std::string user_key = ExtractUserKey(kv.first).ToString();
       user_key.back() = '0';  // make it non-existent key
-      InternalKey internal_key(user_key, 0, kTypeValue);
+      
+      
+#ifdef USE_TIMESTAMPS
+		InternalKey internal_key(user_key, 0, kTypeValue, 0);
+#else
+		InternalKey internal_key(user_key, 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
+
+	  
+	  
       std::string encoded_key = internal_key.Encode().ToString();
       if (i == 0) {  // Search using Seek()
         seek_iter->Seek(encoded_key);

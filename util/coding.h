@@ -300,6 +300,30 @@ inline void PutVarint32Varint32Varint64(std::string* dst, uint32_t v1,
   dst->append(buf, static_cast<size_t>(ptr - buf));
 }
 
+inline void PutTimeStampSuffixedWithLengthPrefixedSlice(std::string* dst,
+                                                        const Slice& value,
+                                                        uint64_t timestamp) {
+  PutVarint32(dst, static_cast<uint32_t>(value.size()+sizeof(uint64_t)));
+  dst->append(value.data(), value.size());
+  PutFixed64(dst, timestamp);
+}
+
+inline bool GetTimeStampSuffixedWithLengthPrefixedSlice(Slice* input,
+                                                        Slice* result,
+                                                        uint64_t* timestamp) {
+  uint32_t len = 0;
+  const uint32_t l64 = sizeof(uint64_t);
+  if (GetVarint32(input, &len) && input->size() >= len) {
+    const uint32_t real_len = len - l64;
+    *result = Slice(input->data(), real_len);
+    input->remove_prefix(real_len);
+    GetFixed64(input, timestamp);
+    return true;
+  } else {
+    return false;
+  }
+}
+
 inline void PutLengthPrefixedSlice(std::string* dst, const Slice& value) {
   PutVarint32(dst, static_cast<uint32_t>(value.size()));
   dst->append(value.data(), value.size());

@@ -5,6 +5,7 @@
 
 #ifndef ROCKSDB_LITE
 
+#define __STDC_FORMAT_MACROS
 #include <inttypes.h>
 
 #include "rocksdb/sst_file_reader.h"

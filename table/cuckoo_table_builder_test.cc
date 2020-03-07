@@ -137,7 +137,11 @@ class CuckooBuilderTest : public testing::Test {
   std::string GetInternalKey(Slice user_key, bool zero_seqno,
                              ValueType type = kTypeValue) {
     IterKey ikey;
+#ifdef USE_TIMESTAMPS
+    ikey.SetInternalKey(user_key, zero_seqno ? 0 : 1000, 0, type);
+#else
     ikey.SetInternalKey(user_key, zero_seqno ? 0 : 1000, type);
+#endif  // USE_TIMESTAMPS
     return ikey.GetInternalKey().ToString();
   }
 

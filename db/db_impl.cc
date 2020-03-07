@@ -11,12 +11,14 @@
 #ifndef __STDC_FORMAT_MACROS
 #define __STDC_FORMAT_MACROS
 #endif
+#include <inttypes.h>
 #include <stdint.h>
 #ifdef OS_SOLARIS
 #include <alloca.h>
 #endif
 
 #include <algorithm>
+#include <iostream>
 #include <cstdio>
 #include <map>
 #include <set>
@@ -94,6 +96,7 @@
 #include "util/stop_watch.h"
 #include "util/string_util.h"
 #include "util/sync_point.h"
+#include "rocksdb/change_stream.h"
 
 namespace rocksdb {
 const std::string kDefaultColumnFamilyName("default");
@@ -196,6 +199,9 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       bg_compaction_paused_(0),
       refitting_level_(false),
       opened_successfully_(false),
+#ifdef USE_TIMESTAMPS
+      pin_timestamp_(0),
+#endif  // USE_TIMESTAMPS
       two_write_queues_(options.two_write_queues),
       manual_wal_flush_(options.manual_wal_flush),
       seq_per_batch_(seq_per_batch),
@@ -557,6 +563,7 @@ Status DBImpl::CloseHelper() {
   mutex_.Unlock();
   if (db_lock_ != nullptr) {
     env_->UnlockFile(db_lock_);
+	db_lock_ = nullptr;
   }
 
   ROCKS_LOG_INFO(immutable_db_options_.info_log, "Shutdown complete");
@@ -680,6 +687,19 @@ void DBImpl::DumpStats() {
 #endif  // !ROCKSDB_LITE
 
   PrintStatistics();
+}
+
+Status DBImpl::AdvancePinTs(uint64_t pinTs, bool force) {
+#ifdef USE_TIMESTAMPS
+  InstrumentedMutexLock l(&mutex_);
+  if (pinTs < pin_timestamp_.load(std::memory_order_relaxed) && !force) {
+    return Status::InvalidArgument("pinTs can not travel back");
+  }
+  pin_timestamp_.store(pinTs, std::memory_order_relaxed);
+#else
+  (void)pinTs;
+#endif // USE_TIMESTAMPS
+  return Status::OK();
 }
 
 void DBImpl::ScheduleBgLogWriterClose(JobContext* job_context) {
@@ -1278,7 +1298,11 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   // First look in the memtable, then in the immutable memtable (if any).
   // s is both in/out. When in, s could either be OK or MergeInProgress.
   // merge_operands will contain the sequence of merges in the latter case.
+#ifdef USE_TIMESTAMPS
+  LookupKey lkey(key, snapshot, read_options.read_timestamp);
+#else
   LookupKey lkey(key, snapshot);
+#endif  // USE_TIMESTAMPS
   PERF_TIMER_STOP(get_snapshot_time);
 
   bool skip_memtable = (read_options.read_tier == kPersistedTier &&
@@ -1388,7 +1412,11 @@ std::vector<Status> DBImpl::MultiGet(
     Status& s = stat_list[i];
     std::string* value = &(*values)[i];
 
+#ifdef USE_TIMESTAMPS
+    LookupKey lkey(keys[i], snapshot, read_options.read_timestamp);
+#else
     LookupKey lkey(keys[i], snapshot);
+#endif  // USE_TIMESTAMPS
     auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family[i]);
     SequenceNumber max_covering_tombstone_seq = 0;
     auto mgd_iter = multiget_cf_data.find(cfh->cfd()->GetID());
@@ -2238,8 +2266,9 @@ void DBImpl::GetApproximateMemTableStats(ColumnFamilyHandle* column_family,
   SuperVersion* sv = GetAndRefSuperVersion(cfd);
 
   // Convert user_key into a corresponding internal key.
-  InternalKey k1(range.start, kMaxSequenceNumber, kValueTypeForSeek);
-  InternalKey k2(range.limit, kMaxSequenceNumber, kValueTypeForSeek);
+  InternalKey k1, k2;
+  k1.SetMinPossibleForUserKeyAndType(range.start, kValueTypeForSeek);
+  k2.SetMinPossibleForUserKeyAndType(range.limit, kValueTypeForSeek);
   MemTable::MemTableStats memStats =
       sv->mem->ApproximateStats(k1.Encode(), k2.Encode());
   MemTable::MemTableStats immStats =
@@ -2263,8 +2292,9 @@ void DBImpl::GetApproximateSizes(ColumnFamilyHandle* column_family,
 
   for (int i = 0; i < n; i++) {
     // Convert user_key into a corresponding internal key.
-    InternalKey k1(range[i].start, kMaxSequenceNumber, kValueTypeForSeek);
-    InternalKey k2(range[i].limit, kMaxSequenceNumber, kValueTypeForSeek);
+    InternalKey k1, k2;
+    k1.SetMinPossibleForUserKeyAndType(range[i].start, kValueTypeForSeek);
+    k2.SetMinPossibleForUserKeyAndType(range[i].limit, kValueTypeForSeek);
     sizes[i] = 0;
     if (include_flags & DB::SizeApproximationFlags::INCLUDE_FILES) {
       sizes[i] += versions_->ApproximateSize(v, k1.Encode(), k2.Encode());
@@ -2949,7 +2979,11 @@ Status DBImpl::GetLatestSequenceForKey(SuperVersion* sv, const Slice& key,
 
   ReadOptions read_options;
   SequenceNumber current_seq = versions_->LastSequence();
+#ifdef USE_TIMESTAMPS
+  LookupKey lkey(key, current_seq, kMaxTimeStamp);
+#else
   LookupKey lkey(key, current_seq);
+#endif  // USE_TIMESTAMPS
 
   *seq = kMaxSequenceNumber;
   *found_record_for_key = false;

@@ -227,6 +227,9 @@ void MemTable::UpdateOldestKeyTime() {
 int MemTable::KeyComparator::operator()(const char* prefix_len_key1,
                                         const char* prefix_len_key2) const {
   // Internal keys are encoded as length-prefixed strings.
+  uint32_t l0, l1;
+  GetVarint32Ptr(prefix_len_key1, prefix_len_key1 + 5 /* limit */, &l0);
+  GetVarint32Ptr(prefix_len_key2, prefix_len_key2 + 5 /* limit */, &l1);
   Slice k1 = GetLengthPrefixedSlice(prefix_len_key1);
   Slice k2 = GetLengthPrefixedSlice(prefix_len_key2);
   return comparator.CompareKeySeq(k1, k2);
@@ -235,6 +238,8 @@ int MemTable::KeyComparator::operator()(const char* prefix_len_key1,
 int MemTable::KeyComparator::operator()(const char* prefix_len_key,
                                         const KeyComparator::DecodedType& key)
     const {
+  uint32_t l0;
+  GetVarint32Ptr(prefix_len_key, prefix_len_key + 5 /* limit */, &l0);
   // Internal keys are encoded as length-prefixed strings.
   Slice a = GetLengthPrefixedSlice(prefix_len_key);
   return comparator.CompareKeySeq(a, key);
@@ -250,7 +255,7 @@ void MemTableRep::InsertConcurrently(KeyHandle /*handle*/) {
 
 Slice MemTableRep::UserKey(const char* key) const {
   Slice slice = GetLengthPrefixedSlice(key);
-  return Slice(slice.data(), slice.size() - 8);
+  return UserKeyFromRawInternalKey(slice.data(), slice.size());
 }
 
 KeyHandle MemTableRep::Allocate(const size_t len, char** buf) {
@@ -517,7 +522,13 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
 
     if (prefix_bloom_) {
       assert(prefix_extractor_);
+#ifdef USE_TIMESTAMPS
+      // NOTE(xxxxxxxx): remove the timestamp from key
+      assert(key.size() >= 8);
+      prefix_bloom_->Add(prefix_extractor_->Transform(Slice(key.data(), key.size() - 8)));
+#else
       prefix_bloom_->Add(prefix_extractor_->Transform(key));
+#endif  // USE_TIMESTAMPS
     }
 
     // The first sequence number inserted into the memtable
@@ -548,7 +559,13 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
 
     if (prefix_bloom_) {
       assert(prefix_extractor_);
+#ifdef USE_TIMESTAMPS
+      // NOTE(xxxxxxxx): remove the timestamp from key
+      assert(key.size() >= 8);
+      prefix_bloom_->Add(prefix_extractor_->Transform(Slice(key.data(), key.size() - 8)));
+#else
       prefix_bloom_->AddConcurrently(prefix_extractor_->Transform(key));
+#endif // USE_TIMESTAMPS
     }
 
     // atomically update first_seqno_ and earliest_seqno_.
@@ -612,7 +629,7 @@ static bool SaveValue(void* arg, const char* entry) {
 
   // entry format is:
   //    klength  varint32
-  //    userkey  char[klength-8]
+  //    userkey  char[klength-8|16]
   //    tag      uint64
   //    vlength  varint32
   //    value    char[vlength]
@@ -622,7 +639,7 @@ static bool SaveValue(void* arg, const char* entry) {
   uint32_t key_length;
   const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
   if (s->mem->GetInternalKeyComparator().user_comparator()->Equal(
-          Slice(key_ptr, key_length - 8), s->key->user_key())) {
+          UserKeyFromRawInternalKey(key_ptr, key_length), s->key->user_key())) {
     // Correct user key
     const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
     ValueType type;
@@ -632,6 +649,13 @@ static bool SaveValue(void* arg, const char* entry) {
     if (!s->CheckCallback(seq)) {
       return true;  // to continue to the next seq
     }
+
+#ifdef USE_TIMESTAMPS
+    const uint64_t ts = DecodeFixed64(key_ptr + key_length - 16);
+    if (ts > s->key->timestamp()) {
+      return true;
+    }
+#endif  // USE_TIMESTAMPS
 
     s->seq = seq;
 
@@ -800,7 +824,13 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
 void MemTable::Update(SequenceNumber seq,
                       const Slice& key,
                       const Slice& value) {
+#ifdef USE_TIMESTAMPS
+  Slice raw_key = {key.data(), key.size() - 8};
+  LookupKey lkey(raw_key, seq);
+#else
   LookupKey lkey(key, seq);
+#endif  // USE_TIMESTAMPS
+
   Slice mem_key = lkey.memtable_key();
 
   std::unique_ptr<MemTableRep::Iterator> iter(
@@ -810,7 +840,7 @@ void MemTable::Update(SequenceNumber seq,
   if (iter->Valid()) {
     // entry format is:
     //    key_length  varint32
-    //    userkey  char[klength-8]
+    //    userkey  char[klength-8|16]
     //    tag      uint64
     //    vlength  varint32
     //    value    char[vlength]
@@ -821,7 +851,7 @@ void MemTable::Update(SequenceNumber seq,
     uint32_t key_length = 0;
     const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
     if (comparator_.comparator.user_comparator()->Equal(
-            Slice(key_ptr, key_length - 8), lkey.user_key())) {
+        UserKeyFromRawInternalKey(key_ptr, key_length), lkey.user_key())) {
       // Correct user key
       const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
       ValueType type;
@@ -859,7 +889,12 @@ void MemTable::Update(SequenceNumber seq,
 bool MemTable::UpdateCallback(SequenceNumber seq,
                               const Slice& key,
                               const Slice& delta) {
+#ifdef USE_TIMESTAMPS
+  Slice raw_key = {key.data(), key.size() - 8};
+  LookupKey lkey(raw_key, seq);
+#else
   LookupKey lkey(key, seq);
+#endif  // USE_TIMESTAMPS
   Slice memkey = lkey.memtable_key();
 
   std::unique_ptr<MemTableRep::Iterator> iter(
@@ -869,7 +904,7 @@ bool MemTable::UpdateCallback(SequenceNumber seq,
   if (iter->Valid()) {
     // entry format is:
     //    key_length  varint32
-    //    userkey  char[klength-8]
+    //    userkey  char[klength-8|16]
     //    tag      uint64
     //    vlength  varint32
     //    value    char[vlength]
@@ -880,7 +915,7 @@ bool MemTable::UpdateCallback(SequenceNumber seq,
     uint32_t key_length = 0;
     const char* key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
     if (comparator_.comparator.user_comparator()->Equal(
-            Slice(key_ptr, key_length - 8), lkey.user_key())) {
+            UserKeyFromRawInternalKey(key_ptr, key_length), lkey.user_key())) {
       // Correct user key
       const uint64_t tag = DecodeFixed64(key_ptr + key_length - 8);
       ValueType type;
@@ -951,7 +986,7 @@ size_t MemTable::CountSuccessiveMergeEntries(const LookupKey& key) {
     uint32_t key_length = 0;
     const char* iter_key_ptr = GetVarint32Ptr(entry, entry + 5, &key_length);
     if (!comparator_.comparator.user_comparator()->Equal(
-            Slice(iter_key_ptr, key_length - 8), key.user_key())) {
+            UserKeyFromRawInternalKey(iter_key_ptr, key_length), key.user_key())) {
       break;
     }
 

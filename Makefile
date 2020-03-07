@@ -9,6 +9,12 @@
 BASH_EXISTS := $(shell which bash)
 SHELL := $(shell which bash)
 
+USE_TIMESTAMPS := 1
+ifdef USE_TIMESTAMPS
+CFLAGS += -DUSE_TIMESTAMPS
+CXXFLAGS += -DUSE_TIMESTAMPS
+endif
+
 CLEAN_FILES = # deliberately empty, so we can append below.
 CFLAGS += ${EXTRA_CFLAGS}
 CXXFLAGS += ${EXTRA_CXXFLAGS}

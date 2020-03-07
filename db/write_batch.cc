@@ -1507,8 +1507,12 @@ class MemTableInserter : public WriteBatch::Handler {
     // So we disable merge in recovery
     if (moptions->max_successive_merges > 0 && db_ != nullptr &&
         recovering_log_number_ == 0) {
+#ifdef USE_TIMESTAMPS
+      Slice raw_key = {key.data(), key.size() - 8};
+      LookupKey lkey(raw_key, sequence_);
+#else
       LookupKey lkey(key, sequence_);
-
+#endif  // USE_TIMESTAMPS
       // Count the number of successive merges at the head
       // of the key in the memtable
       size_t num_merges = mem->CountSuccessiveMergeEntries(lkey);
@@ -1533,7 +1537,15 @@ class MemTableInserter : public WriteBatch::Handler {
       if (cf_handle == nullptr) {
         cf_handle = db_->DefaultColumnFamily();
       }
+#ifdef USE_TIMESTAMPS
+      // Note: MergeCf, all key append the `timestamp' already,
+      //      db::Get key timestamp is irrelevant
+      Slice raw_key = {key.data(), key.size() - 8};
+      db_->Get(read_options, cf_handle, raw_key, &get_value);
+#else
       db_->Get(read_options, cf_handle, key, &get_value);
+#endif  // USE_TIMESTAMPS
+
       Slice get_value_slice = Slice(get_value);
 
       // 2) Apply this merge
@@ -1875,4 +1887,225 @@ size_t WriteBatchInternal::AppendedByteSize(size_t leftByteSize,
   }
 }
 
+#ifdef USE_TIMESTAMPS
+Status WriteBatchInternal::RewriteBatch(WriteBatch* dst, const WriteBatch* src,
+                                        const WriteOptions& write_options) {
+  Slice input(src->rep_);
+  if (input.size() < WriteBatchInternal::kHeader) {
+    return Status::Corruption("malformed WriteBatch (too small)");
+  }
+
+  if (write_options.asif_commit_timestamps.size() != 0 &&
+        write_options.asif_commit_timestamps.size() != static_cast<size_t>(src->Count())) {
+    return Status::InvalidArgument("mismatch asif_commit_timestamps size");
+  }
+  bool no_ts = (write_options.asif_commit_timestamps.size() == 0);
+
+  Slice header(src->Data().data(), kHeader);
+  SetContents(dst, header);
+  input.remove_prefix(kHeader);
+  const SavePoint& batch_end = src->GetWalTerminationPoint();
+
+  // Recover SavePoint
+  // count number is kv, which has timestamp (8 bytes)
+  if (!batch_end.is_cleared()) {
+    dst->wal_term_point_.size = batch_end.size + batch_end.count * 8;
+    dst->wal_term_point_.count = batch_end.count;
+    dst->wal_term_point_.content_flags = batch_end.content_flags;
+  }
+
+  Slice key, value, blob, xid;
+  int found = 0;
+  Status s;
+  char tag = 0;
+  uint32_t column_family = 0;  // default
+  bool last_was_try_again = false;
+  size_t ts_idx = 0;
+  while (((s.ok() && !input.empty()) || UNLIKELY(s.IsTryAgain()))) {
+    if (LIKELY(!s.IsTryAgain())) {
+      last_was_try_again = false;
+      tag = 0;
+      column_family = 0;  // default
+
+      s = ReadRecordFromWriteBatch(&input, &tag, &column_family, &key, &value,
+                                   &blob, &xid);
+      if (!s.ok()) {
+        return s;
+      }
+    } else {
+      assert(s.IsTryAgain());
+      assert(!last_was_try_again);  // to detect infinite loop bugs
+      if (UNLIKELY(last_was_try_again)) {
+        return Status::Corruption(
+            "two consecutive TryAgain in WriteBatch handler; this is either a "
+            "software bug or data corruption.");
+      }
+      last_was_try_again = true;
+      s = Status::OK();
+    }
+
+    uint64_t ts = no_ts ? 0 : write_options.asif_commit_timestamps[ts_idx++];
+    switch (tag) {
+      case kTypeColumnFamilyValue:
+      case kTypeValue:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeValue));
+        } else {
+          dst->rep_.push_back(static_cast<char>(kTypeColumnFamilyValue));
+          PutVarint32(&dst->rep_, column_family);
+        }
+
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+        PutLengthPrefixedSlice(&dst->rep_, value);
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_PUT,
+            std::memory_order_relaxed);
+        found++;
+        break;
+
+      case kTypeColumnFamilyDeletion:
+      case kTypeDeletion:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeDeletion));
+        } else {
+          dst->rep_.push_back(static_cast<char>(kTypeColumnFamilyDeletion));
+          PutVarint32(&dst->rep_, column_family);
+        }
+
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_DELETE,
+            std::memory_order_relaxed);
+        found++;
+        break;
+
+      case kTypeColumnFamilySingleDeletion:
+      case kTypeSingleDeletion:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeSingleDeletion));
+        } else {
+          dst->rep_.push_back(
+              static_cast<char>(kTypeColumnFamilySingleDeletion));
+          PutVarint32(&dst->rep_, column_family);
+        }
+
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_SINGLE_DELETE,
+            std::memory_order_relaxed);
+        found++;
+        break;
+
+      case kTypeColumnFamilyRangeDeletion:
+      case kTypeRangeDeletion:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeRangeDeletion));
+        } else {
+          dst->rep_.push_back(
+              static_cast<char>(kTypeColumnFamilyRangeDeletion));
+          PutVarint32(&dst->rep_, column_family);
+        }
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+        PutLengthPrefixedSlice(&dst->rep_, value);
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_DELETE_RANGE,
+            std::memory_order_relaxed);
+        found++;
+        break;
+
+      case kTypeColumnFamilyMerge:
+      case kTypeMerge:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeMerge));
+        } else {
+          dst->rep_.push_back(static_cast<char>(kTypeColumnFamilyMerge));
+          PutVarint32(&dst->rep_, column_family);
+        }
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+        PutLengthPrefixedSlice(&dst->rep_, value);
+
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_MERGE,
+            std::memory_order_relaxed);
+        found++;
+
+        break;
+      case kTypeColumnFamilyBlobIndex:
+      case kTypeBlobIndex:
+        if (column_family == 0) {
+          dst->rep_.push_back(static_cast<char>(kTypeBlobIndex));
+        } else {
+          dst->rep_.push_back(static_cast<char>(kTypeColumnFamilyBlobIndex));
+          PutVarint32(&dst->rep_, column_family);
+        }
+
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, key, ts);
+        PutLengthPrefixedSlice(&dst->rep_, value);
+
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_BLOB_INDEX,
+            std::memory_order_relaxed);
+        found++;
+        break;
+
+      case kTypeLogData:
+        dst->rep_.push_back(static_cast<char>(kTypeLogData));
+        // No ContentFlag
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, blob, ts);
+        break;
+
+      case kTypeBeginPrepareXID:
+      case kTypeBeginPersistedPrepareXID:
+        dst->rep_.push_back(static_cast<char>(tag));
+        // ContentFlag loaded in kTypeEndPrepareXID.
+        break;
+
+
+      case kTypeEndPrepareXID:
+        return Status::Corruption("not supported in timestamped rewrite batch");
+
+      case kTypeCommitXID:
+        dst->rep_.push_back(static_cast<char>(kTypeCommitXID));
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, xid, ts);
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_COMMIT,
+            std::memory_order_relaxed);
+        break;
+
+      case kTypeRollbackXID:
+        dst->rep_.push_back(static_cast<char>(kTypeRollbackXID));
+        PutTimeStampSuffixedWithLengthPrefixedSlice(&dst->rep_, xid, ts);
+        dst->content_flags_.store(
+            dst->content_flags_.load(std::memory_order_relaxed) |
+                ContentFlags::HAS_ROLLBACK,
+            std::memory_order_relaxed);
+        break;
+
+      case kTypeNoop:
+        dst->rep_.push_back(static_cast<char>(kTypeNoop));
+        // No ContentFlag
+        break;
+      default:
+        return Status::Corruption("unknown WriteBatch tag");
+    }
+  }
+  if (!s.ok()) {
+    return s;
+  }
+  assert(ts_idx == write_options.asif_commit_timestamps.size());
+  if (found != WriteBatchInternal::Count(src)) {
+    return Status::Corruption("WriteBatch has wrong count");
+  } else {
+    return Status::OK();
+  }
+}
+#endif
 }  // namespace rocksdb

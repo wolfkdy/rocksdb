@@ -92,6 +92,259 @@ class DBTestWithParam
   bool exclusive_manual_compaction_;
 };
 
+#ifdef USE_TIMESTAMPS
+void MockEnvTestTimestamp(bool flush) {
+  unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
+  Options options;
+  options.create_if_missing = true;
+  options.env = env.get();
+  DB* db;
+
+  ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
+  {
+    const Slice keys[] = {Slice("a"), Slice("b"), Slice("c")};
+    const Slice vals[] = {Slice("foo"), Slice("bar"), Slice("baz")};
+    WriteOptions wo;
+    wo.asif_commit_timestamps = {1000};
+    for (size_t i = 0; i < 3; ++i) {
+      ASSERT_OK(db->Put(wo, keys[i], vals[i]));
+    }
+    ReadOptions ro;
+    ro.read_timestamp = 2000;
+    for (size_t i = 0; i < 3; ++i) {
+      std::string res;
+      ASSERT_OK(db->Get(ro,keys[i], &res));
+      ASSERT_TRUE(res == vals[i]);
+    }
+  }
+  std::vector<const Snapshot*> snapshots;
+  {
+    const Slice keys[] = {Slice("aaa"), Slice("aaa"), Slice("aaa")};
+    const Slice vals[] = {Slice("1"), Slice("2"), Slice("3")};
+    const uint64_t cts[] = {1000, 2000, 3000};
+    snapshots.emplace_back(db->GetSnapshot());
+    WriteOptions wo;
+    for (size_t i = 0; i < 3; ++i) {
+      wo.asif_commit_timestamps = {cts[i]};
+      ASSERT_OK(db->Put(wo, keys[i], vals[i]));
+      snapshots.emplace_back(db->GetSnapshot());
+    }
+    if (flush) {
+      db->Flush(FlushOptions());
+    }
+
+    ReadOptions ro;
+    ro.read_timestamp = 999;
+    std::string res;
+    auto s = db->Get(ro, keys[0], &res);
+    ASSERT_TRUE(s.IsNotFound());
+
+    ro.read_timestamp = 1000;
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[0]);
+    ro.snapshot = snapshots[0];
+    s = db->Get(ro, keys[0], &res);
+    ASSERT_TRUE(s.IsNotFound());
+    ro.snapshot = snapshots[1];
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[0]);
+
+    ro.read_timestamp = 1001;
+    ro.snapshot = nullptr;
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[0]);
+    ro.snapshot = snapshots[1];
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[0]);
+
+    ro.read_timestamp = 2000;
+    ro.snapshot = nullptr;
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[1]);
+    ro.snapshot = snapshots[1];
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[0]);
+    ro.snapshot = snapshots[2];
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[1]);
+
+    ro.read_timestamp = 3000;
+    ro.snapshot = nullptr;
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[2]);
+    ro.read_timestamp = 3001;
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_EQ(res, vals[2]);
+  }
+  for (const auto& v : snapshots) {
+    db->ReleaseSnapshot(v);
+  }
+  delete db;
+}
+
+TEST_F(DBTest, MockEnvWithTimestampNoFlush) {
+  MockEnvTestTimestamp(false);
+}
+
+TEST_F(DBTest, MockEnvWithTimestampFlush) {
+  MockEnvTestTimestamp(true);
+}
+
+TEST_F(DBTest, MockEnvWithTimestampPinTs) {
+  unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
+  Options options;
+  options.create_if_missing = true;
+  options.env = env.get();
+  DB* db;
+
+  ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
+  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(105));
+  {
+    const Slice keys[] = {Slice("a"), Slice("b"), Slice("c")};
+    const Slice vals[] = {Slice("foo"), Slice("bar"), Slice("baz")};
+    WriteOptions wo;
+    wo.asif_commit_timestamps = {100};
+    ASSERT_OK(db->Put(wo, keys[0], vals[0]));
+    wo.asif_commit_timestamps = {102};
+    ASSERT_OK(db->Put(wo, keys[1], vals[1]));
+    wo.asif_commit_timestamps = {104};
+    ASSERT_OK(db->Put(wo, keys[2], vals[2]));
+    wo.asif_commit_timestamps = {106};
+    ASSERT_OK(db->Delete(wo, keys[1]));
+    db->Flush(FlushOptions());
+    ReadOptions ro;
+    ro.read_timestamp = 2000;
+    std::string res;
+    ASSERT_TRUE(db->Get(ro, keys[1], &res).IsNotFound());
+
+    ASSERT_OK(db->Get(ro, keys[0], &res));
+    ASSERT_TRUE(res == vals[0]);
+    ASSERT_OK(db->Get(ro, keys[2], &res));
+    ASSERT_TRUE(res == vals[2]);
+  }
+  delete db;
+}
+
+TEST_F(DBTest, MockEnvWithZeroTsDel) {
+  unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
+  Options options;
+  options.create_if_missing = true;
+  options.env = env.get();
+  DB* db;
+
+  ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
+  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(2));
+  WriteOptions wo;
+  {
+    wo.asif_commit_timestamps = {1};
+    ASSERT_OK(db->Put(wo, "a", "val100"));
+    wo.asif_commit_timestamps = {2};
+    ASSERT_OK(db->Put(wo, "b", "val100"));
+    wo.asif_commit_timestamps = {3};
+    ASSERT_OK(db->Put(wo, "b", "val101"));
+    wo.asif_commit_timestamps = {4};
+    ASSERT_OK(db->Put(wo, "a", "val101"));
+    wo.asif_commit_timestamps = {0};
+    ASSERT_OK(db->Delete(wo, "a"));
+    db->Flush(FlushOptions());
+    ReadOptions ro;
+    ro.read_timestamp = 5;
+    std::string res;
+    // ASSERT_TRUE(db->Get(ro, "a", &res).IsNotFound());
+    ro.read_timestamp = 1;
+    // ASSERT_TRUE(db->Get(ro, "a", &res).IsNotFound());
+    ro.read_timestamp = 1;
+    ASSERT_TRUE(db->Get(ro, "b", &res).IsNotFound());
+    ro.read_timestamp = 2;
+    ASSERT_OK(db->Get(ro, "b", &res));
+    ASSERT_TRUE(res == "val100");
+    ro.read_timestamp = 3;
+    ASSERT_OK(db->Get(ro, "b", &res));
+    ASSERT_TRUE(res == "val101");
+  }
+  {
+    std::vector<const Snapshot*> snapshots;
+    wo.asif_commit_timestamps = {100};
+    ASSERT_OK(db->Put(wo, "a", "val100"));
+    snapshots.emplace_back(db->GetSnapshot());
+    wo.asif_commit_timestamps = {101};
+    ASSERT_OK(db->Put(wo, "a", "val101"));
+    snapshots.emplace_back(db->GetSnapshot());
+    wo.asif_commit_timestamps = {0};
+    ASSERT_OK(db->Delete(wo, "a"));
+    db->Flush(FlushOptions());
+
+    ReadOptions ro;
+    ro.read_timestamp = 101;
+    std::string res;
+    ASSERT_TRUE(db->Get(ro, "a", &res).IsNotFound());
+    ro.snapshot = snapshots[1];
+    ASSERT_OK(db->Get(ro, "a", &res));
+    ASSERT_TRUE(res == "val101");
+    ro.snapshot = snapshots[0];
+    ASSERT_OK(db->Get(ro, "a", &res));
+    ASSERT_TRUE(res == "val100");
+
+    for (auto& v : snapshots) {
+      db->ReleaseSnapshot(v);
+    }
+  }
+  delete db;
+}
+// check delete 0 timestamp whether influence the follow-up put
+// check delete 0 timestamp whether works
+// check Flush whether works, make put and delete merge together
+TEST_F(DBTest, MockEnvWithZeroTsDel1) {
+  unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
+  Options options;
+  options.create_if_missing = true;
+  options.env = env.get();
+  DB* db;
+
+  ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
+  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(5));
+  WriteOptions wo;
+  {
+    wo.asif_commit_timestamps = {1};
+    ASSERT_OK(db->Put(wo, "a", "val100"));
+    wo.asif_commit_timestamps = {2};
+    ASSERT_OK(db->Put(wo, "b", "val100"));
+    wo.asif_commit_timestamps = {3};
+    ASSERT_OK(db->Put(wo, "b", "val101"));
+    wo.asif_commit_timestamps = {4};
+    ASSERT_OK(db->Delete(wo, "b"));
+    wo.asif_commit_timestamps = {5};
+    ASSERT_OK(db->Put(wo, "a", "val101"));
+    wo.asif_commit_timestamps = {0};
+    ASSERT_OK(db->Delete(wo, "a"));
+    wo.asif_commit_timestamps = {6};
+    ASSERT_OK(db->Put(wo, "a", "val110"));
+    db->Flush(FlushOptions());
+    ReadOptions ro;
+    std::string res;
+
+    ro.read_timestamp = 6;
+    ASSERT_OK(db->Get(ro, "a", &res));
+    ASSERT_TRUE(res == "val110");
+
+    ro.read_timestamp = 1;
+    ASSERT_TRUE(db->Get(ro, "a", &res).IsNotFound());
+    ro.read_timestamp = 5;
+    ASSERT_TRUE(db->Get(ro, "a", &res).IsNotFound());
+
+    ro.read_timestamp = 1;
+    ASSERT_TRUE(db->Get(ro, "b", &res).IsNotFound());
+
+    ro.read_timestamp = 2;
+    ASSERT_TRUE(db->Get(ro, "b", &res).IsNotFound());
+    ro.read_timestamp = 3;
+    ASSERT_TRUE(db->Get(ro, "b", &res).IsNotFound());
+  }
+  delete db;
+}
+
+#endif  // USE_TIMESTAMPS
+
 TEST_F(DBTest, MockEnvTest) {
   std::unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
   Options options;
@@ -4827,6 +5080,8 @@ TEST_F(DBTest, DynamicMiscOptions) {
   DestroyAndReopen(options);
 
   auto assert_reseek_count = [this, &options](int key_start, int num_reseek) {
+    (void)options;
+    (void)num_reseek;
     int key0 = key_start;
     int key1 = key_start + 1;
     int key2 = key_start + 2;
@@ -4843,8 +5098,10 @@ TEST_F(DBTest, DynamicMiscOptions) {
     iter->Next();
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ(iter->key().compare(Key(key2)), 0);
+#ifndef USE_TIMESTAMPS
     ASSERT_EQ(num_reseek,
               TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION));
+#endif  // USE_TIMESTAMPS
   };
   // No reseek
   assert_reseek_count(100, 0);

@@ -957,8 +957,8 @@ Status ColumnFamilyData::RangesOverlapWithMemtables(
   for (size_t i = 0; i < ranges.size() && status.ok() && !*overlap; ++i) {
     auto* vstorage = super_version->current->storage_info();
     auto* ucmp = vstorage->InternalComparator()->user_comparator();
-    InternalKey range_start(ranges[i].start, kMaxSequenceNumber,
-                            kValueTypeForSeek);
+    InternalKey range_start;
+    range_start.SetMinPossibleForUserKeyAndType(ranges[i].start, kValueTypeForSeek);
     memtable_iter->Seek(range_start.Encode());
     status = memtable_iter->status();
     ParsedInternalKey seek_result;
@@ -1298,15 +1298,18 @@ ColumnFamilyData* ColumnFamilySet::CreateColumnFamily(
 
 // REQUIRES: DB mutex held
 void ColumnFamilySet::FreeDeadColumnFamilies() {
-  autovector<ColumnFamilyData*> to_delete;
-  for (auto cfd = dummy_cfd_->next_; cfd != dummy_cfd_; cfd = cfd->next_) {
-    if (cfd->refs_.load(std::memory_order_relaxed) == 0) {
-      to_delete.push_back(cfd);
+  while (true) {
+    bool found = false;
+    for (auto cfd = dummy_cfd_->next_; cfd != dummy_cfd_; cfd = cfd->next_) {
+      if (cfd->refs_.load(std::memory_order_relaxed) == 0) {
+        delete cfd;
+        found = true;
+        break;
+      }
     }
-  }
-  for (auto cfd : to_delete) {
-    // this is very rare, so it's not a problem that we do it under a mutex
-    delete cfd;
+    if (!found) {
+      break;
+    }
   }
 }
 

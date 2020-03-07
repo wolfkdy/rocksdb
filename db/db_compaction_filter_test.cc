@@ -347,7 +347,11 @@ TEST_F(DBTestCompactionFilter, CompactionFilter) {
     iter->SeekToFirst();
     ASSERT_OK(iter->status());
     while (iter->Valid()) {
+#ifdef USE_TIMESTAMPS
+      ParsedInternalKey ikey(Slice(), 0, kTypeValue, 0);
+#else
       ParsedInternalKey ikey(Slice(), 0, kTypeValue);
+#endif
       ASSERT_EQ(ParseInternalKey(iter->key(), &ikey), true);
       total++;
       if (ikey.sequence != 0) {
@@ -437,7 +441,11 @@ TEST_F(DBTestCompactionFilter, CompactionFilter) {
     iter->SeekToFirst();
     ASSERT_OK(iter->status());
     while (iter->Valid()) {
+#ifdef USE_TIMESTAMPS
+      ParsedInternalKey ikey(Slice(), 0, kTypeValue, 0);
+#else
       ParsedInternalKey ikey(Slice(), 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
       ASSERT_EQ(ParseInternalKey(iter->key(), &ikey), true);
       ASSERT_NE(ikey.sequence, (unsigned)0);
       count++;
@@ -655,7 +663,11 @@ TEST_F(DBTestCompactionFilter, CompactionFilterContextManual) {
     iter->SeekToFirst();
     ASSERT_OK(iter->status());
     while (iter->Valid()) {
+#ifdef USE_TIMESTAMPS
+      ParsedInternalKey ikey(Slice(), 0, kTypeValue, 0);
+#else
       ParsedInternalKey ikey(Slice(), 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
       ASSERT_EQ(ParseInternalKey(iter->key(), &ikey), true);
       total++;
       if (ikey.sequence != 0) {

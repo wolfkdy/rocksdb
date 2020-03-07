@@ -59,6 +59,7 @@
 #include "util/thread_local.h"
 #include "util/trace_replay.h"
 
+
 namespace rocksdb {
 
 class Arena;
@@ -706,6 +707,8 @@ class DBImpl : public DB {
                      const bool seq_per_batch, const bool batch_per_txn);
 
   virtual Status Close() override;
+
+  Status AdvancePinTs(uint64_t pinTs, bool force = false);
 
   static Status CreateAndNewDirectory(Env* env, const std::string& dirname,
                                       std::unique_ptr<Directory>* directory);
@@ -1513,6 +1516,12 @@ class DBImpl : public DB {
   // handle for scheduling jobs at fixed intervals
   // REQUIRES: mutex locked
   std::unique_ptr<rocksdb::RepeatableThread> thread_dump_stats_;
+
+#ifdef USE_TIMESTAMPS
+  // set by TOTransactionDB to hint the timestamp boundary
+  // for compacting unnecessary key versions
+  std::atomic<uint64_t> pin_timestamp_;
+#endif // USE_TIMESTAMPS
 
   // No copying allowed
   DBImpl(const DBImpl&);

@@ -468,7 +468,11 @@ TEST_F(DBIteratorStressTest, StressTest) {
                 }
                 e.sequence = i;
                 e.value = "v" + ToString(i);
+#ifdef USE_TIMESTAMPS
+                ParsedInternalKey internal_key(e.key, e.sequence, e.type, 0);
+#else
                 ParsedInternalKey internal_key(e.key, e.sequence, e.type);
+#endif  // USE_TIMESTAMPS
                 AppendInternalKey(&e.ikey, internal_key);
 
                 data.entries.push_back(e);

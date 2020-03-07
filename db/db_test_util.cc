@@ -650,6 +650,16 @@ Status DBTestBase::ReadOnlyReopen(const Options& options) {
   return DB::OpenForReadOnly(options, dbname_, &db_);
 }
 
+Status DBTestBase::ReadOnlyReopenMuliCF(const std::vector<std::string>& cfs, const Options& options) {
+  std::vector<ColumnFamilyDescriptor> column_families;
+  for (size_t i = 0; i < cfs.size(); ++i) {
+    column_families.push_back(ColumnFamilyDescriptor(cfs[i], options));
+  }
+  DBOptions db_opts = DBOptions(options);
+  return DB::OpenForReadOnly(db_opts, dbname_, column_families, &handles_, &db_);
+}
+
+
 Status DBTestBase::TryReopen(const Options& options) {
   Close();
   last_options_.table_factory.reset();
@@ -721,6 +731,11 @@ Status DBTestBase::Delete(int cf, const std::string& k) {
   return db_->Delete(WriteOptions(), handles_[cf], k);
 }
 
+Status DBTestBase::Delete(int cf, const std::string& k,
+                          const WriteOptions& wo) {
+  return db_->Delete(wo, handles_[cf], k);
+}
+
 Status DBTestBase::SingleDelete(const std::string& k) {
   return db_->SingleDelete(WriteOptions(), k);
 }
@@ -731,6 +746,20 @@ Status DBTestBase::SingleDelete(int cf, const std::string& k) {
 
 bool DBTestBase::SetPreserveDeletesSequenceNumber(SequenceNumber sn) {
   return db_->SetPreserveDeletesSequenceNumber(sn);
+}
+
+std::string DBTestBase::Get(int cf, const std::string& k, ReadOptions& options,
+                            const Snapshot* snapshot) {
+  options.verify_checksums = true;
+  options.snapshot = snapshot;
+  std::string result;
+  Status s = db_->Get(options, handles_[cf], k, &result);
+  if (s.IsNotFound()) {
+    result = "NOT_FOUND";
+  } else if (!s.ok()) {
+    result = s.ToString();
+  }
+  return result;
 }
 
 std::string DBTestBase::Get(const std::string& k, const Snapshot* snapshot) {
@@ -824,7 +853,12 @@ std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
     iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
                                            kMaxSequenceNumber, handles_[cf]));
   }
+#ifdef USE_TIMESTAMPS
+  InternalKey target;
+  target.SetMinPossibleForUserKeyAndType(user_key, kTypeValue);
+#else
   InternalKey target(user_key, kMaxSequenceNumber, kTypeValue);
+#endif  // USE_TIMESTAMPS
   iter->Seek(target.Encode());
   std::string result;
   if (!iter->status().ok()) {
@@ -833,7 +867,11 @@ std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
     result = "[ ";
     bool first = true;
     while (iter->Valid()) {
+#ifdef USE_TIMESTAMPS
+      ParsedInternalKey ikey(Slice(), 0, kTypeValue, 0);
+#else
       ParsedInternalKey ikey(Slice(), 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
       if (!ParseInternalKey(iter->key(), &ikey)) {
         result += "CORRUPTED";
       } else {
@@ -1103,7 +1141,11 @@ int DBTestBase::GetSstFileCount(std::string path) {
 void DBTestBase::GenerateNewFile(int cf, Random* rnd, int* key_idx,
                                  bool nowait) {
   for (int i = 0; i < KNumKeysByGenerateNewFile; i++) {
+#ifdef USE_TIMESTAMPS
+    ASSERT_OK(Put(cf, Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 982)));
+#else
     ASSERT_OK(Put(cf, Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 990)));
+#endif  // USE_TIMESTAMPS
     (*key_idx)++;
   }
   if (!nowait) {
@@ -1115,7 +1157,11 @@ void DBTestBase::GenerateNewFile(int cf, Random* rnd, int* key_idx,
 // this will generate non-overlapping files since it keeps increasing key_idx
 void DBTestBase::GenerateNewFile(Random* rnd, int* key_idx, bool nowait) {
   for (int i = 0; i < KNumKeysByGenerateNewFile; i++) {
+#ifdef USE_TIMESTAMPS
+    ASSERT_OK(Put(Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 982)));
+#else
     ASSERT_OK(Put(Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 990)));
+#endif  // USE_TIMESTAMPS
     (*key_idx)++;
   }
   if (!nowait) {
@@ -1171,6 +1217,19 @@ void DBTestBase::VerifyIterLast(std::string expected_key, int cf) {
   delete iter;
 }
 
+void DBTestBase::VerifyIterLast(std::string expected_key, const ReadOptions& ro,
+                                int cf) {
+  Iterator* iter;
+  if (cf == 0) {
+    iter = db_->NewIterator(ro);
+  } else {
+    iter = db_->NewIterator(ro, handles_[cf]);
+  }
+  iter->SeekToLast();
+  ASSERT_EQ(IterStatus(iter), expected_key);
+  delete iter;
+}
+//
 // Used to test InplaceUpdate
 
 // If previous value is nullptr or delta is > than previous value,

@@ -72,11 +72,19 @@ struct IsRangeOverlappedTestCase {
 };
 
 ParsedInternalKey UncutEndpoint(const Slice& s) {
+#ifdef USE_TIMESTAMPS
+  return ParsedInternalKey(s, kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp);
+#else
   return ParsedInternalKey(s, kMaxSequenceNumber, kTypeRangeDeletion);
+#endif  // USE_TIMESTAMPS
 }
 
 ParsedInternalKey InternalValue(const Slice& key, SequenceNumber seq) {
+#ifdef USE_TIMESTAMPS
+  return ParsedInternalKey(key, seq, kTypeValue, 0);
+#else
   return ParsedInternalKey(key, seq, kTypeValue);
+#endif  // USE_TIMESTAMPS
 }
 
 void VerifyIterator(
@@ -211,8 +219,13 @@ TEST_F(RangeDelAggregatorTest, EmptyTruncatedIter) {
 }
 
 TEST_F(RangeDelAggregatorTest, UntruncatedIter) {
+#ifdef USE_TIMESTAMPS
+  auto range_del_iter =
+      MakeRangeDelIter({{"a", "e", 10, 0}, {"e", "g", 8, 0}, {"j", "n", 4, 0}});
+#else
   auto range_del_iter =
       MakeRangeDelIter({{"a", "e", 10}, {"e", "g", 8}, {"j", "n", 4}});
+#endif  // USE_TIMESTAMPS
   FragmentedRangeTombstoneList fragment_list(std::move(range_del_iter),
                                              bytewise_icmp);
   std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
@@ -245,8 +258,13 @@ TEST_F(RangeDelAggregatorTest, UntruncatedIter) {
 }
 
 TEST_F(RangeDelAggregatorTest, UntruncatedIterWithSnapshot) {
+#ifdef USE_TIMESTAMPS
+  auto range_del_iter =
+      MakeRangeDelIter({{"a", "e", 10, 0}, {"e", "g", 8, 0}, {"j", "n", 4, 0}});
+#else
   auto range_del_iter =
       MakeRangeDelIter({{"a", "e", 10}, {"e", "g", 8}, {"j", "n", 4}});
+#endif  // USE_TIMESTAMPS
   FragmentedRangeTombstoneList fragment_list(std::move(range_del_iter),
                                              bytewise_icmp);
   std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
@@ -278,16 +296,26 @@ TEST_F(RangeDelAggregatorTest, UntruncatedIterWithSnapshot) {
 }
 
 TEST_F(RangeDelAggregatorTest, TruncatedIterPartiallyCutTombstones) {
+#ifdef USE_TIMESTAMPS
+  auto range_del_iter =
+      MakeRangeDelIter({{"a", "e", 10, 0}, {"e", "g", 8, 0}, {"j", "n", 4, 0}});
+#else
   auto range_del_iter =
       MakeRangeDelIter({{"a", "e", 10}, {"e", "g", 8}, {"j", "n", 4}});
+#endif  // USE_TIMESTAMPS
   FragmentedRangeTombstoneList fragment_list(std::move(range_del_iter),
                                              bytewise_icmp);
   std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
       new FragmentedRangeTombstoneIterator(&fragment_list, bytewise_icmp,
                                            kMaxSequenceNumber));
 
+#ifdef USE_TIMESTAMPS
+  InternalKey smallest("d", 7, kTypeValue, 0);
+  InternalKey largest("m", 9, kTypeValue, 0);
+#else
   InternalKey smallest("d", 7, kTypeValue);
   InternalKey largest("m", 9, kTypeValue);
+#endif  // USE_TIMESTAMPS
   TruncatedRangeDelIterator iter(std::move(input_iter), &bytewise_icmp,
                                  &smallest, &largest);
 
@@ -314,16 +342,26 @@ TEST_F(RangeDelAggregatorTest, TruncatedIterPartiallyCutTombstones) {
 }
 
 TEST_F(RangeDelAggregatorTest, TruncatedIterFullyCutTombstones) {
+#ifdef USE_TIMESTAMPS
+  auto range_del_iter =
+      MakeRangeDelIter({{"a", "e", 10, 0}, {"e", "g", 8, 0}, {"j", "n", 4, 0}});
+#else
   auto range_del_iter =
       MakeRangeDelIter({{"a", "e", 10}, {"e", "g", 8}, {"j", "n", 4}});
+#endif  // USE_TIMESTAMPS
   FragmentedRangeTombstoneList fragment_list(std::move(range_del_iter),
                                              bytewise_icmp);
   std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
       new FragmentedRangeTombstoneIterator(&fragment_list, bytewise_icmp,
                                            kMaxSequenceNumber));
 
+#ifdef USE_TIMESTAMPS
+  InternalKey smallest("f", 7, kTypeValue, 0);
+  InternalKey largest("i", 9, kTypeValue, 0);
+#else
   InternalKey smallest("f", 7, kTypeValue);
   InternalKey largest("i", 9, kTypeValue);
+#endif  // USE_TIMESTAMPS
   TruncatedRangeDelIterator iter(std::move(input_iter), &bytewise_icmp,
                                  &smallest, &largest);
 
@@ -344,7 +382,11 @@ TEST_F(RangeDelAggregatorTest, TruncatedIterFullyCutTombstones) {
 }
 
 TEST_F(RangeDelAggregatorTest, SingleIterInAggregator) {
+#ifdef USE_TIMESTAMPS
+  auto range_del_iter = MakeRangeDelIter({{"a", "e", 10, 0}, {"c", "g", 8, 0}});
+#else
   auto range_del_iter = MakeRangeDelIter({{"a", "e", 10}, {"c", "g", 8}});
+#endif  // USE_TIMESTAMPS
   FragmentedRangeTombstoneList fragment_list(std::move(range_del_iter),
                                              bytewise_icmp);
   std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
@@ -368,10 +410,15 @@ TEST_F(RangeDelAggregatorTest, SingleIterInAggregator) {
 }
 
 TEST_F(RangeDelAggregatorTest, MultipleItersInAggregator) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   ReadRangeDelAggregator range_del_agg(&bytewise_icmp, kMaxSequenceNumber);
   for (const auto& fragment_list : fragment_lists) {
     std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
@@ -400,10 +447,15 @@ TEST_F(RangeDelAggregatorTest, MultipleItersInAggregator) {
 }
 
 TEST_F(RangeDelAggregatorTest, MultipleItersInAggregatorWithUpperBound) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   ReadRangeDelAggregator range_del_agg(&bytewise_icmp, 19);
   for (const auto& fragment_list : fragment_lists) {
     std::unique_ptr<FragmentedRangeTombstoneIterator> input_iter(
@@ -432,15 +484,28 @@ TEST_F(RangeDelAggregatorTest, MultipleItersInAggregatorWithUpperBound) {
 }
 
 TEST_F(RangeDelAggregatorTest, MultipleTruncatedItersInAggregator) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "z", 10, 0}}, {{"a", "z", 10, 0}}, {{"a", "z", 10, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "z", 10}}, {{"a", "z", 10}}, {{"a", "z", 10}}});
+#endif  // USE_TIMESTAMPS
+#ifdef USE_TIMESTAMPS
+  std::vector<std::pair<InternalKey, InternalKey>> iter_bounds = {
+      {InternalKey("a", 4, kTypeValue, 0),
+       InternalKey("m", kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp)},
+      {InternalKey("m", 20, kTypeValue, 0),
+       InternalKey("x", kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp)},
+      {InternalKey("x", 5, kTypeValue, 0), InternalKey("zz", 30, kTypeValue, kMaxTimeStamp)}};
+#else
   std::vector<std::pair<InternalKey, InternalKey>> iter_bounds = {
       {InternalKey("a", 4, kTypeValue),
        InternalKey("m", kMaxSequenceNumber, kTypeRangeDeletion)},
       {InternalKey("m", 20, kTypeValue),
        InternalKey("x", kMaxSequenceNumber, kTypeRangeDeletion)},
       {InternalKey("x", 5, kTypeValue), InternalKey("zz", 30, kTypeValue)}};
-
+#endif  // USE_TIMESTAMPS
   ReadRangeDelAggregator range_del_agg(&bytewise_icmp, 19);
   for (size_t i = 0; i < fragment_lists.size(); i++) {
     const auto& fragment_list = fragment_lists[i];
@@ -472,15 +537,28 @@ TEST_F(RangeDelAggregatorTest, MultipleTruncatedItersInAggregator) {
 }
 
 TEST_F(RangeDelAggregatorTest, MultipleTruncatedItersInAggregatorSameLevel) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "z", 10, 0}}, {{"a", "z", 10, 0}}, {{"a", "z", 10, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "z", 10}}, {{"a", "z", 10}}, {{"a", "z", 10}}});
+#endif  // USE_TIMESTAMPS
+#ifdef USE_TIMESTAMPS
+  std::vector<std::pair<InternalKey, InternalKey>> iter_bounds = {
+      {InternalKey("a", 4, kTypeValue, 0),
+       InternalKey("m", kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp)},
+      {InternalKey("m", 20, kTypeValue, 0),
+       InternalKey("x", kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp)},
+      {InternalKey("x", 5, kTypeValue, 0), InternalKey("zz", 30, kTypeValue, kMaxTimeStamp)}};
+#else
   std::vector<std::pair<InternalKey, InternalKey>> iter_bounds = {
       {InternalKey("a", 4, kTypeValue),
        InternalKey("m", kMaxSequenceNumber, kTypeRangeDeletion)},
       {InternalKey("m", 20, kTypeValue),
        InternalKey("x", kMaxSequenceNumber, kTypeRangeDeletion)},
       {InternalKey("x", 5, kTypeValue), InternalKey("zz", 30, kTypeValue)}};
-
+#endif  // USE_TIMESTAMPS
   ReadRangeDelAggregator range_del_agg(&bytewise_icmp, 19);
 
   auto add_iter_to_agg = [&](size_t i) {
@@ -516,10 +594,15 @@ TEST_F(RangeDelAggregatorTest, MultipleTruncatedItersInAggregatorSameLevel) {
 }
 
 TEST_F(RangeDelAggregatorTest, CompactionAggregatorNoSnapshots) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots;
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -541,19 +624,33 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorNoSnapshots) {
                                       {InternalValue("j", 14), false}});
 
   auto range_del_compaction_iter = range_del_agg.NewIterator();
+#ifdef USE_TIMESTAMPS
+  VerifyFragmentedRangeDels(range_del_compaction_iter.get(), {{"a", "b", 20, 0},
+                                                              {"b", "c", 10, 0},
+                                                              {"c", "e", 10, 0},
+                                                              {"e", "g", 8, 0},
+                                                              {"h", "i", 25, 0},
+                                                              {"ii", "j", 15, 0}});
+#else
   VerifyFragmentedRangeDels(range_del_compaction_iter.get(), {{"a", "b", 20},
                                                               {"b", "c", 10},
                                                               {"c", "e", 10},
                                                               {"e", "g", 8},
                                                               {"h", "i", 25},
                                                               {"ii", "j", 15}});
+#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(RangeDelAggregatorTest, CompactionAggregatorWithSnapshots) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots{9, 19};
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -580,6 +677,16 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorWithSnapshots) {
       });
 
   auto range_del_compaction_iter = range_del_agg.NewIterator();
+#ifdef USE_TIMESTAMPS
+  VerifyFragmentedRangeDels(range_del_compaction_iter.get(), {{"a", "b", 20, 0},
+                                                              {"a", "b", 10, 0},
+                                                              {"b", "c", 10, 0},
+                                                              {"c", "e", 10, 0},
+                                                              {"c", "e", 8, 0},
+                                                              {"e", "g", 8, 0},
+                                                              {"h", "i", 25, 0},
+                                                              {"ii", "j", 15, 0}});
+#else
   VerifyFragmentedRangeDels(range_del_compaction_iter.get(), {{"a", "b", 20},
                                                               {"a", "b", 10},
                                                               {"b", "c", 10},
@@ -588,13 +695,19 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorWithSnapshots) {
                                                               {"e", "g", 8},
                                                               {"h", "i", 25},
                                                               {"ii", "j", 15}});
+#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(RangeDelAggregatorTest, CompactionAggregatorEmptyIteratorLeft) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots{9, 19};
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -609,10 +722,15 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorEmptyIteratorLeft) {
 }
 
 TEST_F(RangeDelAggregatorTest, CompactionAggregatorEmptyIteratorRight) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots{9, 19};
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -634,10 +752,15 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorEmptyIteratorRight) {
 }
 
 TEST_F(RangeDelAggregatorTest, CompactionAggregatorBoundedIterator) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "e", 10, 0}, {"c", "g", 8, 0}},
+       {{"a", "b", 20, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "e", 10}, {"c", "g", 8}},
        {{"a", "b", 20}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots{9, 19};
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -651,6 +774,16 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorBoundedIterator) {
   Slice end("e");
   auto range_del_compaction_iter1 =
       range_del_agg.NewIterator(&start, &end, false /* end_key_inclusive */);
+#ifdef USE_TIMESTAMPS
+  VerifyFragmentedRangeDels(range_del_compaction_iter1.get(),
+                            {{"a", "c", 10, 0}, {"c", "e", 10, 0}, {"c", "e", 8, 0}});
+
+  auto range_del_compaction_iter2 =
+      range_del_agg.NewIterator(&start, &end, true /* end_key_inclusive */);
+  VerifyFragmentedRangeDels(
+      range_del_compaction_iter2.get(),
+      {{"a", "c", 10, 0}, {"c", "e", 10, 0}, {"c", "e", 8, 0}, {"e", "g", 8, 0}});
+#else
   VerifyFragmentedRangeDels(range_del_compaction_iter1.get(),
                             {{"a", "c", 10}, {"c", "e", 10}, {"c", "e", 8}});
 
@@ -659,14 +792,20 @@ TEST_F(RangeDelAggregatorTest, CompactionAggregatorBoundedIterator) {
   VerifyFragmentedRangeDels(
       range_del_compaction_iter2.get(),
       {{"a", "c", 10}, {"c", "e", 10}, {"c", "e", 8}, {"e", "g", 8}});
+#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(RangeDelAggregatorTest,
        CompactionAggregatorBoundedIteratorExtraFragments) {
+#ifdef USE_TIMESTAMPS
+  auto fragment_lists = MakeFragmentedTombstoneLists(
+      {{{"a", "d", 10, 0}, {"c", "g", 8, 0}},
+       {{"b", "c", 20, 0}, {"d", "f", 30, 0}, {"h", "i", 25, 0}, {"ii", "j", 15, 0}}});
+#else
   auto fragment_lists = MakeFragmentedTombstoneLists(
       {{{"a", "d", 10}, {"c", "g", 8}},
        {{"b", "c", 20}, {"d", "f", 30}, {"h", "i", 25}, {"ii", "j", 15}}});
-
+#endif  // USE_TIMESTAMPS
   std::vector<SequenceNumber> snapshots{9, 19};
   CompactionRangeDelAggregator range_del_agg(&bytewise_icmp, snapshots);
   for (const auto& fragment_list : fragment_lists) {
@@ -680,6 +819,27 @@ TEST_F(RangeDelAggregatorTest,
   Slice end("e");
   auto range_del_compaction_iter1 =
       range_del_agg.NewIterator(&start, &end, false /* end_key_inclusive */);
+#ifdef USE_TIMESTAMPS
+  VerifyFragmentedRangeDels(range_del_compaction_iter1.get(), {{"a", "b", 10, 0},
+                                                               {"b", "c", 20, 0},
+                                                               {"b", "c", 10, 0},
+                                                               {"c", "d", 10, 0},
+                                                               {"c", "d", 8, 0},
+                                                               {"d", "f", 30, 0},
+                                                               {"d", "f", 8, 0},
+                                                               {"f", "g", 8, 0}});
+
+  auto range_del_compaction_iter2 =
+      range_del_agg.NewIterator(&start, &end, true /* end_key_inclusive */);
+  VerifyFragmentedRangeDels(range_del_compaction_iter2.get(), {{"a", "b", 10, 0},
+                                                               {"b", "c", 20, 0},
+                                                               {"b", "c", 10, 0},
+                                                               {"c", "d", 10, 0},
+                                                               {"c", "d", 8, 0},
+                                                               {"d", "f", 30, 0},
+                                                               {"d", "f", 8, 0},
+                                                               {"f", "g", 8, 0}});
+#else
   VerifyFragmentedRangeDels(range_del_compaction_iter1.get(), {{"a", "b", 10},
                                                                {"b", "c", 20},
                                                                {"b", "c", 10},
@@ -699,6 +859,7 @@ TEST_F(RangeDelAggregatorTest,
                                                                {"d", "f", 30},
                                                                {"d", "f", 8},
                                                                {"f", "g", 8}});
+#endif  // USE_TIMESTAMPS
 }
 
 }  // namespace rocksdb

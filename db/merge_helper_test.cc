@@ -36,7 +36,11 @@ class MergeHelperTest : public testing::Test {
   void AddKeyVal(const std::string& user_key, const SequenceNumber& seq,
                  const ValueType& t, const std::string& val,
                  bool corrupt = false) {
+#ifdef USE_TIMESTAMPS
+    InternalKey ikey(user_key, seq, t, 0);
+#else
     InternalKey ikey(user_key, seq, t);
+#endif  // USE_TIMESTAMPS
     if (corrupt) {
       test::CorruptKeyType(&ikey);
     }

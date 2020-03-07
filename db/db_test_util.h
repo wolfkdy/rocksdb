@@ -795,6 +795,8 @@ class DBTestBase : public testing::Test {
 
   Status ReadOnlyReopen(const Options& options);
 
+  Status ReadOnlyReopenMuliCF(const std::vector<std::string>& cfs, const Options& options);
+
   Status TryReopen(const Options& options);
 
   bool IsDirectIOSupported();
@@ -820,11 +822,16 @@ class DBTestBase : public testing::Test {
 
   Status Delete(int cf, const std::string& k);
 
+  Status Delete(int cf, const std::string& k, const WriteOptions& wo);
+
   Status SingleDelete(const std::string& k);
 
   Status SingleDelete(int cf, const std::string& k);
 
   bool SetPreserveDeletesSequenceNumber(SequenceNumber sn);
+
+  std::string Get(int cf, const std::string& k, ReadOptions& ro,
+                  const Snapshot* snapshot = nullptr);
 
   std::string Get(const std::string& k, const Snapshot* snapshot = nullptr);
 
@@ -915,6 +922,8 @@ class DBTestBase : public testing::Test {
   std::string DummyString(size_t len, char c = 'a');
 
   void VerifyIterLast(std::string expected_key, int cf = 0);
+
+  void VerifyIterLast(std::string expected_key, const ReadOptions& ro, int cf = 0);
 
   // Used to test InplaceUpdate
 

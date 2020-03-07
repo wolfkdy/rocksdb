@@ -86,8 +86,8 @@ void TruncatedRangeDelIterator::InternalNext() { iter_->Next(); }
 // NOTE: target is a user key
 void TruncatedRangeDelIterator::Seek(const Slice& target) {
   if (largest_ != nullptr &&
-      icmp_->Compare(*largest_, ParsedInternalKey(target, kMaxSequenceNumber,
-                                                  kTypeRangeDeletion)) <= 0) {
+      icmp_->Compare(*largest_,
+            ParsedInternalKey::MinFromUserKeyAndType(target, kTypeRangeDeletion)) <= 0) {
     iter_->Invalidate();
     return;
   }
@@ -102,7 +102,7 @@ void TruncatedRangeDelIterator::Seek(const Slice& target) {
 // NOTE: target is a user key
 void TruncatedRangeDelIterator::SeekForPrev(const Slice& target) {
   if (smallest_ != nullptr &&
-      icmp_->Compare(ParsedInternalKey(target, 0, kTypeRangeDeletion),
+      icmp_->Compare(ParsedInternalKey::MaxFromUserKeyAndType(target, kTypeRangeDeletion),
                      *smallest_) < 0) {
     iter_->Invalidate();
     return;
@@ -282,9 +282,8 @@ bool RangeDelAggregator::StripeRep::IsRangeOverlapped(const Slice& start,
   // current end key, start_ikey will be considered greater; and
   // - if end_ikey has the same user key and sequence number as the current
   // start key, end_ikey will be considered greater.
-  ParsedInternalKey start_ikey(start, kMaxSequenceNumber,
-                               static_cast<ValueType>(0));
-  ParsedInternalKey end_ikey(end, 0, static_cast<ValueType>(0));
+  auto start_ikey = ParsedInternalKey::MinFromUserKeyAndType(start, static_cast<ValueType>(0));
+  auto end_ikey = ParsedInternalKey::MaxFromUserKeyAndType(end, static_cast<ValueType>(0));
   for (auto& iter : iters_) {
     bool checked_candidate_tombstones = false;
     for (iter->SeekForPrev(start);
@@ -422,8 +421,13 @@ class TruncatedRangeDelMergingIter : public InternalIterator {
 
   Slice key() const override {
     auto* top = heap_.top();
+#ifdef USE_TIMESTAMPS
+    cur_start_key_.Set(top->start_key().user_key, top->seq(),
+                       kTypeRangeDeletion, 0);
+#else
     cur_start_key_.Set(top->start_key().user_key, top->seq(),
                        kTypeRangeDeletion);
+#endif  // USE_TIMESTAMPS
     return cur_start_key_.Encode();
   }
 

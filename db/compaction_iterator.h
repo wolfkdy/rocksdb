@@ -68,7 +68,8 @@ class CompactionIterator {
                      const Compaction* compaction = nullptr,
                      const CompactionFilter* compaction_filter = nullptr,
                      const std::atomic<bool>* shutting_down = nullptr,
-                     const SequenceNumber preserve_deletes_seqnum = 0);
+                     const SequenceNumber preserve_deletes_seqnum = 0,
+                     const uint64_t pin_timestamp = 0);
 
   // Constructor with custom CompactionProxy, used for tests.
   CompactionIterator(InternalIterator* input, const Comparator* cmp,
@@ -81,7 +82,8 @@ class CompactionIterator {
                      std::unique_ptr<CompactionProxy> compaction,
                      const CompactionFilter* compaction_filter = nullptr,
                      const std::atomic<bool>* shutting_down = nullptr,
-                     const SequenceNumber preserve_deletes_seqnum = 0);
+                     const SequenceNumber preserve_deletes_seqnum = 0,
+                     const uint64_t pin_timestamp = 0);
 
   ~CompactionIterator();
 
@@ -171,6 +173,11 @@ class CompactionIterator {
   // Stores whether ikey_.user_key is valid. If set to false, the user key is
   // not compared against the current key in the underlying iterator.
   bool has_current_user_key_ = false;
+
+  std::unique_ptr<ParsedInternalKey> coverd_nontimestamped_del_ = {nullptr};
+  // Only for sanity check
+  std::string cnd_holder_;
+
   bool at_next_ = false;  // If false, the iterator
   // Holds a copy of the current compaction iterator output (or current key in
   // the underlying iterator during NextFromInput()).
@@ -204,6 +211,9 @@ class CompactionIterator {
   // Used to avoid purging uncommitted values. The application can specify
   // uncommitted values by providing a SnapshotChecker object.
   bool current_key_committed_;
+#ifdef USE_TIMESTAMPS
+  uint64_t pin_timestamp_;
+#endif  // USE_TIMESTAMPS
 
   bool IsShuttingDown() {
     // This is a best-effort facility, so memory_order_relaxed is sufficient.

@@ -7,6 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <iostream>
 #include "util/coding.h"
 
 #include "util/testharness.h"
@@ -208,6 +209,39 @@ TEST(Coding, Strings) {
   ASSERT_EQ(std::string(200, 'x'), v.ToString());
   ASSERT_EQ("", input.ToString());
 }
+
+
+TEST(Coding, StringsWithTimestamp) {
+  std::string s;
+  PutTimeStampSuffixedWithLengthPrefixedSlice(&s, Slice(""), 1);
+  PutTimeStampSuffixedWithLengthPrefixedSlice(&s, Slice("foo"), 25555);
+  PutTimeStampSuffixedWithLengthPrefixedSlice(&s, Slice("bar"), 3000000);
+  PutTimeStampSuffixedWithLengthPrefixedSlice(
+	  &s, Slice(std::string(200, 'x')), std::numeric_limits<uint64_t>::max());
+
+  Slice input(s);
+  Slice v;
+  uint64_t ts = 0;
+  ASSERT_TRUE(GetTimeStampSuffixedWithLengthPrefixedSlice(&input, &v, &ts));
+  ASSERT_EQ("", v.ToString());
+  ASSERT_EQ(ts, 1);
+
+  ASSERT_TRUE(GetTimeStampSuffixedWithLengthPrefixedSlice(&input, &v, &ts));
+  ASSERT_EQ("foo", v.ToString());
+  ASSERT_EQ(ts, 25555);
+  
+  ASSERT_TRUE(GetTimeStampSuffixedWithLengthPrefixedSlice(&input, &v, &ts));
+  ASSERT_EQ("bar", v.ToString());
+  ASSERT_EQ(ts, 3000000);
+ 
+  ASSERT_TRUE(GetTimeStampSuffixedWithLengthPrefixedSlice(&input, &v, &ts));
+  ASSERT_EQ(std::string(200, 'x'), v.ToString());
+  ASSERT_EQ(ts, std::numeric_limits<uint64_t>::max());
+  
+
+  ASSERT_EQ("", input.ToString());
+}
+
 
 }  // namespace rocksdb
 

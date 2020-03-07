@@ -284,7 +284,8 @@ Status CuckooTableBuilder::Finish() {
     if (is_last_level_file_) {
       unused_bucket = unused_user_key;
     } else {
-      ParsedInternalKey ikey(unused_user_key, 0, kTypeValue);
+      ParsedInternalKey ikey =
+        ParsedInternalKey::MaxFromUserKeyAndType(unused_user_key, kTypeValue);
       AppendInternalKey(&unused_bucket, ikey);
     }
   }

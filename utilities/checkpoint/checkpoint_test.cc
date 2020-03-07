@@ -459,6 +459,8 @@ TEST_F(CheckpointTest, CurrentFileModifiedWhileCheckpointing) {
   snapshotDB = nullptr;
 }
 
+#ifndef USE_TIMESTAMPS
+
 TEST_F(CheckpointTest, CurrentFileModifiedWhileCheckpointing2PC) {
   Close();
   const std::string dbname = test::PerThreadDBPath("transaction_testdb");
@@ -574,6 +576,9 @@ TEST_F(CheckpointTest, CurrentFileModifiedWhileCheckpointing2PC) {
   snapshotDB = nullptr;
   delete txdb;
 }
+
+
+#endif  // USE_TIMESTAMPS
 
 TEST_F(CheckpointTest, CheckpointInvalidDirectoryName) {
   for (std::string checkpoint_dir : {"", "/", "////"}) {

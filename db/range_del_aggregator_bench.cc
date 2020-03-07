@@ -102,7 +102,11 @@ struct PersistentRangeTombstone {
   PersistentRangeTombstone(std::string start, std::string end,
                            SequenceNumber seq)
       : start_key(std::move(start)), end_key(std::move(end)) {
-    tombstone = RangeTombstone(start_key, end_key, seq);
+#ifdef USE_TIMESTAMPS
+  tombstone = RangeTombstone(start_key, end_key, seq, 0);
+#else
+  tombstone = RangeTombstone(start_key, end_key, seq);
+#endif  // USE_TIMESTAMPS
   }
 
   PersistentRangeTombstone() = default;
@@ -112,8 +116,11 @@ struct PersistentRangeTombstone {
   PersistentRangeTombstone& operator=(const PersistentRangeTombstone& t) {
     start_key = t.start_key;
     end_key = t.end_key;
-    tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_);
-
+#ifdef USE_TIMESTAMPS
+	  tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_, 0);
+#else
+	  tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_);
+#endif  // USE_TIMESTAMPS
     return *this;
   }
 
@@ -122,8 +129,11 @@ struct PersistentRangeTombstone {
   PersistentRangeTombstone& operator=(PersistentRangeTombstone&& t) {
     start_key = std::move(t.start_key);
     end_key = std::move(t.end_key);
-    tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_);
-
+#ifdef USE_TIMESTAMPS
+		  tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_, 0);
+#else
+		  tombstone = RangeTombstone(start_key, end_key, t.tombstone.seq_);
+#endif  // USE_TIMESTAMPS
     return *this;
   }
 };

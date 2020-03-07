@@ -736,6 +736,7 @@ struct DBOptions {
   // Dynamically changeable through SetDBOptions() API.
   size_t compaction_readahead_size = 0;
 
+
   // This is a maximum buffer size that is used by WinMmapReadableFile in
   // unbuffered disk I/O mode. We need to maintain an aligned buffer for
   // reads. We allow the buffer to grow until the specified value and then
@@ -1169,6 +1170,8 @@ struct ReadOptions {
   // Default: 0 (don't filter by seqnum, return user keys)
   SequenceNumber iter_start_seqnum;
 
+  uint64_t read_timestamp;
+
   ReadOptions();
   ReadOptions(bool cksum, bool cache);
 };
@@ -1218,12 +1221,29 @@ struct WriteOptions {
   // Default: false
   bool low_pri;
 
+  // Used for wal-based replication. timestamp is persisted with key-value
+  // in wal, when the right node applys wal, timestamp should not be added
+  // twice.
+  bool already_has_timestamp;
+
+  // Set by TOTransaction, the asif-commit-timestamp.
+  // To the same key, the TOTransaction will guarantee the
+  // asif-commit-timestamp the same as its lsn.
+  // To the same key, if the asif_commit_timestamp travels back, rocksdb
+  // WILL NOT do the consistency check!
+  // If asif_commit_timestamp is none-zero, the internal key will be
+  // encoded as UserKey+Timestamp+LSN, otherwise, it will be encoded
+  // as UserKey+LSN.
+  std::vector<uint64_t> asif_commit_timestamps;
+
   WriteOptions()
       : sync(false),
         disableWAL(false),
         ignore_missing_column_families(false),
         no_slowdown(false),
-        low_pri(false) {}
+        low_pri(false),
+        already_has_timestamp(false),
+        asif_commit_timestamps({}) {}
 };
 
 // Options that control flush operations

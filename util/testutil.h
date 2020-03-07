@@ -88,6 +88,15 @@ class PlainInternalKeyComparator : public InternalKeyComparator {
   virtual ~PlainInternalKeyComparator() {}
 
   virtual int Compare(const Slice& a, const Slice& b) const override {
+#ifdef USE_TIMESTAMPS
+    std::string sa(a.data(), a.size()), sb(b.data(), b.size());
+    for (size_t i = 0; i < 8; ++i) {
+      sa[sa.size()-16+i] = sa[sa.size()-8+i];
+      sb[sb.size()-16+i] = sb[sb.size()-8+i];
+    }
+    return user_comparator()->Compare(Slice(sa.c_str(), sa.size()-8),
+      Slice(sb.c_str(), sb.size()-8));
+#endif  // USE_TIMESTAMPS
     return user_comparator()->Compare(a, b);
   }
 };
@@ -386,6 +395,14 @@ class NullLogger : public Logger {
 
 // Corrupts key by changing the type
 extern void CorruptKeyType(InternalKey* ikey);
+
+#ifdef USE_TIMESTAMPS
+extern std::string KeyStr(const std::string& user_key,
+                          const SequenceNumber& seq,
+                          uint64_t ts,
+                          const ValueType& t,
+                          bool corrupt = false);
+#endif  // USE_TIMESTAMPS
 
 extern std::string KeyStr(const std::string& user_key,
                           const SequenceNumber& seq, const ValueType& t,

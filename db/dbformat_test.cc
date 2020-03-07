@@ -7,6 +7,7 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <iostream>
 #include "db/dbformat.h"
 #include "util/logging.h"
 #include "util/testharness.h"
@@ -14,10 +15,18 @@
 namespace rocksdb {
 
 static std::string IKey(const std::string& user_key,
-                        uint64_t seq,
+                        uint64_t seqorts,
                         ValueType vt) {
   std::string encoded;
-  AppendInternalKey(&encoded, ParsedInternalKey(user_key, seq, vt));
+#ifdef USE_TIMESTAMPS
+  if (seqorts == kMaxSequenceNumber) {
+    AppendInternalKey(&encoded, ParsedInternalKey(user_key, seqorts, vt, kMaxTimeStamp));
+  } else {
+    AppendInternalKey(&encoded, ParsedInternalKey(user_key, seqorts, vt, seqorts));
+  }
+#else
+  AppendInternalKey(&encoded, ParsedInternalKey(user_key, seqorts, vt));
+#endif  // USE_TIMESTAMPS
   return encoded;
 }
 
@@ -34,18 +43,24 @@ static std::string ShortSuccessor(const std::string& s) {
 }
 
 static void TestKey(const std::string& key,
-                    uint64_t seq,
+                    uint64_t seqorts,
                     ValueType vt) {
-  std::string encoded = IKey(key, seq, vt);
+  std::string encoded = IKey(key, seqorts, vt);
 
   Slice in(encoded);
+#ifdef USE_TIMESTAMPS
+  ParsedInternalKey decoded("", 0, kTypeValue, 0);
+#else
   ParsedInternalKey decoded("", 0, kTypeValue);
+#endif  // USE_TIMESTAMPS
 
   ASSERT_TRUE(ParseInternalKey(in, &decoded));
   ASSERT_EQ(key, decoded.user_key.ToString());
-  ASSERT_EQ(seq, decoded.sequence);
+  ASSERT_EQ(seqorts, decoded.sequence);
   ASSERT_EQ(vt, decoded.type);
-
+#ifdef USE_TIMESTAMPS
+  ASSERT_EQ(seqorts, decoded.timestamp);
+#endif  // USE_TIMESTAMPS
   ASSERT_TRUE(!ParseInternalKey(Slice("bar"), &decoded));
 }
 
@@ -69,6 +84,9 @@ TEST_F(FormatTest, InternalKey_EncodeDecode) {
 
 TEST_F(FormatTest, InternalKeyShortSeparator) {
   // When user keys are same
+  ASSERT_EQ(IKey("g", kMaxSequenceNumber, kValueTypeForSeek),
+            Shorten(IKey("foo", 100, kTypeValue),
+                    IKey("hello", 200, kTypeValue)));
   ASSERT_EQ(IKey("foo", 100, kTypeValue),
             Shorten(IKey("foo", 100, kTypeValue),
                     IKey("foo", 99, kTypeValue)));
@@ -173,6 +191,28 @@ TEST_F(FormatTest, IterKeyOperation) {
                         "abcdefghijklmnopqrstuvwxyz"));
 }
 
+#ifdef USE_TIMESTAMPS
+TEST_F(FormatTest, UpdateInternalKey) {
+  std::string user_key("abcdefghijklmnopqrstuvwxyz");
+  uint64_t new_seq = 0x123456;
+  uint64_t new_ts = 0x654321;
+  ValueType new_val_type = kTypeDeletion;
+
+  std::string ikey;
+  AppendInternalKey(&ikey, ParsedInternalKey(user_key, 100U, kTypeValue, 100U));
+  size_t ikey_size = ikey.size();
+  UpdateInternalKey(&ikey, new_seq, new_val_type, new_ts);
+  ASSERT_EQ(ikey_size, ikey.size());
+
+  Slice in(ikey);
+  ParsedInternalKey decoded;
+  ASSERT_TRUE(ParseInternalKey(in, &decoded));
+  ASSERT_EQ(user_key, decoded.user_key.ToString());
+  ASSERT_EQ(new_seq, decoded.sequence);
+  ASSERT_EQ(new_val_type, decoded.type);
+  ASSERT_EQ(new_ts, decoded.timestamp);
+}
+#else
 TEST_F(FormatTest, UpdateInternalKey) {
   std::string user_key("abcdefghijklmnopqrstuvwxyz");
   uint64_t new_seq = 0x123456;
@@ -191,10 +231,16 @@ TEST_F(FormatTest, UpdateInternalKey) {
   ASSERT_EQ(new_seq, decoded.sequence);
   ASSERT_EQ(new_val_type, decoded.type);
 }
+#endif  // USE_TIMESTAMPS
 
 TEST_F(FormatTest, RangeTombstoneSerializeEndKey) {
+#ifdef USE_TIMESTAMPS
+  RangeTombstone t("a", "b", 2, 0);
+  InternalKey k("b", 3, kTypeValue, 0);
+#else
   RangeTombstone t("a", "b", 2);
   InternalKey k("b", 3, kTypeValue);
+#endif  // USE_TIMESTAMPS
   const InternalKeyComparator cmp(BytewiseComparator());
   ASSERT_LT(cmp.Compare(t.SerializeEndKey(), k), 0);
 }

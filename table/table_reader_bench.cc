@@ -45,7 +45,8 @@ static std::string MakeKey(int i, int j, bool through_db) {
   // instead of user keys, we need to add 8 bytes of internal
   // information (row type etc) to user key to make an internal
   // key.
-  InternalKey key(std::string(buf), 0, ValueType::kTypeValue);
+  InternalKey key;
+  key.SetMaxPossibleForUserKeyAndType(std::string(buf), ValueType::kTypeValue);
   return key.Encode().ToString();
 }
 

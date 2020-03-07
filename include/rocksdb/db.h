@@ -134,9 +134,9 @@ class DB {
   //
   // Not supported in ROCKSDB_LITE, in which case the function will
   // return Status::NotSupported.
-  static Status OpenForReadOnly(const Options& options,
-      const std::string& name, DB** dbptr,
-      bool error_if_log_file_exist = false);
+  static Status OpenForReadOnly(const Options& options, const std::string& name,
+                                DB** dbptr,
+                                bool error_if_log_file_exist = false);
 
   // Open the database for read only with column families. When opening DB with
   // read only, you can specify only a subset of column families in the

@@ -91,7 +91,7 @@ Status PlainTableKeyEncoder::AppendKey(const Slice& key,
 
   Slice key_to_write = key;  // Portion of internal key to write out.
 
-  uint32_t user_key_size = static_cast<uint32_t>(key.size() - 8);
+  uint32_t user_key_size = I2ULen(static_cast<uint32_t>(key.size()));
   if (encoding_type_ == kPlain) {
     if (fixed_user_key_len_ == kPlainTableVariableLength) {
       // Write key length
@@ -150,11 +150,12 @@ Status PlainTableKeyEncoder::AppendKey(const Slice& key,
   // in this buffer to safe one file append call, which takes 1 byte.
   if (parsed_key.sequence == 0 && parsed_key.type == kTypeValue) {
     Status s =
-        file->Append(Slice(key_to_write.data(), key_to_write.size() - 8));
+        file->Append(Slice(key_to_write.data(),
+                           I2ULen(static_cast<uint32_t>(key_to_write.size()))));
     if (!s.ok()) {
       return s;
     }
-    *offset += key_to_write.size() - 8;
+    *offset += I2ULen(static_cast<uint32_t>(key_to_write.size()));
     meta_bytes_buf[*meta_bytes_buf_size] = PlainTableFactory::kValueTypeSeqId0;
     *meta_bytes_buf_size += 1;
   } else {
@@ -267,10 +268,13 @@ Status PlainTableKeyDecoder::ReadInternalKey(
     parsed_key->user_key = Slice(tmp_slice.data(), user_key_size);
     parsed_key->sequence = 0;
     parsed_key->type = kTypeValue;
+#ifdef USE_TIMESTAMPS
+    parsed_key->timestamp = 0;
+#endif  // USE_TIMESTAMPS
     *bytes_read += user_key_size + 1;
     *internal_key_valid = false;
   } else {
-    success = file_reader_.Read(file_offset, user_key_size + 8, internal_key);
+    success = file_reader_.Read(file_offset, U2ILen(user_key_size), internal_key);
     if (!success) {
       return file_reader_.status();
     }
@@ -279,7 +283,7 @@ Status PlainTableKeyDecoder::ReadInternalKey(
       return Status::Corruption(
           Slice("Incorrect value type found when reading the next key"));
     }
-    *bytes_read += user_key_size + 8;
+    *bytes_read += U2ILen(user_key_size);
   }
   return Status::OK();
 }

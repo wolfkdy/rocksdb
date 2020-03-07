@@ -76,8 +76,8 @@ Status OverlapWithIterator(const Comparator* ucmp,
     const Slice& largest_user_key,
     InternalIterator* iter,
     bool* overlap) {
-  InternalKey range_start(smallest_user_key, kMaxSequenceNumber,
-                          kValueTypeForSeek);
+  InternalKey range_start;
+  range_start.SetMinPossibleForUserKeyAndType(smallest_user_key, kValueTypeForSeek);
   iter->Seek(range_start.Encode());
   if (!iter->status().ok()) {
     return iter->status();
@@ -831,8 +831,9 @@ Status Version::GetPropertiesOfTablesInRange(
   for (int level = 0; level < storage_info_.num_non_empty_levels(); level++) {
     for (decltype(n) i = 0; i < n; i++) {
       // Convert user_key into a corresponding internal key.
-      InternalKey k1(range[i].start, kMaxSequenceNumber, kValueTypeForSeek);
-      InternalKey k2(range[i].limit, kMaxSequenceNumber, kValueTypeForSeek);
+      InternalKey k1, k2;
+      k1.SetMinPossibleForUserKeyAndType(range[i].start, kValueTypeForSeek);
+      k2.SetMinPossibleForUserKeyAndType(range[i].limit, kValueTypeForSeek);
       std::vector<FileMetaData*> files;
       storage_info_.GetOverlappingInputs(level, &k1, &k2, &files, -1, nullptr,
                                          false);

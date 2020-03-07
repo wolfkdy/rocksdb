@@ -163,21 +163,37 @@ class PartitionedFilterBlockTest
     // Querying added keys
     const bool no_io = true;
     for (auto key : keys) {
+
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
       auto ikey = InternalKey(key, 0, ValueType::kTypeValue);
+#endif	  
       const Slice ikey_slice = Slice(*ikey.rep());
       ASSERT_TRUE(reader->KeyMayMatch(key, prefix_extractor, kNotValid, !no_io,
                                       &ikey_slice));
     }
-    {
+	
+ {
       // querying a key twice
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(keys[0], 0, ValueType::kTypeValue, 0);
+#else
       auto ikey = InternalKey(keys[0], 0, ValueType::kTypeValue);
+#endif
       const Slice ikey_slice = Slice(*ikey.rep());
-      ASSERT_TRUE(reader->KeyMayMatch(keys[0], prefix_extractor, kNotValid,
-                                      !no_io, &ikey_slice));
+     
+	  ASSERT_TRUE(reader->KeyMayMatch(keys[0], prefix_extractor, kNotValid,
+-                                      !no_io, &ikey_slice));
     }
     // querying missing keys
     for (auto key : missing_keys) {
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
       auto ikey = InternalKey(key, 0, ValueType::kTypeValue);
+#endif
+
       const Slice ikey_slice = Slice(*ikey.rep());
       if (empty) {
         ASSERT_TRUE(reader->KeyMayMatch(key, prefix_extractor, kNotValid,
@@ -252,8 +268,13 @@ class PartitionedFilterBlockTest
   void CutABlock(PartitionedIndexBuilder* builder,
                  const std::string& user_key) {
     // Assuming a block is cut, add an entry to the index
-    std::string key =
-        std::string(*InternalKey(user_key, 0, ValueType::kTypeValue).rep());
+  
+      
+#ifdef USE_TIMESTAMPS
+	std::string key =  std::string(*InternalKey(user_key, 0, ValueType::kTypeValue, 0).rep());
+#else
+    std::string key =  std::string(*InternalKey(user_key, 0, ValueType::kTypeValue).rep());
+#endif	 	
     BlockHandle dont_care_block_handle(1, 1);
     builder->AddIndexEntry(&key, nullptr, dont_care_block_handle);
   }
@@ -261,10 +282,21 @@ class PartitionedFilterBlockTest
   void CutABlock(PartitionedIndexBuilder* builder, const std::string& user_key,
                  const std::string& next_user_key) {
     // Assuming a block is cut, add an entry to the index
+ #ifdef USE_TIMESTAMPS
+    std::string key =
+        std::string(*InternalKey(user_key, 0, ValueType::kTypeValue, 0).rep());
+#else
     std::string key =
         std::string(*InternalKey(user_key, 0, ValueType::kTypeValue).rep());
+#endif
+
+#ifdef USE_TIMESTAMPS
+    std::string next_key = std::string(
+        *InternalKey(next_user_key, 0, ValueType::kTypeValue, 0).rep());
+#else
     std::string next_key = std::string(
         *InternalKey(next_user_key, 0, ValueType::kTypeValue).rep());
+#endif
     BlockHandle dont_care_block_handle(1, 1);
     Slice slice = Slice(next_key.data(), next_key.size());
     builder->AddIndexEntry(&key, &slice, dont_care_block_handle);
@@ -331,7 +363,11 @@ TEST_P(PartitionedFilterBlockTest, SamePrefixInMultipleBlocks) {
   std::unique_ptr<PartitionedFilterBlockReader> reader(
       NewReader(builder.get(), pib.get(), prefix_extractor.get()));
   for (auto key : pkeys) {
-    auto ikey = InternalKey(key, 0, ValueType::kTypeValue);
+#ifdef USE_TIMESTAMPS
+      auto ikey = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
+      auto ikey = InternalKey(key, 0, ValueType::kTypeValue);
+#endif	
     const Slice ikey_slice = Slice(*ikey.rep());
     ASSERT_TRUE(reader->PrefixMayMatch(prefix_extractor->Transform(key),
                                        prefix_extractor.get(), kNotValid,

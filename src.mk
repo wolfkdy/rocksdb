@@ -218,6 +218,8 @@ LIB_SOURCES =                                                   \
   utilities/transactions/write_prepared_txn_db.cc               \
   utilities/transactions/write_unprepared_txn.cc                \
   utilities/transactions/write_unprepared_txn_db.cc             \
+  utilities/transactions/totransaction_db_impl.cc               \
+  utilities/transactions/totransaction_impl.cc                  \
   utilities/ttl/db_ttl_impl.cc                                  \
   utilities/write_batch_with_index/write_batch_with_index.cc    \
   utilities/write_batch_with_index/write_batch_with_index_internal.cc    \
@@ -414,7 +416,6 @@ MAIN_SOURCES =                                                          \
   utilities/table_properties_collectors/compact_on_deletion_collector_test.cc  \
   utilities/transactions/optimistic_transaction_test.cc                 \
   utilities/transactions/transaction_test.cc                            \
-  utilities/transactions/write_prepared_transaction_test.cc             \
   utilities/transactions/write_unprepared_transaction_test.cc           \
   utilities/ttl/ttl_test.cc                                             \
   utilities/write_batch_with_index/write_batch_with_index_test.cc       \

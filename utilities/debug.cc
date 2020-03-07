@@ -46,10 +46,18 @@ Status GetAllKeyVersions(DB* db, Slice begin_key, Slice end_key,
       break;
     }
 
+#ifdef USE_TIMESTAMPS
+    key_versions->emplace_back(ikey.user_key.ToString() /* _user_key */,
+                               iter->value().ToString() /* _value */,
+                               ikey.sequence /* _sequence */,
+                               static_cast<int>(ikey.type) /* _type */,
+                               ikey.timestamp /* _timestamp */);
+#else
     key_versions->emplace_back(ikey.user_key.ToString() /* _user_key */,
                                iter->value().ToString() /* _value */,
                                ikey.sequence /* _sequence */,
                                static_cast<int>(ikey.type) /* _type */);
+#endif  // USE_TIMESTAMPS
     if (++num_keys >= max_num_ikeys) {
       break;
     }

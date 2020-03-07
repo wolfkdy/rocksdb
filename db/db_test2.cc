@@ -1009,7 +1009,12 @@ TEST_F(DBTest2, WalFilterTestWithColumnFamilies) {
   //default column-family, only post_flush keys are expected
   for (size_t i = 0; i < batch_keys_post_flush.size(); i++) {
     for (size_t j = 0; j < batch_keys_post_flush[i].size(); j++) {
-      Slice key_from_the_log(keys_cf[index++]);
+      auto v = keys_cf[index++];
+#ifdef USE_TIMESTAMPS
+      Slice key_from_the_log(Slice(v.data(), v.size()-8));
+#else
+      Slice key_from_the_log(v);
+#endif  // USE_TIMESTAMPS
       Slice batch_key(batch_keys_post_flush[i][j]);
       ASSERT_TRUE(key_from_the_log.compare(batch_key) == 0);
     }
@@ -1021,7 +1026,12 @@ TEST_F(DBTest2, WalFilterTestWithColumnFamilies) {
   //pikachu column-family, all keys are expected
   for (size_t i = 0; i < batch_keys_pre_flush.size(); i++) {
     for (size_t j = 0; j < batch_keys_pre_flush[i].size(); j++) {
-      Slice key_from_the_log(keys_cf[index++]);
+      auto v = keys_cf[index++];
+#ifdef USE_TIMESTAMPS
+      Slice key_from_the_log(Slice(v.data(), v.size()-8));
+#else
+      Slice key_from_the_log(v);
+#endif  // USE_TIMESTAMPS
       Slice batch_key(batch_keys_pre_flush[i][j]);
       ASSERT_TRUE(key_from_the_log.compare(batch_key) == 0);
     }
@@ -1029,7 +1039,12 @@ TEST_F(DBTest2, WalFilterTestWithColumnFamilies) {
 
   for (size_t i = 0; i < batch_keys_post_flush.size(); i++) {
     for (size_t j = 0; j < batch_keys_post_flush[i].size(); j++) {
-      Slice key_from_the_log(keys_cf[index++]);
+      auto v = keys_cf[index++];
+#ifdef USE_TIMESTAMPS
+      Slice key_from_the_log(Slice(v.data(), v.size()-8));
+#else
+      Slice key_from_the_log(v);
+#endif  // USE_TIMESTAMPS
       Slice batch_key(batch_keys_post_flush[i][j]);
       ASSERT_TRUE(key_from_the_log.compare(batch_key) == 0);
     }
@@ -1805,7 +1820,11 @@ TEST_F(DBTest2, ReadAmpBitmap) {
       ASSERT_OK(db_->Get(ReadOptions(), key, &value));
 
       if (read_keys.find(key_idx) == read_keys.end()) {
+#ifdef USE_TIMESTAMPS
+        auto internal_key = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
         auto internal_key = InternalKey(key, 0, ValueType::kTypeValue);
+#endif  // USE_TIMESTAMPS
         total_useful_bytes +=
             GetEncodedEntrySize(internal_key.size(), value.size());
         read_keys.insert(key_idx);
@@ -1911,7 +1930,11 @@ TEST_F(DBTest2, ReadAmpBitmapLiveInCacheAfterDBClose) {
       ASSERT_OK(db_->Get(ReadOptions(), key, &value));
 
       if (read_keys.find(i) == read_keys.end()) {
+#ifdef USE_TIMESTAMPS
+        auto internal_key = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
         auto internal_key = InternalKey(key, 0, ValueType::kTypeValue);
+#endif  // USE_TIMESTAMPS
         total_useful_bytes +=
             GetEncodedEntrySize(internal_key.size(), value.size());
         read_keys.insert(i);
@@ -1938,7 +1961,11 @@ TEST_F(DBTest2, ReadAmpBitmapLiveInCacheAfterDBClose) {
       ASSERT_OK(db_->Get(ReadOptions(), key, &value));
 
       if (read_keys.find(i) == read_keys.end()) {
+#ifdef USE_TIMESTAMPS
+        auto internal_key = InternalKey(key, 0, ValueType::kTypeValue, 0);
+#else
         auto internal_key = InternalKey(key, 0, ValueType::kTypeValue);
+#endif  // USE_TIMESTAMPS
         total_useful_bytes +=
             GetEncodedEntrySize(internal_key.size(), value.size());
         read_keys.insert(i);
