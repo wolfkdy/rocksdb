@@ -539,6 +539,7 @@ TESTS = \
 	column_aware_encoding_test \
 	compact_files_test \
 	optimistic_transaction_test \
+	totransaction_test \
 	write_callback_test \
 	heap_test \
 	compact_on_deletion_collector_test \
@@ -553,7 +554,6 @@ TESTS = \
 	object_registry_test \
 	repair_test \
 	env_timed_test \
-	write_prepared_transaction_test \
 	write_unprepared_transaction_test \
 	db_universal_compaction_test \
 	trace_analyzer_test \
@@ -578,7 +578,6 @@ PARALLEL_TEST = \
 	persistent_cache_test \
 	table_test \
 	transaction_test \
-	write_prepared_transaction_test \
 	write_unprepared_transaction_test \
 
 # options_settable_test doesn't pass with UBSAN as we use hack in the test
@@ -1515,6 +1514,9 @@ column_aware_encoding_test: utilities/column_aware_encoding_test.o $(TESTHARNESS
 optimistic_transaction_test: utilities/transactions/optimistic_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
+totransaction_test: utilities/transactions/totransaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
+	$(AM_LINK)
+
 mock_env_test : env/mock_env_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
@@ -1537,9 +1539,6 @@ heap_test: util/heap_test.o $(GTEST)
 	$(AM_LINK)
 
 transaction_test: utilities/transactions/transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
-	$(AM_LINK)
-
-write_prepared_transaction_test: utilities/transactions/write_prepared_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)
 	$(AM_LINK)
 
 write_unprepared_transaction_test: utilities/transactions/write_unprepared_transaction_test.o $(LIBOBJECTS) $(TESTHARNESS)

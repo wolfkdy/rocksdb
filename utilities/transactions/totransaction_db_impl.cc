@@ -595,7 +595,7 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
                      has_commit_ts_.load() ? committed_max_ts_.load() : 0, ts);
     }
     ReadLock rl(&ts_meta_mutex_);
-    if ((oldest_ts_ == nullptr || *oldest_ts_ > ts) && !force) {
+    if ((oldest_ts_ != nullptr && *oldest_ts_ > ts) && !force) {
       return Status::InvalidArgument(
           "kCommittedTs should not be less than kOldestTs");
     }

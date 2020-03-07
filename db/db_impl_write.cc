@@ -98,6 +98,18 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
 
+  #ifdef USE_TIMESTAMPS
+    WriteBatch tmp_batch;
+    if (!write_options.already_has_timestamp) {
+      auto status =
+          WriteBatchInternal::RewriteBatch(&tmp_batch, my_batch, write_options);
+      if (!status.ok()) {
+          return status;
+      }    
+      my_batch = &tmp_batch;
+    }
+  #endif  // USE_TIMESTAMPS
+
   Status status;
   if (write_options.low_pri) {
     status = ThrottleLowPriWritesIfNeeded(write_options, my_batch);

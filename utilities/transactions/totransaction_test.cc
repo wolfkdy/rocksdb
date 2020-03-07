@@ -102,7 +102,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
   Status s;
   TOTransactionStat stat;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   // txn1 test put and get
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
@@ -140,7 +140,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
 
   //
   // txn2  test iterator
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
 
   txn = txn_db->BeginTransaction(write_options, txn_options);
   txn->SetReadTimeStamp(101, 0); 
@@ -295,7 +295,7 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   // txn1 test write conflict
   // txn1 and txn2 both modify foo
@@ -337,7 +337,7 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
   // txn2  test write conflict
   // txn1 began before txn2, txn2 modified foo and commit
   // txn1 tried to modify foo
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
 
   txn = txn_db->BeginTransaction(write_options, txn_options);
   txn->SetReadTimeStamp(101, 0); 
@@ -442,7 +442,7 @@ TEST_F(TOTransactionTest, ValidateIsolation) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   // txn1 test snapshot isolation
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
@@ -616,7 +616,7 @@ TEST_F(TOTransactionTest, CommitTsCheck) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
@@ -666,7 +666,7 @@ TEST_F(TOTransactionTest, CommitTsCheck2) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
@@ -742,7 +742,7 @@ TEST_F(TOTransactionTest, CommitTsCheck3) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 10);
+  s = txn_db->SetTimeStamp(kOldest, 10, false);
   ASSERT_OK(s);
   
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
@@ -945,7 +945,7 @@ TEST_F(TOTransactionTest, AdvanceTSAndCleanInLock) {
   string value;
   Status s;
 
-  s = txn_db->SetTimeStamp(kOldest, 3);
+  s = txn_db->SetTimeStamp(kOldest, 3, false);
   ASSERT_OK(s);
   TOTransaction* txn_ori = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn_ori);
@@ -1005,7 +1005,7 @@ TEST_F(TOTransactionTest, AdvanceTSAndCleanInLock) {
   ((TOTransactionDBImpl*)txn_db)->AdvanceTS(&maxToCleanTs);
   ASSERT_EQ(maxToCleanTs, 3);
 
-  s = txn_db->SetTimeStamp(kOldest, 7);
+  s = txn_db->SetTimeStamp(kOldest, 7, false);
   ASSERT_OK(s);
 
   ((TOTransactionDBImpl*)txn_db)->AdvanceTS(&maxToCleanTs);
