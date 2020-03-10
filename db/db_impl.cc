@@ -96,7 +96,6 @@
 #include "util/stop_watch.h"
 #include "util/string_util.h"
 #include "util/sync_point.h"
-#include "rocksdb/change_stream.h"
 
 namespace rocksdb {
 const std::string kDefaultColumnFamilyName("default");
