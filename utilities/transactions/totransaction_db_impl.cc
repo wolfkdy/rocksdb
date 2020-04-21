@@ -92,7 +92,7 @@ Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(const Slice& k
   auto addedSize =
     mem_usage->load(std::memory_order_relaxed) + key.size() + sizeof(txn_id);
   if (addedSize > max_mem_usage) {
-    ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict mem usage(%ll) is greater than limit(%llu) \n",
+    ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict mem usage(%llu) is greater than limit(%llu) \n",
       addedSize, max_mem_usage);
     return Status::Busy();
   }
@@ -367,10 +367,6 @@ Status TOTransactionDBImpl::AddCommitQueue(const std::shared_ptr<ATN>& core,
   if (core->commit_ts_set_) {
     if (ts < core->first_commit_ts_) {
       return Status::InvalidArgument("commit-ts smaller than first-commit-ts");
-    }
-    if (ts < core->commit_ts_) {
-      // in wt3.0, there is no restriction like this one.
-      return Status::InvalidArgument("commit-ts must be monotonic in a txn");
     }
     core->commit_ts_ = ts;
     return Status::OK();
