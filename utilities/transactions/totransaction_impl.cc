@@ -88,17 +88,6 @@ Status TOTransactionImpl::SetCommitTimeStamp(const RocksTimeStamp& timestamp) {
     return Status::NotSupported("not allowed to set committs to 0");
   }
 
-  if (core_->commit_ts_set_) {
-    if (core_->commit_ts_ > timestamp) {
-      return Status::NotSupported("commit ts need equal with the pre set");
-    }
-    if (core_->commit_ts_ == timestamp) {
-      return Status::OK();
-    }
-  }
-
-  assert((!core_->commit_ts_set_) || core_->commit_ts_ < timestamp);
-
   // publish commit_ts to global view
   auto s = txn_db_impl_->AddCommitQueue(core_, timestamp);
   if (!s.ok()) {
