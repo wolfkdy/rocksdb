@@ -76,6 +76,14 @@ Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp,
   }
   assert(core_->read_ts_set_);
   assert(core_->read_ts_ >= timestamp);
+ 
+  // If we already have a snapshot, it may be too early to match
+  // the timestamp (including the one we just read, if rounding
+  // to oldest).  Get a new one.
+  assert(txn_option_.txn_snapshot != nullptr);
+  txn_db_impl_->ReleaseSnapshot(txn_option_.txn_snapshot);
+  txn_option_.txn_snapshot = txn_db_impl_->GetSnapshot();
+  core_->txn_snapshot = txn_option_.txn_snapshot;
   return s;
 }
 
