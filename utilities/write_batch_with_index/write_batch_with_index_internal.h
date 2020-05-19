@@ -10,6 +10,7 @@
 #include <string>
 #include <vector>
 
+#include "memtable/skiplist.h"
 #include "options/db_options.h"
 #include "port/port.h"
 #include "rocksdb/comparator.h"
@@ -17,6 +18,7 @@
 #include "rocksdb/slice.h"
 #include "rocksdb/status.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
+#include "util/arena.h"
 
 namespace rocksdb {
 
@@ -122,6 +124,60 @@ class WriteBatchEntryComparator {
   const ReadableWriteBatch* write_batch_;
 };
 
+typedef SkipList<WriteBatchIndexEntry*, const WriteBatchEntryComparator&>
+    WriteBatchEntrySkipList;
+
+struct WriteBatchWithIndex::Rep {
+  explicit Rep(const Comparator* index_comparator, size_t reserved_bytes = 0,
+               size_t max_bytes = 0, bool _overwrite_key = false)
+      : write_batch(reserved_bytes, max_bytes),
+        comparator(index_comparator, &write_batch),
+        skip_list(comparator, &arena),
+        overwrite_key(_overwrite_key),
+        last_entry_offset(0),
+        last_sub_batch_offset(0),
+        sub_batch_cnt(1) {}
+  ReadableWriteBatch write_batch;
+  WriteBatchEntryComparator comparator;
+  Arena arena;
+  WriteBatchEntrySkipList skip_list;
+  bool overwrite_key;
+  size_t last_entry_offset;
+  // The starting offset of the last sub-batch. A sub-batch starts right before
+  // inserting a key that is a duplicate of a key in the last sub-batch. Zero,
+  // the default, means that no duplicate key is detected so far.
+  size_t last_sub_batch_offset;
+  // Total number of sub-batches in the write batch. Default is 1.
+  size_t sub_batch_cnt;
+
+  // Remember current offset of internal write batch, which is used as
+  // the starting offset of the next record.
+  void SetLastEntryOffset() { last_entry_offset = write_batch.GetDataSize(); }
+
+  // In overwrite mode, find the existing entry for the same key and update it
+  // to point to the current entry.
+  // Return true if the key is found and updated.
+  bool UpdateExistingEntry(ColumnFamilyHandle* column_family, const Slice& key);
+  bool UpdateExistingEntryWithCfId(uint32_t column_family_id, const Slice& key);
+
+  // Add the recent entry to the update.
+  // In overwrite mode, if key already exists in the index, update it.
+  void AddOrUpdateIndex(ColumnFamilyHandle* column_family, const Slice& key);
+  void AddOrUpdateIndex(const Slice& key);
+
+  // Allocate an index entry pointing to the last entry in the write batch and
+  // put it to skip list.
+  void AddNewEntry(uint32_t column_family_id);
+
+  // Clear all updates buffered in this batch.
+  void Clear();
+  void ClearIndex();
+
+  // Rebuild index by reading all records from the batch.
+  // Returns non-ok status on corruption.
+  Status ReBuildIndex();
+};
+
 class WriteBatchWithIndexInternal {
  public:
   enum Result { kFound, kDeleted, kNotFound, kMergeInProgress, kError };
@@ -139,6 +195,8 @@ class WriteBatchWithIndexInternal {
       ColumnFamilyHandle* column_family, const Slice& key,
       MergeContext* merge_context, WriteBatchEntryComparator* cmp,
       std::string* value, bool overwrite_key, Status* s);
+
+  static WriteBatchEntryComparator* GetComparator(WriteBatchWithIndex* batch);
 };
 
 }  // namespace rocksdb

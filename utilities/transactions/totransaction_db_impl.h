@@ -25,66 +25,93 @@
 
 namespace rocksdb {
 
+class PrepareHeap {
+ public:
+  PrepareHeap();
+
+  ~PrepareHeap() = default;
+
+  std::shared_ptr<TOTransactionImpl::ActiveTxnNode> Find(
+      const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key);
+
+  void Insert(const std::shared_ptr<TOTransactionImpl::ActiveTxnNode>& core);
+
+  uint32_t Remove(TOTransactionImpl::ActiveTxnNode* core);
+
+  void Purge(TransactionID oldest_txn_id, RocksTimeStamp oldest_ts);
+
+ private:
+  friend class PrepareMapIterator;
+
+  port::RWMutex mutex_;
+
+  using PMAP =
+      std::map<TxnKey,
+               std::list<std::shared_ptr<TOTransactionImpl::ActiveTxnNode>>>;
+  PMAP map_;
+
+  static const TxnKey sentinal_;
+};
+
 class TOTransactionDBImpl : public TOTransactionDB {
  public:
-  TOTransactionDBImpl(DB* db, const TOTransactionDBOptions& txn_db_options, bool read_only)
-              : TOTransactionDB(db),
-                dbimpl_(reinterpret_cast<DBImpl*>(db)),
-                read_only_(read_only),
-                txn_db_options_(txn_db_options),
-                num_stripes_(DEFAULT_NUM_STRIPES),
-                committed_max_txnid_(0),
-                current_conflict_bytes_(0),
-                max_conflict_bytes_(1.1*txn_db_options.max_conflict_check_bytes_size),
-                txn_commits_(0),
-                txn_aborts_(0), 
-                committed_max_ts_(0),
-                has_commit_ts_(false),
-                update_max_commit_ts_times_(0),
-                update_max_commit_ts_retries_(0),
-                commit_without_ts_times_(0),
-                read_without_ts_times_(0),
-                read_with_ts_times_(0),
-                read_q_walk_times_(0),
-                read_q_walk_len_sum_(0),
-                commit_q_walk_times_(0),
-                commit_q_walk_len_sum_(0),
-                oldest_ts_(nullptr){
-        if (max_conflict_bytes_ == 0) {
-          // we preserve at least 100MB for conflict check
-          max_conflict_bytes_ = 100*1024*1024;
-        }
-        info_log_ = dbimpl_->GetDBOptions().info_log.get();
+  TOTransactionDBImpl(DB* db, const TOTransactionDBOptions& txn_db_options,
+                      bool read_only)
+      : TOTransactionDB(db),
+        dbimpl_(reinterpret_cast<DBImpl*>(db)),
+        read_only_(read_only),
+        txn_db_options_(txn_db_options),
+        num_stripes_(DEFAULT_NUM_STRIPES),
+        committed_max_txnid_(0),
+        current_conflict_bytes_(0),
+        max_conflict_bytes_(1.1 * txn_db_options.max_conflict_check_bytes_size),
+        txn_commits_(0),
+        txn_aborts_(0),
+        committed_max_ts_(0),
+        has_commit_ts_(false),
+        update_max_commit_ts_times_(0),
+        update_max_commit_ts_retries_(0),
+        commit_without_ts_times_(0),
+        read_without_ts_times_(0),
+        read_with_ts_times_(0),
+        read_q_walk_times_(0),
+        read_q_walk_len_sum_(0),
+        commit_q_walk_times_(0),
+        commit_q_walk_len_sum_(0),
+        oldest_ts_(nullptr) {
+    if (max_conflict_bytes_ == 0) {
+      // we preserve at least 100MB for conflict check
+      max_conflict_bytes_ = 100 * 1024 * 1024;
+    }
+    info_log_ = dbimpl_->GetDBOptions().info_log.get();
 
-        uncommitted_keys_.SetLogger(info_log_);
-        committed_keys_.SetLogger(info_log_);
-        active_txns_.clear();
-        
-        // Init default num_stripes
-        num_stripes_  = (txn_db_options.num_stripes > 0)
-                                 ? txn_db_options.num_stripes 
-                                 : DEFAULT_NUM_STRIPES;
+    uncommitted_keys_.SetLogger(info_log_);
+    committed_keys_.SetLogger(info_log_);
+    active_txns_.clear();
 
-        
-        uncommitted_keys_.lock_map_stripes_.reserve(num_stripes_);
-        for (size_t i = 0; i < num_stripes_; i++) {
-          UnCommittedLockMapStripe* stripe = new UnCommittedLockMapStripe();
-          uncommitted_keys_.lock_map_stripes_.push_back(stripe);
-        }
+    // Init default num_stripes
+    num_stripes_ = (txn_db_options.num_stripes > 0) ? txn_db_options.num_stripes
+                                                    : DEFAULT_NUM_STRIPES;
 
-        committed_keys_.lock_map_stripes_.reserve(num_stripes_);
-        for (size_t i = 0; i < num_stripes_; i++) {
-          CommittedLockMapStripe* stripe = new CommittedLockMapStripe();
-          committed_keys_.lock_map_stripes_.push_back(stripe);
-        }
+    uncommitted_keys_.lock_map_stripes_.reserve(num_stripes_);
+    for (size_t i = 0; i < num_stripes_; i++) {
+      UnCommittedLockMapStripe* stripe = new UnCommittedLockMapStripe();
+      uncommitted_keys_.lock_map_stripes_.push_back(stripe);
+    }
 
-        keys_mutex_.reserve(num_stripes_);
-        for (size_t i = 0; i < num_stripes_; i++) {
-          std::mutex* key_mutex = new std::mutex();
-          keys_mutex_.push_back(key_mutex);
-        }
-      }
-				
+    committed_keys_.lock_map_stripes_.reserve(num_stripes_);
+    for (size_t i = 0; i < num_stripes_; i++) {
+      CommittedLockMapStripe* stripe = new CommittedLockMapStripe();
+      committed_keys_.lock_map_stripes_.push_back(stripe);
+    }
+
+    keys_mutex_.reserve(num_stripes_);
+    for (size_t i = 0; i < num_stripes_; i++) {
+      std::mutex* key_mutex = new std::mutex();
+      keys_mutex_.push_back(key_mutex);
+    }
+  }
+
   ~TOTransactionDBImpl() {
     // Clean resources
     clean_job_.StopThread();
@@ -120,11 +147,11 @@ class TOTransactionDBImpl : public TOTransactionDB {
                                 const TOTransactionOptions& txn_options) override;
 
   using ATN = TOTransactionImpl::ActiveTxnNode;
-  Status CommitTransaction(std::shared_ptr<ATN> core,
-                           const std::set<std::string>& written_keys);
+  Status CommitTransaction(const std::shared_ptr<ATN>& core,
+                           const std::set<TxnKey>& written_keys);
 
-  Status RollbackTransaction(std::shared_ptr<ATN> core,
-                             const std::set<std::string>& written_keys);
+  Status RollbackTransaction(const std::shared_ptr<ATN>& core,
+                             const std::set<TxnKey>& written_keys);
 
   Status SetTimeStamp(const TimeStampType& ts_type, const RocksTimeStamp& ts,
                       bool force) override;
@@ -133,17 +160,22 @@ class TOTransactionDBImpl : public TOTransactionDB {
 
   Status Stat(TOTransactionStat* stat) override;
 
-  Status CheckWriteConflict(ColumnFamilyHandle* column_family,
-                            const Slice& key, 
-							const TransactionID& txn_id,
-                            const RocksTimeStamp& readts); 
+  Status CheckWriteConflict(const TxnKey& key, const TransactionID& txn_id,
+                            const RocksTimeStamp& readts);
 
-  Status AddCommitQueue(const std::shared_ptr<ATN>& core,
-                        const RocksTimeStamp& ts);
+  Status PrepareTransaction(const std::shared_ptr<ATN>& core);
+
+  Status SetCommitTimeStamp(const std::shared_ptr<ATN>& core,
+                            const RocksTimeStamp& timesamp);
+
+  Status SetDurableTimeStamp(const std::shared_ptr<ATN>& core,
+                             const RocksTimeStamp& timesamp);
 
   Status AddReadQueue(const std::shared_ptr<ATN>& core,
-                      const RocksTimeStamp& ts,
-                      const uint32_t& round);
+                      const RocksTimeStamp& ts);
+
+  Status SetPrepareTimeStamp(const std::shared_ptr<ATN>& core,
+                             const RocksTimeStamp& timestamp);
 
   void AdvanceTS(RocksTimeStamp* maxToCleanTs);
  
@@ -151,8 +183,20 @@ class TOTransactionDBImpl : public TOTransactionDB {
 
   bool IsReadOnly() const { return read_only_; }
 
-  // Committed key, first commit txnid, second commit ts
-  typedef std::pair<TransactionID, RocksTimeStamp> KeyModifyHistory;
+  Status GetConsiderPrepare(const std::shared_ptr<ATN>& core,
+                            ReadOptions& options,
+                            ColumnFamilyHandle* column_family, const Slice& key,
+                            std::string* value);
+
+  Iterator* NewIteratorConsiderPrepare(const std::shared_ptr<ATN>& core,
+                                       ColumnFamilyHandle* column_family,
+                                       Iterator* db_iter);
+
+  // Committed key, first commit txnid, second prepare ts, third commit ts
+  // TODO: remove prepare ts from KeyModifyHistory
+  using KeyModifyHistory =
+      std::tuple<TransactionID, RocksTimeStamp, RocksTimeStamp>;
+  using TSTXN = std::pair<RocksTimeStamp, TransactionID>;
 
  protected:
   DBImpl* dbimpl_;
@@ -199,13 +243,17 @@ class TOTransactionDBImpl : public TOTransactionDB {
 
     void StopThread();
   };
- private:
 
-  using TSTXN = std::pair<RocksTimeStamp, TransactionID>;
+ private:
+  Status PublushTimeStamp(const std::shared_ptr<ATN>& active_txn);
+
   // Add txn to active txns
   Status AddToActiveTxns(const std::shared_ptr<ATN>& active_txn);
 
   void RemoveUncommittedKeysOnCleanup(const std::set<std::string>& written_keys);
+
+  Status TxnAssertAfterReads(const std::shared_ptr<ATN>& core, const char* op,
+                             const RocksTimeStamp& timestamp);
 
   // Active txns
   std::mutex active_txns_mutex_;
@@ -219,14 +267,16 @@ class TOTransactionDBImpl : public TOTransactionDB {
   port::RWMutex read_ts_mutex_;
   std::map<TSTXN, std::shared_ptr<ATN>> read_q_;
 
+  PrepareHeap prepare_heap_;
+
   struct UnCommittedLockMapStripe {
-    std::map<std::string, TransactionID>  uncommitted_keys_map_;
+    std::map<TxnKey, TransactionID> uncommitted_keys_map_;
   };
-  
-  size_t GetStripe(const std::string& key) const {
+
+  size_t GetStripe(const TxnKey& key) const {
     assert(num_stripes_ > 0);
     static murmur_hash hash;
-    size_t stripe = hash(key) % num_stripes_;
+    size_t stripe = hash(key.second) % num_stripes_;
     return stripe;
   }
   // Uncommitted keys
@@ -238,21 +288,20 @@ class TOTransactionDBImpl : public TOTransactionDB {
     void SetLogger(Logger* info_log) {
       info_log_ = info_log;
     }
-    Status RemoveKeyInLock(const Slice& key, const size_t& stripe_num,
+    Status RemoveKeyInLock(const TxnKey& key, const size_t& stripe_num,
                            std::atomic<int64_t>* mem_usage);
     // Check write conflict and add the key to uncommitted keys
-    Status CheckKeyAndAddInLock(const Slice& key, 
-                          const TransactionID& txn_id,
-                          const size_t& stripe_num,
-                          const size_t& max_mem_usage,
-                          std::atomic<int64_t>* mem_usage); 
+    Status CheckKeyAndAddInLock(const TxnKey& key, const TransactionID& txn_id,
+                                const size_t& stripe_num,
+                                const size_t& max_mem_usage,
+                                std::atomic<int64_t>* mem_usage);
 
     size_t CountInLock() const;
   };
 
   struct CommittedLockMapStripe {
     //std::mutex map_mutex_;
-    std::map<std::string, KeyModifyHistory> committed_keys_map_;
+    std::map<TxnKey, KeyModifyHistory> committed_keys_map_;
   };
 
   struct CommittedKeys {
@@ -263,23 +312,16 @@ class TOTransactionDBImpl : public TOTransactionDB {
       info_log_ = info_log;
     }
     // Add key to committed keys
-    Status AddKeyInLock(const Slice& key, 
-                  const TransactionID& commit_txn_id, 
-                  const RocksTimeStamp& commit_ts,
-                  const size_t& stripe_num,
-                  std::atomic<int64_t>* mem_usage);
-
-    // Remove key from committed keys
-    Status RemoveKeyInLock(const Slice& key, 
-                     const TransactionID& txn_id,
-                     const size_t& stripe_num,
-                     std::atomic<int64_t>* mem_usage);
+    Status AddKeyInLock(const TxnKey& key, const TransactionID& commit_txn_id,
+                        const RocksTimeStamp& prepare_ts,
+                        const RocksTimeStamp& commit_ts,
+                        const size_t& stripe_num,
+                        std::atomic<int64_t>* mem_usage);
 
     // Check write conflict
-    Status CheckKeyInLock(const Slice& key, 
-                    const TransactionID& txn_id,
-                    const RocksTimeStamp& timestamp,
-                    const size_t& stripe_num);
+    Status CheckKeyInLock(const TxnKey& key, const TransactionID& txn_id,
+                          const RocksTimeStamp& timestamp,
+                          const size_t& stripe_num);
 
     size_t CountInLock() const;
   };

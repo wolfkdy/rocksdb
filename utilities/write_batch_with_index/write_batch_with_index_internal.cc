@@ -151,6 +151,11 @@ int WriteBatchEntryComparator::CompareKey(uint32_t column_family,
   }
 }
 
+WriteBatchEntryComparator* WriteBatchWithIndexInternal::GetComparator(
+    WriteBatchWithIndex* batch) {
+  return &batch->rep->comparator;
+}
+
 WriteBatchWithIndexInternal::Result WriteBatchWithIndexInternal::GetFromBatch(
     const ImmutableDBOptions& immuable_db_options, WriteBatchWithIndex* batch,
     ColumnFamilyHandle* column_family, const Slice& key,

@@ -1170,6 +1170,8 @@ struct ReadOptions {
   // Default: 0 (don't filter by seqnum, return user keys)
   SequenceNumber iter_start_seqnum;
 
+  bool use_internal_key;
+
   uint64_t read_timestamp;
 
   ReadOptions();

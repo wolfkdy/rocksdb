@@ -108,6 +108,12 @@ std::string Status::ToString() const {
     case kTryAgain:
       type = "Operation failed. Try again.: ";
       break;
+    case kCompactionTooLarge:
+      type = "Operation failed. CompactionTooLarge: ";
+      break;
+    case kPrepareConflict:
+      type = "PrepareConflict: ";
+      break;
     default:
       snprintf(tmp, sizeof(tmp), "Unknown code(%d): ",
                static_cast<int>(code()));

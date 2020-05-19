@@ -9,6 +9,7 @@
 #include <string>
 #include <thread>
 
+#include "port/port.h"
 #include "rocksdb/db.h"
 #include "totransaction_db_impl.h"
 #include "totransaction_impl.h"
@@ -16,9 +17,9 @@
 #include "util/logging.h"
 #include "util/random.h"
 #include "util/string_util.h"
+#include "util/sync_point.h"
 #include "util/testharness.h"
 #include "util/transaction_test_util.h"
-#include "port/port.h"
 
 using std::string;
 
@@ -108,7 +109,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
   TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn);
 
-  s = txn->SetReadTimeStamp(50, 0);
+  s = txn->SetReadTimeStamp(50);
   ASSERT_OK(s);
 
   s = txn->Put(Slice("foo"), Slice("bar"));
@@ -143,7 +144,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
   s = txn_db->SetTimeStamp(kOldest, 10, false);
 
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  txn->SetReadTimeStamp(101, 0); 
+  txn->SetReadTimeStamp(101);
 
   txn->Get(read_options, "foo", &value);
   ASSERT_EQ(value, "bar");
@@ -171,9 +172,10 @@ TEST_F(TOTransactionTest, ValidateIO) {
   Slice val = iter->value();
 
   ASSERT_EQ(key.ToString(), "foo");
-  ASSERT_EQ(val, "bar2");
+  ASSERT_EQ(val, "bar2") << val.ToString();
 
   iter->Next();
+  ASSERT_TRUE(iter->Valid());
   key = iter->key();
   val = iter->value();
   ASSERT_EQ(key.ToString(), "key1");
@@ -204,7 +206,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
 
   // txn3 test write conflict
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  s = txn->SetReadTimeStamp(101, 0); 
+  s = txn->SetReadTimeStamp(101);
   ASSERT_OK(s);
 
   txn->Get(read_options, "foo", &value);
@@ -233,7 +235,7 @@ TEST_F(TOTransactionTest, ValidateIO) {
 
   // txn4 
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  s = txn->SetReadTimeStamp(106, 0);
+  s = txn->SetReadTimeStamp(106);
   ASSERT_OK(s);
 
   // No write conflict here
@@ -250,9 +252,9 @@ TEST_F(TOTransactionTest, ValidateIO) {
   txn = txn_db->BeginTransaction(write_options, txn_options);
   TOTransaction* txn2 = txn_db->BeginTransaction(write_options, txn_options);
 
-  s = txn2->SetReadTimeStamp(110, 0);
+  s = txn2->SetReadTimeStamp(110);
   ASSERT_OK(s);
-  s = txn->SetReadTimeStamp(110, 0);
+  s = txn->SetReadTimeStamp(110);
   ASSERT_OK(s);
 
   s = txn2->Get(read_options, "foo", &value);
@@ -308,7 +310,7 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
 
   ASSERT_TRUE(txn->GetID() < txn2->GetID());
 
-  s = txn->SetReadTimeStamp(50, 0);
+  s = txn->SetReadTimeStamp(50);
   ASSERT_OK(s);
 
   s = txn->Put(Slice("foo"), Slice("bar"));
@@ -340,9 +342,9 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
   s = txn_db->SetTimeStamp(kOldest, 10, false);
 
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  txn->SetReadTimeStamp(101, 0); 
+  txn->SetReadTimeStamp(101);
   txn2 = txn_db->BeginTransaction(write_options, txn_options);
-  txn2->SetReadTimeStamp(101, 0); 
+  txn2->SetReadTimeStamp(101);
 
   txn->Get(read_options, "foo", &value);
   ASSERT_EQ(value, "bar");
@@ -400,7 +402,7 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
   delete txn2;
   // txn3 test write conflict
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  s = txn->SetReadTimeStamp(101, 0); 
+  s = txn->SetReadTimeStamp(101);
   ASSERT_OK(s);
 
   txn->Get(read_options, "foo", &value);
@@ -421,7 +423,7 @@ TEST_F(TOTransactionTest, ValidateWriteConflict) {
 
   // txn4 
   txn = txn_db->BeginTransaction(write_options, txn_options);
-  s = txn->SetReadTimeStamp(106, 0);
+  s = txn->SetReadTimeStamp(106);
   ASSERT_OK(s);
 
   // No write conflict here
@@ -453,7 +455,7 @@ TEST_F(TOTransactionTest, ValidateIsolation) {
 
   ASSERT_TRUE(txn->GetID() < txn2->GetID());
 
-  s = txn->SetReadTimeStamp(50, 0);
+  s = txn->SetReadTimeStamp(50);
   ASSERT_OK(s);
 
   s = txn->Put(Slice("A"), Slice("A-A"));
@@ -481,10 +483,10 @@ TEST_F(TOTransactionTest, ValidateIsolation) {
   TOTransaction* txn4 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn4);
 
-  s = txn3->SetReadTimeStamp(60, 0);
+  s = txn3->SetReadTimeStamp(60);
   ASSERT_OK(s);
 
-  s = txn4->SetReadTimeStamp(110, 0);
+  s = txn4->SetReadTimeStamp(110);
   ASSERT_OK(s);
 
   s = txn3->Get(read_options, "A", &value);
@@ -526,10 +528,10 @@ TEST_F(TOTransactionTest, ValidateIsolation) {
   txn2 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn2);
 
-  s = txn->SetReadTimeStamp(110, 0);
+  s = txn->SetReadTimeStamp(110);
   ASSERT_OK(s);
 
-  s = txn2->SetReadTimeStamp(110, 0);
+  s = txn2->SetReadTimeStamp(110);
   ASSERT_OK(s);
 
   s = txn->Put(Slice("C"), Slice("C-C"));
@@ -624,14 +626,14 @@ TEST_F(TOTransactionTest, CommitTsCheck) {
 
   TOTransaction* txn2 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn2);
-  
-  s = txn->SetReadTimeStamp(100, 0);
+
+  s = txn->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn->SetCommitTimeStamp(120);
   ASSERT_OK(s);
 
-  s = txn2->SetReadTimeStamp(100, 0);
+  s = txn2->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn2->SetCommitTimeStamp(130);
@@ -677,20 +679,20 @@ TEST_F(TOTransactionTest, CommitTsCheck2) {
   
   TOTransaction* txn3 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn3);
-  
-  s = txn->SetReadTimeStamp(100, 0);
+
+  s = txn->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn->SetCommitTimeStamp(100);
   ASSERT_OK(s);
 
-  s = txn2->SetReadTimeStamp(100, 0);
+  s = txn2->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn2->SetCommitTimeStamp(120);
   ASSERT_OK(s);
-  
-  s = txn3->SetReadTimeStamp(100, 0);
+
+  s = txn3->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn3->SetCommitTimeStamp(130);
@@ -753,20 +755,20 @@ TEST_F(TOTransactionTest, CommitTsCheck3) {
   
   TOTransaction* txn3 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn3);
-  
-  s = txn->SetReadTimeStamp(100, 0);
+
+  s = txn->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn->SetCommitTimeStamp(100);
   ASSERT_OK(s);
 
-  s = txn2->SetReadTimeStamp(100, 0);
+  s = txn2->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn2->SetCommitTimeStamp(120);
   ASSERT_OK(s);
-  
-  s = txn3->SetReadTimeStamp(100, 0);
+
+  s = txn3->SetReadTimeStamp(100);
   ASSERT_OK(s);
   
   s = txn3->SetCommitTimeStamp(130);
@@ -837,7 +839,7 @@ TEST_F(TOTransactionTest, CommitTsCheck4) {
   TOTransaction* txn4 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn4);
 
-  s = txn->SetReadTimeStamp(all_committed_ts, 0); 
+  s = txn->SetReadTimeStamp(all_committed_ts);
   ASSERT_OK(s);
 
   s = txn2->SetCommitTimeStamp(5);
@@ -897,7 +899,7 @@ TEST_F(TOTransactionTest, Rollback) {
   TOTransaction* txn4 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn4);
 
-  s = txn->SetReadTimeStamp(all_committed_ts, 0); 
+  s = txn->SetReadTimeStamp(all_committed_ts);
   ASSERT_OK(s);
 
   s = txn->SetCommitTimeStamp(5);
@@ -970,22 +972,22 @@ TEST_F(TOTransactionTest, AdvanceTSAndCleanInLock) {
   TOTransaction* txn4 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn4);
 
-  s = txn->SetReadTimeStamp(0, 0); 
-  ASSERT_TRUE(s.IsInvalidArgument());
+  s = txn->SetReadTimeStamp(0);
+  ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
 
-  s = txn->SetReadTimeStamp(3, 0);
+  s = txn->SetReadTimeStamp(3);
   ASSERT_OK(s);
 
   s = txn->SetCommitTimeStamp(8);
   ASSERT_OK(s);
 
-  s = txn2->SetReadTimeStamp(5, 0);
+  s = txn2->SetReadTimeStamp(5);
   ASSERT_OK(s);  
 
   s = txn2->SetCommitTimeStamp(7);
   ASSERT_OK(s);
-  
-  s = txn3->SetReadTimeStamp(6, 0);
+
+  s = txn3->SetReadTimeStamp(6);
   ASSERT_OK(s);  
 
   s = txn3->SetCommitTimeStamp(9);
@@ -1110,7 +1112,7 @@ TEST_F(TOTransactionTest, MultiCommitTs) {
 
   TOTransaction* txn2 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn2 != nullptr);
-  txn2->SetReadTimeStamp(7, 0);
+  txn2->SetReadTimeStamp(7);
   ASSERT_OK(txn2->Get(read_options, "b", &value));
   ASSERT_EQ(value, "bb");
   ASSERT_OK(txn2->Get(read_options, "a", &value));
@@ -1119,7 +1121,7 @@ TEST_F(TOTransactionTest, MultiCommitTs) {
 
   TOTransaction* txn3 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn3 != nullptr);
-  txn3->SetReadTimeStamp(6, 0);
+  txn3->SetReadTimeStamp(6);
   ASSERT_OK(txn3->Get(read_options, "a", &value));
   ASSERT_EQ(value, "aa");
   ASSERT_FALSE(txn3->Get(read_options, "b", &value).ok());
@@ -1127,47 +1129,1083 @@ TEST_F(TOTransactionTest, MultiCommitTs) {
 
   TOTransaction* txn4 = txn_db->BeginTransaction(write_options, txn_options);
   ASSERT_TRUE(txn4 != nullptr);
-  txn4->SetReadTimeStamp(4, 0);
+  txn4->SetReadTimeStamp(4);
   ASSERT_FALSE(txn4->Get(read_options, "b", &value).ok());
   ASSERT_FALSE(txn4->Get(read_options, "a", &value).ok());
   delete txn4;
 }
 
+TEST_F(TOTransactionTest, PORT_WT_TEST_TIMESTAMP14_TEST_ALL_DURABLE) {
+  ReadOptions read_options;
+  WriteOptions write_options;
+  std::string value;
+  RocksTimeStamp all_committed_ts;
+
+  // Since this is a non-prepared transaction, we'll be using the commit
+  // timestamp when calculating all_durable since it's implied that they're
+  // the same thing.
+  auto txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(3));
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 3);
+
+  // We have a running transaction with a lower commit_timestamp than we've
+  // seen before. So all_durable should return (lowest commit timestamp - 1).
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(2));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 1);
+  ASSERT_OK(txn1->Commit());
+
+  // After committing, go back to the value we saw previously.
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 3);
+
+  // For prepared transactions, we take into account the durable timestamp
+  // when calculating all_durable.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetPrepareTimeStamp(6));
+  ASSERT_OK(txn1->Prepare());
+  ASSERT_OK(txn1->SetCommitTimeStamp(7));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 3);
+  ASSERT_OK(txn1->SetDurableTimeStamp(8));
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 8);
+
+  // All durable moves back when we have a running prepared transaction
+  // with a lower durable timestamp than has previously been committed.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetPrepareTimeStamp(3));
+  ASSERT_OK(txn1->Prepare());
+  // If we have a commit timestamp for a prepared transaction, then we
+  // don't want that to be visible in the all_durable calculation.
+  ASSERT_OK(txn1->SetCommitTimeStamp(4));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 8);
+
+  // Now take into account the durable timestamp.
+  ASSERT_OK(txn1->SetDurableTimeStamp(5));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 4);
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 8);
+
+  // Now test a scenario with multiple commit timestamps for a single txn.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(6));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 5);
+
+  // Make more changes and set a new commit timestamp.
+  // Our calculation should use the first commit timestamp so there should
+  // be no observable difference to the all_durable value.
+  ASSERT_OK(txn1->SetCommitTimeStamp(7));
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 5);
+
+  // Once committed, we go back to 8.
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 8);
+}
+
+TEST_F(TOTransactionTest, PORT_WT_TEST_TIMESTAMP14_TEST_ALL_DURABLE_OLD) {
+  ReadOptions read_options;
+  WriteOptions write_options;
+  std::string value;
+
+  // Scenario 0: No commit timestamp has ever been specified therefore
+  // There is no all_committed timestamp and we will get an error
+  // Querying for it.
+  auto txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->Commit());
+  RocksTimeStamp all_committed_ts;
+  ASSERT_TRUE(
+      txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts).IsNotFound());
+
+  // Scenario 1: A single transaction with a commit timestamp, will
+  // result in the all_durable timestamp being set.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(1));
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 1);
+
+  // Scenario 2: A transaction begins and specifies that it intends
+  // to commit at timestamp 2, a second transaction begins and commits
+  // at timestamp 3.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(2));
+
+  auto txn2 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn2->SetCommitTimeStamp(3));
+  ASSERT_OK(txn2->Commit());
+
+  // As the original transaction is still running the all_commit
+  // timestamp is being held at 1.
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 1);
+  ASSERT_OK(txn1->Commit());
+
+  // Now that the original transaction has finished the all_commit
+  // timestamp has moved to 3, skipping 2 as there is a commit with
+  // a greater timestamp already existing.
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 3);
+
+  // Senario 3: Commit with a commit timestamp of 5 and then begin a
+  // transaction intending to commit at 4, the all_commit timestamp
+  // should move back to 3. Until the transaction at 4 completes.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetCommitTimeStamp(5));
+  ASSERT_OK(txn1->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 5);
+
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  // All committed will now move back to 3 as it is the point at which
+  // all transactions up to that point have committed.
+  txn1->SetCommitTimeStamp(4);
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 3);
+  ASSERT_OK(txn1->Commit());
+
+  // Now that the transaction at timestamp 4 has completed the
+  // all committed timestamp is back at 5.
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 5);
+
+  // Scenario 4: Holding a transaction open without a commit timestamp
+  // Will not affect the all_durable timestamp.
+  txn1 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  txn2 = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn2->SetCommitTimeStamp(6));
+  ASSERT_OK(txn2->Commit());
+  ASSERT_OK(txn_db->QueryTimeStamp(kAllCommitted, &all_committed_ts));
+  ASSERT_EQ(all_committed_ts, 6);
+  ASSERT_OK(txn1->Commit());
+}
+
+TEST_F(TOTransactionTest, PrepareCommitPointRead) {
+  auto db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+  ReadOptions read_options;
+  WriteOptions write_options;
+  std::string value;
+  auto txnW = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnW->Put("abc", "abc"));
+  ASSERT_OK(txnW->Get(read_options, "abc", &value));
+  ASSERT_EQ(value, "abc");
+  ASSERT_OK(txnW->SetPrepareTimeStamp(100));
+  ASSERT_OK(txnW->Prepare());
+  // NOTE: Get/Put is not allowed after Prepare
+  ASSERT_NOK(txnW->Get(read_options, "abc", &value));
+  ASSERT_NOK(txnW->Put("abc", "abc"));
+
+  auto txn1 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  auto txn2 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  auto txn3 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetReadTimeStamp(99));
+  ASSERT_OK(txn2->SetReadTimeStamp(101));
+  ASSERT_OK(txn3->SetReadTimeStamp(103));
+  ASSERT_TRUE(txn1->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_TRUE(txn2->Get(read_options, "abc", &value).IsPrepareConflict());
+  ASSERT_TRUE(txn3->Get(read_options, "abc", &value).IsPrepareConflict());
+  ASSERT_NOK(txnW->SetCommitTimeStamp(99));
+  ASSERT_OK(txnW->SetCommitTimeStamp(102));
+  ASSERT_OK(txnW->Commit());
+  ASSERT_TRUE(txn1->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_TRUE(txn2->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_OK(txn3->Get(read_options, "abc", &value));
+  ASSERT_EQ(value, "abc");
+}
+
+TEST_F(TOTransactionTest, PrepareRollbackPointRead) {
+  auto db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+  ReadOptions read_options;
+  WriteOptions write_options;
+  std::string value;
+  auto txnW = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnW->Put("abc", "abc"));
+  ASSERT_OK(txnW->Get(read_options, "abc", &value));
+  ASSERT_EQ(value, "abc");
+  ASSERT_OK(txnW->SetPrepareTimeStamp(100));
+  ASSERT_OK(txnW->Prepare());
+  // NOTE: Get/Put is not allowed after Prepare
+  ASSERT_NOK(txnW->Get(read_options, "abc", &value));
+  ASSERT_NOK(txnW->Put("abc", "abc"));
+
+  auto txn1 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  auto txn2 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  auto txn3 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn1->SetReadTimeStamp(99));
+  ASSERT_OK(txn2->SetReadTimeStamp(101));
+  ASSERT_TRUE(txn1->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_TRUE(txn2->Get(read_options, "abc", &value).IsPrepareConflict());
+  ASSERT_TRUE(txn3->Get(read_options, "abc", &value).IsPrepareConflict());
+  ASSERT_NOK(txnW->SetCommitTimeStamp(99));
+  ASSERT_OK(txnW->SetCommitTimeStamp(102));
+  ASSERT_OK(txnW->Rollback());
+  ASSERT_TRUE(txn1->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_TRUE(txn2->Get(read_options, "abc", &value).IsNotFound());
+  ASSERT_TRUE(txn3->Get(read_options, "abc", &value).IsNotFound());
+}
+
+TEST_F(TOTransactionTest, PrepareIteratorSameKey) {
+  auto db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+  ReadOptions read_options;
+  WriteOptions write_options;
+  std::string value;
+  auto txnW = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnW->Put("abc", "abc"));
+  ASSERT_OK(txnW->SetCommitTimeStamp(100));
+  ASSERT_OK(txnW->Commit());
+
+  auto txnW1 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnW1->Put("abc", "def"));
+  ASSERT_OK(txnW1->SetPrepareTimeStamp(101));
+  ASSERT_OK(txnW1->Prepare());
+
+  auto txnR = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  txnR->SetReadTimeStamp(102);
+  auto iter = std::unique_ptr<Iterator>(txnR->GetIterator(read_options));
+  ASSERT_TRUE(iter != nullptr);
+  iter->Seek("");
+  ASSERT_TRUE(iter->status().IsPrepareConflict());
+
+  auto txnR1 = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  txnR1->SetReadTimeStamp(101);
+  auto iter1 = std::unique_ptr<Iterator>(txnR1->GetIterator(read_options));
+  ASSERT_TRUE(iter1 != nullptr);
+  iter1->Seek("");
+  ASSERT_TRUE(iter1->status().IsPrepareConflict());
+
+  ASSERT_OK(txnW1->SetCommitTimeStamp(102));
+  txnW1->Commit();
+
+  iter->Seek("");
+  ASSERT_OK(iter->status());
+  ASSERT_EQ(iter->key(), "abc");
+  ASSERT_EQ(iter->value(), "def");
+
+  iter1->Seek("");
+  ASSERT_OK(iter1->status());
+  ASSERT_EQ(iter1->key(), "abc");
+  ASSERT_EQ(iter1->value(), "abc");
+}
+
+TEST_F(TOTransactionTest, PORT_WT_TEST_PREPARE_05) {
+  WriteOptions write_options;
+  ReadOptions read_options;
+  read_options.read_timestamp = 50;
+  string value;
+  Status s;
+
+  ASSERT_OK(txn_db->SetTimeStamp(kOldest, 2));
+  auto txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_NOK(txn->SetPrepareTimeStamp(1));
+
+  // Check setting the prepare timestamp same as oldest timestamp is valid.
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn->SetPrepareTimeStamp(2));
+  ASSERT_OK(txn->Prepare());
+  ASSERT_OK(txn->SetCommitTimeStamp(3));
+  ASSERT_OK(txn->SetDurableTimeStamp(3));
+  ASSERT_OK(txn->Commit());
+
+  // In a single transaction it is illegal to set a commit timestamp
+  // before invoking prepare for this transaction.
+  // Note: Values are not important, setting commit timestamp before
+  // prepare itself is illegal.
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn->SetCommitTimeStamp(3));
+  ASSERT_NOK(txn->SetCommitTimeStamp(2));
+
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  auto txnR = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR->SetReadTimeStamp(4));
+  ASSERT_NOK(txn->SetPrepareTimeStamp(4));
+  ASSERT_OK(txn->SetPrepareTimeStamp(5));
+
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn->SetPrepareTimeStamp(5));
+  ASSERT_OK(txn->Prepare());
+  ASSERT_OK(txn->SetCommitTimeStamp(5));
+  ASSERT_OK(txn->SetDurableTimeStamp(5));
+  ASSERT_OK(txn->Commit());
+}
+
+TEST_F(TOTransactionTest, PORT_WT_TEST_PREPARE_06) {
+  WriteOptions write_options;
+  ReadOptions read_options;
+  string value;
+  Status s;
+
+  ASSERT_OK(txn_db->SetTimeStamp(kOldest, 20));
+  auto txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_NOK(txn->SetPrepareTimeStamp(10));
+
+  TOTransactionOptions new_txn_options;
+  new_txn_options.timestamp_round_read = false;
+  new_txn_options.timestamp_round_prepared = true;
+  // Check setting the prepare timestamp same as oldest timestamp is valid.
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, new_txn_options));
+  ASSERT_OK(txn->SetPrepareTimeStamp(10));
+  ASSERT_OK(txn->Prepare());
+  ASSERT_OK(txn->SetCommitTimeStamp(15));
+  ASSERT_OK(txn->SetDurableTimeStamp(35));
+  ASSERT_OK(txn->Commit());
+
+  // Check the cases with an active reader.
+  // Start a new reader to have an active read timestamp.
+  auto txnR = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR->SetReadTimeStamp(40));
+  txn = std::unique_ptr<TOTransaction>(
+      txn_db->BeginTransaction(write_options, txn_options));
+  // It is illegal to set the prepare timestamp as earlier than an active
+  // read timestamp even with roundup_timestamps settings.  This is only
+  // checked in diagnostic builds.
+  ASSERT_NOK(txn->SetPrepareTimeStamp(10));
+}
+
+TEST_F(TOTransactionTest, PORT_WT_TEST_PREPARE_CURSOR_01) {
+  WriteOptions write_options;
+  ReadOptions read_options;
+  string value;
+  Status s;
+  auto db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+
+  [&] {
+    auto tmp_txn = std::unique_ptr<TOTransaction>(
+        db_imp->BeginTransaction(write_options, txn_options));
+    ASSERT_OK(tmp_txn->Put(Slice("45"), Slice("45")));
+    ASSERT_OK(tmp_txn->Put(Slice("46"), Slice("46")));
+    ASSERT_OK(tmp_txn->Put(Slice("47"), Slice("47")));
+    ASSERT_OK(tmp_txn->Put(Slice("48"), Slice("48")));
+    ASSERT_OK(tmp_txn->Put(Slice("49"), Slice("49")));
+    ASSERT_OK(tmp_txn->Put(Slice("50"), Slice("50")));
+    ASSERT_OK(tmp_txn->Commit());
+  }();
+
+  auto txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  auto iter_prepare =
+      std::unique_ptr<Iterator>(txn_prepare->GetIterator(read_options));
+
+  // Scenario-1 : Check cursor navigate with insert in prepared transaction.
+  // Begin of Scenario-1.
+  // Data set at start has keys {2,3,4 ... 50}
+  // Insert key 51 to check next operation.
+  // Insert key 1 to check prev operation.
+  ASSERT_OK(txn_prepare->Put("51", "51"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(100));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  // Txn for timestamped reads before prepare timestamp.
+  auto txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(50));
+  auto iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  // Txn for timestamped reads between prepare timestamp and commit timestamp.
+  auto txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(150));
+  auto iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  // Txn for timestamped reads after commit timestamp.
+  auto txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(250));
+  auto iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Point all cursors to key 50.
+  iter_before_ts->Seek("50");
+  iter_between_ts->Seek("50");
+  iter_after_ts->Seek("50");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  iter_before_ts->Next();
+  ASSERT_FALSE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+
+  iter_between_ts->Next();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  iter_between_ts->Prev();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), Slice("50"));
+
+  iter_after_ts->Next();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(200));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(200));
+  ASSERT_OK(txn_prepare->Commit());
+
+  iter_after_ts->Next();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "51");
+
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // Insert key 44 to check prev operation
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Put("44", "44"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(100));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(50));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(150));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(250));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Point all cursors to key 45.
+  iter_before_ts->Seek("45");
+  iter_between_ts->Seek("45");
+  iter_after_ts->Seek("45");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // As read is before prepare timestamp, prev is not found.
+  iter_before_ts->Prev();
+  ASSERT_FALSE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+
+  // As read is between, prev will point to prepared update.
+  iter_between_ts->Prev();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // Check to see next works when a prev returns prepare conflict.
+  iter_between_ts->Next();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), Slice("45"));
+
+  // As read is after, prev will point to prepared update.
+  iter_after_ts->Prev();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(200));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(200));
+  ASSERT_OK(txn_prepare->Commit());
+
+  iter_after_ts->Prev();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "44");
+
+  // TODO: it may not meet mongodb's requirements
+  // here we advance oldest to clean prepare_map
+  ASSERT_OK(txn_db->SetTimeStamp(kOldest, 201));
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+  // End of Scenario-1.
+
+  // sleep(1) to ensure purged
+  sleep(1);
+  // Scenario-2 : Check cursor navigate with update in prepared transaction.
+  // Begin of Scenario-2.
+  // Data set at start has keys {44, 45, 46, 47, 48, 49, 50, 51}
+  // Update key 51 to check next operation.
+  // Update key 44 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Put("51", "151"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(300));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(250));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(350));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(450));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Point all cursors to key 51.
+  iter_before_ts->Seek("50");
+  iter_between_ts->Seek("50");
+  iter_after_ts->Seek("50");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  iter_before_ts->Next();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  // As read is before prepare timestamp, next is found with previous value.
+  ASSERT_EQ(iter_before_ts->key(), "51");
+  ASSERT_EQ(iter_before_ts->value(), "51");
+
+  // As read is between, next will point to prepared update.
+  iter_between_ts->Next();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, next will point to prepared update.
+  iter_after_ts->Next();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(400));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(400));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("51");
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "51");
+  ASSERT_EQ(iter_before_ts->value(), "51");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Next();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "51");
+  ASSERT_EQ(iter_between_ts->value(), "51");
+
+  // As read is after, next will point to new key 51.
+  iter_after_ts->Next();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "51");
+  ASSERT_EQ(iter_after_ts->value(), "151");
+
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // Update key 44 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Put("44", "444"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(300));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(250));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(350));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(450));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Check the visibility of new update of prepared transaction.
+  // Point all cursors to key 45.
+  iter_before_ts->Seek("45");
+  iter_between_ts->Seek("45");
+  iter_after_ts->Seek("45");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // As read is before prepare timestamp, prev is not found.
+  iter_before_ts->Prev();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "44");
+  ASSERT_EQ(iter_before_ts->value(), "44");
+
+  // As read is between, prev will point to prepared update.
+  iter_between_ts->Prev();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, prev will point to prepared update.
+  iter_after_ts->Prev();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(400));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(400));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("44");
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_EQ(iter_before_ts->key(), "44");
+  ASSERT_EQ(iter_before_ts->value(), "44");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Prev();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "44");
+  ASSERT_EQ(iter_between_ts->value(), "44");
+
+  // As read is after, next will point to new key 44.
+  iter_after_ts->Prev();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "44");
+  ASSERT_EQ(iter_after_ts->value(), "444");
+
+  // End of Scenario-2.
+  // TODO: it may not meet mongodb's requirements
+  // here we advance oldest to clean prepare_map
+  ASSERT_OK(txn_db->SetTimeStamp(kOldest, 401));
+
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // sleep(1) to ensure purged
+  sleep(1);
+  // Scenario-3 : Check cursor navigate with remove in prepared transaction.
+  // Begin of Scenario-3.
+  // Data set at start has keys {44, 45, 46, 47, 48, 49, 50, 51}
+  // Remove key 51 to check next operation.
+  // Remove key 44 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Delete("51"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(500));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(450));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(550));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(650));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Point all cursors to key 51.
+  iter_before_ts->Seek("50");
+  iter_between_ts->Seek("50");
+  iter_after_ts->Seek("50");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  iter_before_ts->Next();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  // As read is before prepare timestamp, next is found with previous value.
+  ASSERT_EQ(iter_before_ts->key(), "51");
+  ASSERT_EQ(iter_before_ts->value(), "151");
+
+  // As read is between, next will point to prepared update.
+  iter_between_ts->Next();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, next will point to prepared update.
+  iter_after_ts->Next();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(600));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(600));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("51");
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "51");
+  ASSERT_EQ(iter_before_ts->value(), "151");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Next();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "51");
+  ASSERT_EQ(iter_between_ts->value(), "151");
+
+  // As read is after, next will not be found.
+  iter_after_ts->Next();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_FALSE(iter_after_ts->Valid());
+
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // remove key 44 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Delete("44"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(500));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(450));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(550));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(650));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Check the visibility of new update of prepared transaction.
+  // Point all cursors to key 45.
+  iter_before_ts->Seek("45");
+  iter_between_ts->Seek("45");
+  iter_after_ts->Seek("45");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // As read is before prepare timestamp, prev is not found.
+  iter_before_ts->Prev();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "44");
+  ASSERT_EQ(iter_before_ts->value(), "444");
+
+  // As read is between, prev will point to prepared update.
+  iter_between_ts->Prev();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, prev will point to prepared update.
+  iter_after_ts->Prev();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(600));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(600));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("44");
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_EQ(iter_before_ts->key(), "44");
+  ASSERT_EQ(iter_before_ts->value(), "444");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Prev();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "44");
+  ASSERT_EQ(iter_between_ts->value(), "444");
+
+  // As read is after, next will point to new key 44.
+  iter_after_ts->Prev();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_FALSE(iter_after_ts->Valid());
+
+  // End of Scenario-3.
+  // TODO: it may not meet mongodb's requirements
+  // here we advance oldest to clean prepare_map
+  ASSERT_OK(txn_db->SetTimeStamp(kOldest, 601));
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // Scenario-4 : Check cursor navigate with remove in prepared transaction.
+  // remove keys not in the ends.
+  // Begin of Scenario-4.
+  // Data set at start has keys {45,46,47,48,49,50}
+  // Remove key 49 to check next operation.
+  // Remove key 46 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Delete("49"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(700));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(650));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(750));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(850));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Point all cursors to key 48.
+  iter_before_ts->Seek("48");
+  iter_between_ts->Seek("48");
+  iter_after_ts->Seek("48");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  iter_before_ts->Next();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  // As read is before prepare timestamp, next is found with 49.
+  ASSERT_EQ(iter_before_ts->key(), "49");
+
+  // As read is between, next will point to prepared update.
+  iter_between_ts->Next();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, next will point to prepared update.
+  iter_after_ts->Next();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(800));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(800));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("49");
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "49");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Next();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "49");
+
+  // As read is after, next will point beyond end.
+  iter_after_ts->Next();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "50");
+
+  ASSERT_OK(txnR_before_ts->Commit());
+  ASSERT_OK(txnR_between_ts->Commit());
+  ASSERT_OK(txnR_after_ts->Commit());
+
+  // remove key 46 to check prev operation.
+  txn_prepare = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txn_prepare->Delete("46"));
+  ASSERT_OK(txn_prepare->SetPrepareTimeStamp(700));
+  ASSERT_OK(txn_prepare->Prepare());
+
+  txnR_before_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_before_ts->SetReadTimeStamp(650));
+  iter_before_ts =
+      std::unique_ptr<Iterator>(txnR_before_ts->GetIterator(read_options));
+
+  txnR_between_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_between_ts->SetReadTimeStamp(750));
+  iter_between_ts =
+      std::unique_ptr<Iterator>(txnR_between_ts->GetIterator(read_options));
+
+  txnR_after_ts = std::unique_ptr<TOTransaction>(
+      db_imp->BeginTransaction(write_options, txn_options));
+  ASSERT_OK(txnR_after_ts->SetReadTimeStamp(850));
+  iter_after_ts =
+      std::unique_ptr<Iterator>(txnR_after_ts->GetIterator(read_options));
+
+  // Check the visibility of new update of prepared transaction.
+  // Point all cursors to key 45.
+  iter_before_ts->Seek("47");
+  iter_between_ts->Seek("47");
+  iter_after_ts->Seek("47");
+
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // As read is before prepare timestamp, prev is not found.
+  iter_before_ts->Prev();
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_EQ(iter_before_ts->key(), "46");
+
+  // As read is between, prev will point to prepared update.
+  iter_between_ts->Prev();
+  ASSERT_TRUE(iter_between_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_between_ts->Valid());
+
+  // As read is after, prev will point to prepared update.
+  iter_after_ts->Prev();
+  ASSERT_TRUE(iter_after_ts->status().IsPrepareConflict());
+  ASSERT_TRUE(iter_after_ts->Valid());
+
+  // Commit the prepared transaction.
+  ASSERT_OK(txn_prepare->SetCommitTimeStamp(800));
+  ASSERT_OK(txn_prepare->SetDurableTimeStamp(800));
+  ASSERT_OK(txn_prepare->Commit());
+
+  // Check to see before cursor still gets the old value.
+  iter_before_ts->Seek("46");
+  ASSERT_OK(iter_before_ts->status());
+  ASSERT_TRUE(iter_before_ts->Valid());
+  ASSERT_EQ(iter_before_ts->key(), "46");
+
+  // As read is between(i.e before commit), next is not found.
+  iter_between_ts->Prev();
+  ASSERT_OK(iter_between_ts->status());
+  ASSERT_TRUE(iter_between_ts->Valid());
+  ASSERT_EQ(iter_between_ts->key(), "46");
+
+  // As read is after, next will point to new key 45.
+  iter_after_ts->Prev();
+  ASSERT_OK(iter_after_ts->status());
+  ASSERT_TRUE(iter_after_ts->Valid());
+  ASSERT_EQ(iter_after_ts->key(), "45");
+}
+
 TEST_F(TOTransactionTest, MemUsage) {
   auto db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
-  db_imp->SetMaxConflictBytes(25);
+  db_imp->SetMaxConflictBytes(33);
   WriteOptions write_options;
   ReadOptions read_options;
   TOTransactionStat stat;
 
   TOTransaction* txn = db_imp->BeginTransaction(write_options, txn_options);
-  // 11
+  // key(3) + cfid(4) +  txnid(8) = 15
   ASSERT_OK(txn->Put("abc", "abc"));
   memset(&stat, 0, sizeof stat);
   db_imp->Stat(&stat);
   ASSERT_EQ(stat.uk_num, 1);
-  ASSERT_EQ(stat.cur_conflict_bytes, 11);
-  // 11+12=23
+  ASSERT_EQ(stat.cur_conflict_bytes, 15);
+  // 15+16=31
   ASSERT_OK(txn->Put("defg", "defg"));
   memset(&stat, 0, sizeof stat);
   db_imp->Stat(&stat);
   ASSERT_EQ(stat.uk_num, 2);
-  ASSERT_EQ(stat.cur_conflict_bytes, 23);
+  ASSERT_EQ(stat.cur_conflict_bytes, 31);
   auto s = txn->Put("h", "h");
   ASSERT_FALSE(s.ok());
   db_imp->SetMaxConflictBytes(50);
-  // 23+9=32
+  // 31+13=44
   ASSERT_OK(txn->Put("h", "h"));
   memset(&stat, 0, sizeof stat);
   db_imp->Stat(&stat);
   ASSERT_EQ(stat.uk_num, 3);
-  ASSERT_EQ(stat.cur_conflict_bytes, 32);
+  ASSERT_EQ(stat.cur_conflict_bytes, 44);
   ASSERT_OK(txn->Commit());
   memset(&stat, 0, sizeof stat);
   db_imp->Stat(&stat);
   ASSERT_EQ(stat.uk_num, 0);
   ASSERT_EQ(stat.ck_num, 3);
-  ASSERT_EQ(stat.cur_conflict_bytes, 3+16+4+16+1+16);
+  ASSERT_EQ(stat.cur_conflict_bytes, 3 + 28 + 4 + 28 + 1 + 28);
   delete txn;
 }
 

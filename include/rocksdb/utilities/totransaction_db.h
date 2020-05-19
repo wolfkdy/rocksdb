@@ -58,13 +58,20 @@ enum TimeStampType {
 //TimeStamp Ordering Transaction Options
 struct TOTransactionOptions {
   size_t max_write_batch_size = 1000;
-};
+  // Whether or not to round up to the oldest timestamp when the read timestamp
+  // is behind it.
+  bool timestamp_round_read = false;
+  // If true, The prepare timestamp will be rounded up to the oldest timestamp
+  // if found to be
+  // and the commit timestamp will be rounded up to the prepare timestamp if
+  // found to be earlier
+  // If false, Does not round up prepare and commit timestamp of a prepared
+  // transaction.
+  bool timestamp_round_prepared = false;
 
-//TimeStamp Ordering Transaction Options
-struct TOTxnOptions {
-  size_t max_write_batch_size = 1000;
-  const Snapshot* txn_snapshot = nullptr;
-  Logger* log_ = nullptr;
+  bool read_only = false;
+
+  bool ignore_prepare = false;
 };
 
 class TOTransactionDB : public StackableDB {
@@ -86,7 +93,7 @@ class TOTransactionDB : public StackableDB {
       const TOTransactionOptions& txn_options) = 0;
 
   virtual Status SetTimeStamp(const TimeStampType& ts_type,
-                              const RocksTimeStamp& ts, bool force) = 0;
+                              const RocksTimeStamp& ts, bool force = false) = 0;
 
   virtual Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) = 0;
 

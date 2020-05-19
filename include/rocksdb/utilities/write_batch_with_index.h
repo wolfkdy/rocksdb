@@ -166,6 +166,9 @@ class WriteBatchWithIndex : public WriteBatchBase {
   // default column family
   Iterator* NewIteratorWithBase(Iterator* base_iterator);
 
+  Iterator* NewIteratorWithBase(ColumnFamilyHandle* column_family,
+                                Iterator* base_iterator, bool use_internal_key);
+
   // Similar to DB::Get() but will only read the key from this batch.
   // If the batch does not have enough data to resolve Merge operations,
   // MergeInProgress status may be returned.
@@ -237,6 +240,7 @@ class WriteBatchWithIndex : public WriteBatchBase {
   friend class PessimisticTransactionDB;
   friend class WritePreparedTxn;
   friend class WriteUnpreparedTxn;
+  friend class WriteBatchWithIndexInternal;
   friend class WriteBatchWithIndex_SubBatchCnt_Test;
   // Returns the number of sub-batches inside the write batch. A sub-batch
   // starts right before inserting a key that is a duplicate of a key in the

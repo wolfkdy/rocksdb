@@ -220,6 +220,7 @@ LIB_SOURCES =                                                   \
   utilities/transactions/write_unprepared_txn_db.cc             \
   utilities/transactions/totransaction_db_impl.cc               \
   utilities/transactions/totransaction_impl.cc                  \
+  utilities/transactions/totransaction_prepare_iterator.cc      \
   utilities/ttl/db_ttl_impl.cc                                  \
   utilities/write_batch_with_index/write_batch_with_index.cc    \
   utilities/write_batch_with_index/write_batch_with_index_internal.cc    \

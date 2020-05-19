@@ -25,12 +25,21 @@ using RocksTimeStamp = uint64_t;
 class TOTransaction {
  public:
   virtual ~TOTransaction() {}
-  //set commit timestamp for transaction, if the application set the commit timestamp twice, an error will be returned
+
+  // set prepare timestamp for transaction, if the application set the prepare
+  // timestamp twice, an error will be returned
+  virtual Status SetPrepareTimeStamp(const RocksTimeStamp& timestamp) = 0;
+
   virtual Status SetCommitTimeStamp(const RocksTimeStamp& timestamp) = 0;
+
+  virtual Status SetDurableTimeStamp(const RocksTimeStamp& timestamp) = 0;
+
   //set read timestamp for transaction, if the application set the commit timestamp twice, an error will be returned
-  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) = 0;
+  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp) = 0;
 
   virtual Status GetReadTimeStamp(RocksTimeStamp* timestamp) const = 0;
+
+  virtual Status Prepare() = 0;
 
   virtual Status Commit() = 0;
 
@@ -70,24 +79,13 @@ class TOTransaction {
       kRollback = 3,
   };
 
-  TOTransactionState GetState() const { return txn_state_; }
+  virtual TOTransactionState GetState() const = 0;
 
-  void SetState(TOTransactionState state) { txn_state_ = state; }
-  
  protected:
   explicit TOTransaction(const DB* /*db*/) {}
-  TOTransaction() : txn_state_(kStarted)  {}
-  
+  TOTransaction() {}
+
   TransactionName name_;
-
-  std::atomic<TOTransactionState> txn_state_;
-
-  uint64_t id_ = 0;
-  virtual void SetId(uint64_t id) {
-    assert(id_ == 0);
-    id_ = id;
-  }
-
 };
 
 }  // namespace rocksdb

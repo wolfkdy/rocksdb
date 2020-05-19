@@ -35,76 +35,112 @@ TOTransactionImpl::TOTransactionImpl(TOTransactionDB* txn_db,
       db_(txn_db->GetRootDB()), 
       write_options_(write_options),
       txn_option_(txn_option),
-      cmp_(GetColumnFamilyUserComparator(db_->DefaultColumnFamily())),
-      write_batch_(cmp_, 0, true, 0),
       core_(core) {
       txn_db_impl_ = static_cast_with_check<TOTransactionDBImpl, TOTransactionDB>(txn_db);
       assert(txn_db_impl_);
       db_impl_ = static_cast_with_check<DBImpl, DB>(txn_db->GetRootDB());
-      Initialize();
-}
-
-void TOTransactionImpl::Initialize() {
-  txn_id_ = GenTxnID();
-
-  txn_state_ = kStarted;
 }
 
 TOTransactionImpl::~TOTransactionImpl() {
   // Do rollback if this transaction is not committed or rolled back
-  if (txn_state_ < kCommitted) {
+  if (core_->state_ < kCommitted) {
     Rollback();
   }
 }
 
-Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp,
-                                           const uint32_t& round) {
-  if (txn_state_ >= kCommitted) {
+Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp) {
+  if (core_->state_ >= kCommitted) {
     return Status::NotSupported("this txn is committed or rollback");
   } 
   
   if (core_->read_ts_set_) {
     return Status::NotSupported("set read ts is supposed to be set only once");
   }
-  
-  ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) set read ts(%llu) force(%d)\n",
-                                                                txn_id_, timestamp, round);
 
-  Status s = txn_db_impl_->AddReadQueue(core_, timestamp, round);
+  ROCKS_LOG_DEBUG(txn_option_.log_,
+                  "TOTDB txn id(%llu) set read ts(%llu) force(%d)", txn_id_,
+                  timestamp, core_->timestamp_round_read_);
+
+  Status s = txn_db_impl_->AddReadQueue(core_, timestamp);
   if (!s.ok()) {
     return s;
   }
   assert(core_->read_ts_set_);
   assert(core_->read_ts_ >= timestamp);
- 
+
   // If we already have a snapshot, it may be too early to match
   // the timestamp (including the one we just read, if rounding
   // to oldest).  Get a new one.
-  assert(txn_option_.txn_snapshot != nullptr);
-  txn_db_impl_->ReleaseSnapshot(txn_option_.txn_snapshot);
-  txn_option_.txn_snapshot = txn_db_impl_->GetSnapshot();
-  core_->txn_snapshot = txn_option_.txn_snapshot;
+  assert(core_->txn_snapshot != nullptr);
+  txn_db_impl_->ReleaseSnapshot(core_->txn_snapshot);
+  core_->txn_snapshot = txn_db_impl_->GetSnapshot();
   return s;
 }
 
+Status TOTransactionImpl::SetPrepareTimeStamp(const RocksTimeStamp& timestamp) {
+  if (core_->state_ != kStarted) {
+    return Status::NotSupported(
+        "this txn is prepared or committed or rollback");
+  }
+
+  if (core_->prepare_ts_set_) {
+    return Status::NotSupported("prepare ts is already set");
+  }
+
+  if (core_->commit_ts_set_) {
+    return Status::NotSupported(
+        "should not have been set before the prepare timestamp");
+  }
+  return txn_db_impl_->SetPrepareTimeStamp(core_, timestamp);
+}
+
+Status TOTransactionImpl::Prepare() {
+  if (core_->state_ != kStarted) {
+    return Status::NotSupported(
+        "this txn is prepared or committed or rollback");
+  }
+
+  if (!core_->prepare_ts_set_) {
+    return Status::NotSupported("prepare ts not set when prepare");
+  }
+
+  if (core_->commit_ts_set_) {
+    return Status::NotSupported(
+        "commit ts should not have been set when prepare");
+  }
+
+  return txn_db_impl_->PrepareTransaction(core_);
+}
+
 Status TOTransactionImpl::SetCommitTimeStamp(const RocksTimeStamp& timestamp) {
-  if (txn_state_ >= kCommitted) {
+  if (core_->state_ >= kCommitted) {
     return Status::NotSupported("this txn is committed or rollback");
   }
-
-  if (timestamp == 0) {
-    return Status::NotSupported("not allowed to set committs to 0");
-  }
-
-  // publish commit_ts to global view
-  auto s = txn_db_impl_->AddCommitQueue(core_, timestamp);
+  auto s = txn_db_impl_->SetCommitTimeStamp(core_, timestamp);
   if (!s.ok()) {
     return s;
   }
-  assert(core_->commit_ts_set_ && (core_->first_commit_ts_ <= core_->commit_ts_));
+  assert(core_->commit_ts_set_ &&
+         (core_->first_commit_ts_ <= core_->commit_ts_));
 
-  ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) set commit ts(%llu)\n", 
-                                                                core_->txn_id_, timestamp);
+  ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) set commit ts(%llu)",
+                  core_->txn_id_, timestamp);
+  return Status::OK();
+}
+
+Status TOTransactionImpl::SetDurableTimeStamp(const RocksTimeStamp& timestamp) {
+  if (core_->state_ >= kCommitted) {
+    return Status::NotSupported("this txn is committed or rollback");
+  }
+
+  auto s = txn_db_impl_->SetDurableTimeStamp(core_, timestamp);
+  if (!s.ok()) {
+    return s;
+  }
+  assert(core_->durable_ts_set_);
+
+  ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) set durable ts(%llu)",
+                  core_->txn_id_, timestamp);
   return Status::OK();
 }
 
@@ -119,7 +155,11 @@ Status TOTransactionImpl::GetReadTimeStamp(RocksTimeStamp* timestamp) const {
 }
 
 WriteBatchWithIndex* TOTransactionImpl::GetWriteBatch() {
-  return &write_batch_;
+  return &(core_->write_batch_);
+}
+
+const TOTransactionImpl::ActiveTxnNode* TOTransactionImpl::GetCore() const {
+  return core_.get();
 }
 
 Status TOTransactionImpl::Put(ColumnFamilyHandle* column_family, const Slice& key,
@@ -127,14 +167,22 @@ Status TOTransactionImpl::Put(ColumnFamilyHandle* column_family, const Slice& ke
   if (txn_db_impl_->IsReadOnly()) {
     return Status::NotSupported("readonly db cannot accept put");
   }
-  if (txn_state_ >= kCommitted) {
-    return Status::NotSupported("this txn is already committed or rollback");
-  } 
-  
-  Status s = CheckWriteConflict(column_family, key);
-  
+  if (core_->state_ >= kPrepared) {
+    return Status::NotSupported("txn is already prepared, committed rollback");
+  }
+  if (core_->read_only_) {
+    if (core_->ignore_prepare_) {
+      return Status::NotSupported(
+          "Transactions with ignore_prepare=true cannot perform updates");
+    }
+    return Status::NotSupported("Attempt to update in a read-only transaction");
+  }
+
+  const TxnKey txn_key(column_family->GetID(), key.ToString());
+  Status s = CheckWriteConflict(txn_key);
+
   if (s.ok()) {
-    writtenKeys_.insert(key.ToString());
+    written_keys_.emplace(std::move(txn_key));
     GetWriteBatch()->Put(column_family, key, value);
     write_options_.asif_commit_timestamps.emplace_back(core_->commit_ts_);
   }
@@ -148,15 +196,22 @@ Status TOTransactionImpl::Put(const Slice& key, const Slice& value) {
 Status TOTransactionImpl::Get(ReadOptions& options,
            ColumnFamilyHandle* column_family, const Slice& key,
            std::string* value) {
-  if (txn_state_ >= kCommitted) {
-    return Status::NotSupported("this txn is already committed or rollback");
+  if (core_->state_ >= kPrepared) {
+    return Status::NotSupported("txn is already prepared, committed rollback");
   } 
   // Check the options, if read ts is set use read ts
   options.read_timestamp = core_->read_ts_;
-  options.snapshot = txn_option_.txn_snapshot;
-    
-  return write_batch_.GetFromBatchAndDB(db_, options, column_family, key,
-                                        value);
+  assert(core_->txn_snapshot);
+  options.snapshot = core_->txn_snapshot;
+
+  const TxnKey txn_key(column_family->GetID(), key.ToString());
+  if (written_keys_.find(txn_key) != written_keys_.end()) {
+    return GetWriteBatch()->GetFromBatchAndDB(db_, options, column_family, key,
+                                              value);
+  }
+
+  return txn_db_impl_->GetConsiderPrepare(core_, options, column_family, key,
+                                          value);
 }
 
 Status TOTransactionImpl::Get(ReadOptions& options, const Slice& key,
@@ -168,13 +223,22 @@ Status TOTransactionImpl::Delete(ColumnFamilyHandle* column_family, const Slice&
   if (txn_db_impl_->IsReadOnly()) {
     return Status::NotSupported("readonly db cannot accept del");
   }
-  if (txn_state_ >= kCommitted) {
-    return Status::NotSupported("this txn is already committed or rollback");
-  } 
-  Status s = CheckWriteConflict(column_family, key);
+  if (core_->state_ >= kPrepared) {
+    return Status::NotSupported("txn is already prepared, committed rollback");
+  }
+  if (core_->read_only_) {
+    if (core_->ignore_prepare_) {
+      return Status::NotSupported(
+          "Transactions with ignore_prepare=true cannot perform updates");
+    }
+    return Status::NotSupported("Attempt to update in a read-only transaction");
+  }
+
+  const TxnKey txn_key(column_family->GetID(), key.ToString());
+  Status s = CheckWriteConflict(txn_key);
 
   if (s.ok()) {
-    writtenKeys_.insert(key.ToString());
+    written_keys_.emplace(std::move(txn_key));
     GetWriteBatch()->Delete(column_family, key);
     write_options_.asif_commit_timestamps.emplace_back(core_->commit_ts_);
   }
@@ -191,29 +255,30 @@ Iterator* TOTransactionImpl::GetIterator(ReadOptions& read_options) {
 
 Iterator* TOTransactionImpl::GetIterator(ReadOptions& read_options,
                       ColumnFamilyHandle* column_family) {
-  if (txn_state_ >= kCommitted) {
+  if (core_->state_ >= kPrepared) {
     return nullptr;
-  } 
-  
+  }
+
   read_options.read_timestamp = core_->read_ts_;
 
-  read_options.snapshot = txn_option_.txn_snapshot;
-  
+  assert(core_->txn_snapshot);
+  read_options.snapshot = core_->txn_snapshot;
+  read_options.use_internal_key = true;
   Iterator* db_iter = db_->NewIterator(read_options, column_family);
   if (db_iter == nullptr) {
     return nullptr;
   }
 
-  return write_batch_.NewIteratorWithBase(column_family, db_iter);
+  return txn_db_impl_->NewIteratorConsiderPrepare(core_, column_family,
+                                                  db_iter);
 }
 
-Status TOTransactionImpl::CheckWriteConflict(ColumnFamilyHandle* column_family, 
-                                             const Slice& key) {
-  return txn_db_impl_->CheckWriteConflict(column_family, key, GetID(), core_->read_ts_);
+Status TOTransactionImpl::CheckWriteConflict(const TxnKey& key) {
+  return txn_db_impl_->CheckWriteConflict(key, GetID(), core_->read_ts_);
 }
 
 Status TOTransactionImpl::Commit() {
-  if (txn_state_ >= kCommitted) {
+  if (core_->state_ >= kCommitted) {
     return Status::InvalidArgument("txn already committed or rollback.");
   }
   
@@ -235,12 +300,11 @@ Status TOTransactionImpl::Commit() {
     s = db_->Write(write_options_, GetWriteBatch()->GetWriteBatch());
   }
   if (s.ok()) {
-    txn_state_.store(kCommitted);
     // Change active txn set,
     // Move uncommitted keys to committed keys,
     // Clean data when the committed txn is activeTxnSet's header
     // TODO(xxxxxxxx): in fact, here we must not fail
-    s = txn_db_impl_->CommitTransaction(core_, writtenKeys_);
+    s = txn_db_impl_->CommitTransaction(core_, written_keys_);
   } else {
     s = Status::InvalidArgument("Transaction is fail for commit.");
   }
@@ -250,17 +314,15 @@ Status TOTransactionImpl::Commit() {
 }
 
 Status TOTransactionImpl::Rollback() {
-  if (txn_state_ >= kCommitted) {
+  if (core_->state_ >= kCommitted) {
     return Status::InvalidArgument("txn is already committed or rollback.");
   }
-  
-  GetWriteBatch()->Clear();
-  
-  txn_state_.store(kRollback);
 
   // Change active txn set,
   // Clean uncommitted keys
-  Status s = txn_db_impl_->RollbackTransaction(core_, writtenKeys_);
+  Status s = txn_db_impl_->RollbackTransaction(core_, written_keys_);
+
+  GetWriteBatch()->Clear();
 
   ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) rollback \n", txn_id_);
   return s;
@@ -271,6 +333,15 @@ Status TOTransactionImpl::SetName(const TransactionName& name) {
   return Status::OK();
 }
 
+TransactionID TOTransactionImpl::GetID() const {
+  assert(core_);
+  return core_->txn_id_;
+}
+
+TOTransaction::TOTransactionState TOTransactionImpl::GetState() const {
+  assert(core_);
+  return core_->state_;
+}
 }
 
 #endif

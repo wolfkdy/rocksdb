@@ -140,11 +140,13 @@ class DBIter final: public Iterator {
         cfd_(cfd),
         allow_blob_(allow_blob),
         is_blob_(false),
-        start_seqnum_(read_options.iter_start_seqnum)
+        start_seqnum_(read_options.iter_start_seqnum),
+        use_internal_key_(read_options.use_internal_key)
 #ifdef USE_TIMESTAMPS
-        ,read_timestamp_(read_options.read_timestamp)
+        ,
+        read_timestamp_(read_options.read_timestamp)
 #endif  // TIMESTAMPS
- {
+  {
     RecordTick(statistics_, NO_ITERATOR_CREATED);
     prefix_extractor_ = mutable_cf_options.prefix_extractor.get();
     max_skip_ = max_sequential_skip_in_iterations;
@@ -182,7 +184,7 @@ class DBIter final: public Iterator {
   virtual bool Valid() const override { return valid_; }
   virtual Slice key() const override {
     assert(valid_);
-    if(start_seqnum_ > 0) {
+    if (start_seqnum_ > 0 || use_internal_key_) {
       return saved_key_.GetInternalKey();
     } else {
       return saved_key_.GetUserKey();
@@ -361,6 +363,8 @@ class DBIter final: public Iterator {
   // if this value > 0 iterator will return internal keys
   SequenceNumber start_seqnum_;
 
+  bool use_internal_key_;
+
 #ifdef USE_TIMESTAMPS
   uint64_t read_timestamp_;
 #endif  // USE_TIMESTAMPS
@@ -533,9 +537,13 @@ bool DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
                 skipping = true;
               }
             } else {
-              saved_key_.SetUserKey(
-                  ikey_.user_key,
-                  !pin_thru_lifetime_ || !iter_->IsKeyPinned() /* copy */);
+              if (use_internal_key_) {
+                saved_key_.SetInternalKey(ikey_);
+              } else {
+                saved_key_.SetUserKey(
+                    ikey_.user_key,
+                    !pin_thru_lifetime_ || !iter_->IsKeyPinned() /* copy */);
+              }
               if (range_del_agg_.ShouldDelete(
                       ikey_, RangeDelPositioningMode::kForwardTraversal)) {
                 // Arrange to skip all upcoming entries for this key since
@@ -563,9 +571,13 @@ bool DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
             }
             break;
           case kTypeMerge:
-            saved_key_.SetUserKey(
-                ikey_.user_key,
-                !pin_thru_lifetime_ || !iter_->IsKeyPinned() /* copy */);
+            if (use_internal_key_) {
+              saved_key_.SetInternalKey(ikey_);
+            } else {
+              saved_key_.SetUserKey(
+                  ikey_.user_key,
+                  !pin_thru_lifetime_ || !iter_->IsKeyPinned() /* copy */);
+            }
             if (range_del_agg_.ShouldDelete(
                     ikey_, RangeDelPositioningMode::kForwardTraversal)) {
               // Arrange to skip all upcoming entries for this key since
@@ -597,9 +609,13 @@ bool DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
       if (cmp == 0 || (skipping && cmp <= 0)) {
         num_skipped++;
       } else {
-        saved_key_.SetUserKey(
-            ikey_.user_key,
-            !iter_->IsKeyPinned() || !pin_thru_lifetime_ /* copy */);
+        if (use_internal_key_) {
+          saved_key_.SetInternalKey(ikey_);
+        } else {
+          saved_key_.SetUserKey(
+              ikey_.user_key,
+              !iter_->IsKeyPinned() || !pin_thru_lifetime_ /* copy */);
+        }
         skipping = false;
         num_skipped = 0;
       }
@@ -939,6 +955,9 @@ bool DBIter::FindValueForCurrentKey() {
     }
 
     last_key_entry_type = ikey.type;
+    if (use_internal_key_) {
+      saved_key_.SetInternalKey(ikey);
+    }
     switch (last_key_entry_type) {
       case kTypeValue:
       case kTypeBlobIndex:
@@ -1120,6 +1139,9 @@ bool DBIter::FindValueForCurrentKeyUsingSeek() {
     assert(iter_->IsValuePinned());
     pinned_value_ = iter_->value();
     valid_ = true;
+    if (use_internal_key_) {
+      saved_key_.SetInternalKey(ikey);
+    }
     return true;
   }
 

@@ -33,10 +33,11 @@ namespace rocksdb {
 class BaseDeltaIterator : public Iterator {
  public:
   BaseDeltaIterator(Iterator* base_iterator, WBWIIterator* delta_iterator,
-                    const Comparator* comparator)
+                    const Comparator* comparator, bool use_internal_key)
       : forward_(true),
         current_at_base_(true),
         equal_keys_(false),
+        use_internal_key_(use_internal_key),
         status_(Status::OK()),
         base_iterator_(base_iterator),
         delta_iterator_(delta_iterator),
@@ -104,7 +105,7 @@ class BaseDeltaIterator : public Iterator {
       }
       if (DeltaValid() && BaseValid()) {
         if (comparator_->Equal(delta_iterator_->Entry().key,
-                               base_iterator_->key())) {
+                               BaseUserKey(base_iterator_->key()))) {
           equal_keys_ = true;
         }
       }
@@ -140,7 +141,7 @@ class BaseDeltaIterator : public Iterator {
       }
       if (DeltaValid() && BaseValid()) {
         if (comparator_->Equal(delta_iterator_->Entry().key,
-                               base_iterator_->key())) {
+                               BaseUserKey(base_iterator_->key()))) {
           equal_keys_ = true;
         }
       }
@@ -150,8 +151,17 @@ class BaseDeltaIterator : public Iterator {
   }
 
   Slice key() const override {
-    return current_at_base_ ? base_iterator_->key()
-                            : delta_iterator_->Entry().key;
+    if (current_at_base_) {
+      return base_iterator_->key();
+    }
+    if (!use_internal_key_) {
+      return delta_iterator_->Entry().key;
+    }
+    internal_key_holder_ = std::string(delta_iterator_->Entry().key.data(),
+                                       delta_iterator_->Entry().key.size());
+    AppendInternalKeyFooter(&internal_key_holder_, kMaxSequenceNumber,
+                            ValueType::kTypeValue, kMaxTimeStamp);
+    return Slice(internal_key_holder_);
   }
 
   Slice value() const override {
@@ -170,6 +180,13 @@ class BaseDeltaIterator : public Iterator {
   }
 
  private:
+  Slice BaseUserKey(const Slice& k) const {
+    if (!use_internal_key_) {
+      return k;
+    }
+    return ExtractUserKey(k);
+  }
+
   void AssertInvariants() {
 #ifndef NDEBUG
     bool not_ok = false;
@@ -202,7 +219,7 @@ class BaseDeltaIterator : public Iterator {
     assert(delta_iterator_->Entry().type != kMergeRecord &&
            delta_iterator_->Entry().type != kLogDataRecord);
     int compare = comparator_->Compare(delta_iterator_->Entry().key,
-                                       base_iterator_->key());
+                                       BaseUserKey(base_iterator_->key()));
     if (forward_) {
       // current_at_base -> compare < 0
       assert(!current_at_base_ || compare < 0);
@@ -291,9 +308,9 @@ class BaseDeltaIterator : public Iterator {
         current_at_base_ = true;
         return;
       } else {
-        int compare =
-            (forward_ ? 1 : -1) *
-            comparator_->Compare(delta_entry.key, base_iterator_->key());
+        int compare = (forward_ ? 1 : -1) *
+                      comparator_->Compare(delta_entry.key,
+                                           BaseUserKey(base_iterator_->key()));
         if (compare <= 0) {  // delta bigger or equal
           if (compare == 0) {
             equal_keys_ = true;
@@ -322,14 +339,13 @@ class BaseDeltaIterator : public Iterator {
   bool forward_;
   bool current_at_base_;
   bool equal_keys_;
+  bool use_internal_key_;
+  mutable std::string internal_key_holder_;
   Status status_;
   std::unique_ptr<Iterator> base_iterator_;
   std::unique_ptr<WBWIIterator> delta_iterator_;
   const Comparator* comparator_;  // not owned
 };
-
-typedef SkipList<WriteBatchIndexEntry*, const WriteBatchEntryComparator&>
-    WriteBatchEntrySkipList;
 
 class WBWIIteratorImpl : public WBWIIterator {
  public:
@@ -418,57 +434,6 @@ class WBWIIteratorImpl : public WBWIIterator {
   uint32_t column_family_id_;
   WriteBatchEntrySkipList::Iterator skip_list_iter_;
   const ReadableWriteBatch* write_batch_;
-};
-
-struct WriteBatchWithIndex::Rep {
-  explicit Rep(const Comparator* index_comparator, size_t reserved_bytes = 0,
-               size_t max_bytes = 0, bool _overwrite_key = false)
-      : write_batch(reserved_bytes, max_bytes),
-        comparator(index_comparator, &write_batch),
-        skip_list(comparator, &arena),
-        overwrite_key(_overwrite_key),
-        last_entry_offset(0),
-        last_sub_batch_offset(0),
-        sub_batch_cnt(1) {}
-  ReadableWriteBatch write_batch;
-  WriteBatchEntryComparator comparator;
-  Arena arena;
-  WriteBatchEntrySkipList skip_list;
-  bool overwrite_key;
-  size_t last_entry_offset;
-  // The starting offset of the last sub-batch. A sub-batch starts right before
-  // inserting a key that is a duplicate of a key in the last sub-batch. Zero,
-  // the default, means that no duplicate key is detected so far.
-  size_t last_sub_batch_offset;
-  // Total number of sub-batches in the write batch. Default is 1.
-  size_t sub_batch_cnt;
-
-  // Remember current offset of internal write batch, which is used as
-  // the starting offset of the next record.
-  void SetLastEntryOffset() { last_entry_offset = write_batch.GetDataSize(); }
-
-  // In overwrite mode, find the existing entry for the same key and update it
-  // to point to the current entry.
-  // Return true if the key is found and updated.
-  bool UpdateExistingEntry(ColumnFamilyHandle* column_family, const Slice& key);
-  bool UpdateExistingEntryWithCfId(uint32_t column_family_id, const Slice& key);
-
-  // Add the recent entry to the update.
-  // In overwrite mode, if key already exists in the index, update it.
-  void AddOrUpdateIndex(ColumnFamilyHandle* column_family, const Slice& key);
-  void AddOrUpdateIndex(const Slice& key);
-
-  // Allocate an index entry pointing to the last entry in the write batch and
-  // put it to skip list.
-  void AddNewEntry(uint32_t column_family_id);
-
-  // Clear all updates buffered in this batch.
-  void Clear();
-  void ClearIndex();
-
-  // Rebuild index by reading all records from the batch.
-  // Returns non-ok status on corruption.
-  Status ReBuildIndex();
 };
 
 bool WriteBatchWithIndex::Rep::UpdateExistingEntry(
@@ -642,13 +607,26 @@ WBWIIterator* WriteBatchWithIndex::NewIterator(
 }
 
 Iterator* WriteBatchWithIndex::NewIteratorWithBase(
+    ColumnFamilyHandle* column_family, Iterator* base_iterator,
+    bool use_internal_key) {
+  if (rep->overwrite_key == false) {
+    assert(false);
+    return nullptr;
+  }
+  return new BaseDeltaIterator(base_iterator, NewIterator(column_family),
+                               GetColumnFamilyUserComparator(column_family),
+                               use_internal_key);
+}
+
+Iterator* WriteBatchWithIndex::NewIteratorWithBase(
     ColumnFamilyHandle* column_family, Iterator* base_iterator) {
   if (rep->overwrite_key == false) {
     assert(false);
     return nullptr;
   }
   return new BaseDeltaIterator(base_iterator, NewIterator(column_family),
-                               GetColumnFamilyUserComparator(column_family));
+                               GetColumnFamilyUserComparator(column_family),
+                               false /*use_internal_key*/);
 }
 
 Iterator* WriteBatchWithIndex::NewIteratorWithBase(Iterator* base_iterator) {
@@ -658,7 +636,8 @@ Iterator* WriteBatchWithIndex::NewIteratorWithBase(Iterator* base_iterator) {
   }
   // default column family's comparator
   return new BaseDeltaIterator(base_iterator, NewIterator(),
-                               rep->comparator.default_comparator());
+                               rep->comparator.default_comparator(),
+                               false /*use_internal_key*/);
 }
 
 Status WriteBatchWithIndex::Put(ColumnFamilyHandle* column_family,

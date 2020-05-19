@@ -89,7 +89,7 @@ bool RandomTransactionInserter::TOTransactionDBInsert(
 
   to_txn_ = db->BeginTransaction(write_options_, txn_option);
 
-  Status s = to_txn_->SetReadTimeStamp(UINT64_MAX, 0);
+  Status s = to_txn_->SetReadTimeStamp(UINT64_MAX);
   assert(s.ok());
   auto res = DoInsert(nullptr, to_txn_);
   delete to_txn_;
@@ -109,7 +109,7 @@ bool RandomTransactionInserter::TOTransactionDBWriteRandom(
   Status s = to_txn_->SetCommitTimeStamp(tv.tv_sec);
   assert(s.ok());
 
-  s = to_txn_->SetReadTimeStamp(UINT64_MAX, 0);
+  s = to_txn_->SetReadTimeStamp(UINT64_MAX);
   assert(s.ok());
   auto res = DoWriteRandom(handles, to_txn_);
   delete to_txn_;

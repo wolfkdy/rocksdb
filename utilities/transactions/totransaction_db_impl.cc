@@ -6,10 +6,168 @@
 #ifndef ROCKSDB_LITE
 
 #include "utilities/transactions/totransaction_db_impl.h"
-#include "util/string_util.h"
+#include <iostream>
 #include "util/logging.h"
+#include "util/string_util.h"
+#include "util/sync_point.h"
+#include "utilities/transactions/totransaction_prepare_iterator.h"
 
 namespace rocksdb {
+
+namespace {
+
+using ATN = TOTransactionImpl::ActiveTxnNode;
+size_t TxnKeySize(const TxnKey& key) {
+  return sizeof(key.first) + key.second.size();
+}
+
+using BatchIteratorCB = std::function<void(uint32_t cf_id, const Slice& s)>;
+class BatchIterator : public WriteBatch::Handler {
+ public:
+  BatchIterator(BatchIteratorCB cb) : cb_(std::move(cb)) {}
+
+  Status PutCF(uint32_t column_family_id, const Slice& key,
+               const Slice& value) override {
+    (void)value;
+    cb_(column_family_id, key);
+    return Status::OK();
+  }
+
+  Status DeleteCF(uint32_t column_family_id, const Slice& key) override {
+    cb_(column_family_id, key);
+    return Status::OK();
+  }
+
+ private:
+  BatchIteratorCB cb_;
+};
+
+}  // namespace
+
+const TxnKey PrepareHeap::sentinal_ =
+    std::make_pair(std::numeric_limits<uint32_t>::max(), "");
+
+PrepareHeap::PrepareHeap() {
+  // insert sentinal into map_ to simplify the reverse find logic
+  map_.insert({sentinal_, {}});
+}
+
+std::shared_ptr<ATN> PrepareHeap::Find(
+    const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key) {
+  ReadLock rl(&mutex_);
+  const auto it = map_.find(key);
+  if (it == map_.end()) {
+    return nullptr;
+  }
+  for (const auto& v : it->second) {
+    if (v->txn_id_ == core->txn_id_) {
+      return v;
+    }
+    if (v->prepare_ts_ <= core->read_ts_) {
+      return v;
+    }
+  }
+  return nullptr;
+}
+
+void PrepareHeap::Insert(const std::shared_ptr<ATN>& core) {
+  int64_t cnt = 0;
+  // NOTE: need to add PREPARING state to indicate the incomplete state ?
+  auto iter_cb = [&](uint32_t cf_id, const Slice& key) {
+    cnt++;
+    const auto lookup_key =
+        std::make_pair(cf_id, std::string(key.data(), key.size()));
+    auto it = map_.find(lookup_key);
+    if (it == map_.end()) {
+      map_.insert({lookup_key, {core}});
+    } else {
+      assert(it->second.size() > 0);
+      if (it->second.front()->txn_id_ == core->txn_id_) {
+        // NOTE(deyukong): there may be duplicated kvs in one write_batch
+        // because during a txn, same key may be modified several times.
+        // Though WriteBatchWithIndex sees the lastest one, WriteBatch.Iterate
+        // sees them all.
+      } else {
+        assert(it->second.front()->txn_id_ < core->txn_id_);
+        auto state = it->second.front()->state_.load(std::memory_order_relaxed);
+        (void)state;
+        assert(state == TOTransaction::TOTransactionState::kCommitted ||
+               state == TOTransaction::TOTransactionState::kRollback);
+        it->second.push_front(core);
+      }
+    }
+  };
+  BatchIterator it(iter_cb);
+  {
+    WriteLock wl(&mutex_);
+    auto status = core->write_batch_.GetWriteBatch()->Iterate(&it);
+    (void)status;
+    assert(status.ok() && cnt == core->write_batch_.GetWriteBatch()->Count());
+    core->state_.store(TOTransaction::TOTransactionState::kPrepared);
+  }
+}
+
+uint32_t PrepareHeap::Remove(ATN* core) {
+  uint32_t cnt = 0;
+  // NOTE: need to add PREPARING state to indicate the incomplete state ?
+  auto iter_cb = [&](uint32_t cf_id, const Slice& key) {
+    const auto lookup_key =
+        std::make_pair(cf_id, std::string(key.data(), key.size()));
+    auto it = map_.find(lookup_key);
+    if (it != map_.end()) {
+      assert(!it->second.empty() &&
+             it->second.front()->txn_id_ == core->txn_id_);
+      it->second.pop_front();
+      cnt++;
+      if (it->second.empty()) {
+        map_.erase(it);
+      }
+    }
+  };
+  BatchIterator it(iter_cb);
+  assert(core->state_.load(std::memory_order_relaxed) ==
+         TOTransaction::TOTransactionState::kPrepared);
+  {
+    WriteLock wl(&mutex_);
+    auto status = core->write_batch_.GetWriteBatch()->Iterate(&it);
+    (void)status;
+    assert(status.ok());
+  }
+  return cnt;
+}
+
+void PrepareHeap::Purge(TransactionID oldest_txn_id, RocksTimeStamp oldest_ts) {
+  (void)oldest_ts;
+  WriteLock wl(&mutex_);
+  auto it = map_.begin();
+  while (it->first != sentinal_) {
+    auto& lst = it->second;
+    auto lst_it = lst.begin();
+    while (lst_it != lst.end()) {
+      auto state = (*lst_it)->state_.load(std::memory_order_relaxed);
+      assert(state != TOTransaction::TOTransactionState::kRollback);
+      if (state == TOTransaction::TOTransactionState::kCommitted &&
+          (*lst_it)->commit_txn_id_ <=
+              oldest_txn_id /* && lst_it->commit_ts_ < oldest_ts*/) {
+        // committed-txns with commit_ts_ >= oldest_ts and commit_txn_id <=
+        // oldest_txn_id are visible
+        // to new transactions, this purge process is a slice different from
+        // purging commit_map
+        lst.erase(lst_it, lst.end());
+        break;
+      } else {
+        assert(state == TOTransaction::TOTransactionState::kCommitted ||
+               state == TOTransaction::TOTransactionState::kPrepared);
+        lst_it++;
+      }
+    }
+    if (lst.empty()) {
+      it = map_.erase(it);
+    } else {
+      it++;
+    }
+  }
+}
 
 Status TOTransactionDB::Open(const Options& options,
                      const TOTransactionDBOptions& txn_db_options,
@@ -18,7 +176,7 @@ Status TOTransactionDB::Open(const Options& options,
   ColumnFamilyOptions cf_options(options);
   std::vector<ColumnFamilyDescriptor> column_families;
   column_families.push_back(
-  ColumnFamilyDescriptor(kDefaultColumnFamilyName, cf_options));
+      ColumnFamilyDescriptor(kDefaultColumnFamilyName, cf_options));
   std::vector<ColumnFamilyHandle*> handles;
   Status s = Open(db_options, txn_db_options, dbname, column_families, &handles, dbptr);
   if (s.ok()) {
@@ -30,7 +188,6 @@ Status TOTransactionDB::Open(const Options& options,
 
   return s;
 }
-
 
 Status TOTransactionDB::Open(const DBOptions& db_options,
                      const TOTransactionDBOptions& txn_db_options,
@@ -52,52 +209,49 @@ Status TOTransactionDB::Open(const DBOptions& db_options,
   ROCKS_LOG_DEBUG(db_options.info_log, "##### TOTDB open success #####");
 
   return s;
-} 
+}
 
-Status TOTransactionDBImpl::UnCommittedKeys::RemoveKeyInLock(const Slice& key,
-                                                  const size_t& stripe_num,
-                                                  std::atomic<int64_t>* mem_usage) {
+Status TOTransactionDBImpl::UnCommittedKeys::RemoveKeyInLock(
+    const TxnKey& key, const size_t& stripe_num,
+    std::atomic<int64_t>* mem_usage) {
   UnCommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num);
-  auto iter = stripe->uncommitted_keys_map_.find(key.ToString());
+  auto iter = stripe->uncommitted_keys_map_.find(key);
   assert(iter != stripe->uncommitted_keys_map_.end());
-  auto ccbytes = mem_usage->fetch_sub(
-    iter->first.size() + sizeof(iter->second),
-    std::memory_order_relaxed);
+  auto ccbytes = mem_usage->fetch_sub(TxnKeySize(key) + sizeof(iter->second),
+                                      std::memory_order_relaxed);
   assert(ccbytes >= 0);
   (void)ccbytes;
   stripe->uncommitted_keys_map_.erase(iter);
   return Status::OK();
 }
 
-Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(const Slice& key, 
-                                             const TransactionID& txn_id,
-                                             const size_t& stripe_num,
-                                             const size_t& max_mem_usage, 
-                                             std::atomic<int64_t>* mem_usage) {
+Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(
+    const TxnKey& key, const TransactionID& txn_id, const size_t& stripe_num,
+    const size_t& max_mem_usage, std::atomic<int64_t>* mem_usage) {
   UnCommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num);
 
-  auto iter = stripe->uncommitted_keys_map_.find(key.ToString());
+  auto iter = stripe->uncommitted_keys_map_.find(key);
   if (iter != stripe->uncommitted_keys_map_.end()) {
     // Check whether the key is modified by the same txn
     if (iter->second != txn_id) {
       ROCKS_LOG_WARN(
           info_log_,
           "TOTDB WriteConflict another txn id(%llu) is modifying key(%s) \n",
-          iter->second, key.ToString().c_str());
+          iter->second, key.second.c_str());
       return Status::Busy();
     } else {
       return Status::OK();
     }
-  } 
-  auto addedSize =
-    mem_usage->load(std::memory_order_relaxed) + key.size() + sizeof(txn_id);
+  }
+  size_t delta_size = TxnKeySize(key) + sizeof(txn_id);
+  auto addedSize = mem_usage->load(std::memory_order_relaxed) + delta_size;
   if (addedSize > max_mem_usage) {
     ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict mem usage(%llu) is greater than limit(%llu) \n",
       addedSize, max_mem_usage);
     return Status::Busy();
   }
-  mem_usage->fetch_add(key.size() + sizeof(txn_id), std::memory_order_relaxed);
-  stripe->uncommitted_keys_map_.insert({key.ToString(), txn_id});
+  mem_usage->fetch_add(delta_size, std::memory_order_relaxed);
+  stripe->uncommitted_keys_map_.insert({key, txn_id});
 
   return Status::OK(); 
 }
@@ -110,63 +264,49 @@ size_t TOTransactionDBImpl::UnCommittedKeys::CountInLock() const {
   return res;
 }
 
-Status TOTransactionDBImpl::CommittedKeys::AddKeyInLock(const Slice& key,
-              const TransactionID& commit_txn_id,
-              const RocksTimeStamp& commit_ts,
-              const size_t& stripe_num,
-              std::atomic<int64_t>* mem_usage) {
-  CommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num); 
-  if (stripe->committed_keys_map_.find(key.ToString()) == stripe->committed_keys_map_.end()) {
-    mem_usage->fetch_add(key.size() + sizeof(commit_ts) + sizeof(commit_txn_id));
-  }
-
-  stripe->committed_keys_map_[key.ToString()] = {commit_txn_id, commit_ts};
-
-  return Status::OK();
-}
- 
-Status TOTransactionDBImpl::CommittedKeys::RemoveKeyInLock(const Slice& key, 
-                                          const TransactionID& txn_id,
-                                          const size_t& stripe_num,
-                                          std::atomic<int64_t>* mem_usage) {
+Status TOTransactionDBImpl::CommittedKeys::AddKeyInLock(
+    const TxnKey& key, const TransactionID& commit_txn_id,
+    const RocksTimeStamp& prepare_ts, const RocksTimeStamp& commit_ts,
+    const size_t& stripe_num, std::atomic<int64_t>* mem_usage) {
   CommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num);
-
-  auto iter = stripe->committed_keys_map_.find(key.ToString());
-  assert(iter != stripe->committed_keys_map_.end());
-
-  if (iter->second.first <= txn_id) {
-    auto ccbytes = mem_usage->fetch_sub(
-      key.size() + sizeof(iter->second.first) + sizeof(iter->second.second),
-      std::memory_order_relaxed);
-    assert(ccbytes >= 0);
-    (void)ccbytes;
-    stripe->committed_keys_map_.erase(iter);
+  if (stripe->committed_keys_map_.find(key) ==
+      stripe->committed_keys_map_.end()) {
+    mem_usage->fetch_add(TxnKeySize(key) + sizeof(prepare_ts) +
+                         sizeof(commit_ts) + sizeof(commit_txn_id));
   }
+
+  stripe->committed_keys_map_[key] =
+      std::make_tuple(commit_txn_id, prepare_ts, commit_ts);
 
   return Status::OK();
 }
 
-Status TOTransactionDBImpl::CommittedKeys::CheckKeyInLock(const Slice& key, 
-                    const TransactionID& txn_id,
-                    const RocksTimeStamp& timestamp,
-                    const size_t& stripe_num) {
+Status TOTransactionDBImpl::CommittedKeys::CheckKeyInLock(
+    const TxnKey& key, const TransactionID& txn_id,
+    const RocksTimeStamp& timestamp, const size_t& stripe_num) {
   // padding to avoid false sharing
   CommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num);
 
-  auto iter = stripe->committed_keys_map_.find(key.ToString());
+  auto iter = stripe->committed_keys_map_.find(key);
   if (iter != stripe->committed_keys_map_.end()) {
     // Check whether some txn commits the key after txn_id began
-    const auto& back = iter->second;
-    if (back.first > txn_id) {
-      ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict a committed txn commit_id(%llu) greater than my txnid(%llu) \n", 
-        back.first, txn_id);
-      return Status::Busy();
+    const TransactionID& committed_txn_id = std::get<0>(iter->second);
+    // const RocksTimeStamp& prepare_ts = std::get<1>(iter->second);
+    const RocksTimeStamp& committed_ts = std::get<2>(iter->second);
+    if (committed_txn_id > txn_id) {
+      ROCKS_LOG_WARN(info_log_,
+                     "TOTDB WriteConflict a committed txn commit_id(%llu) "
+                     "greater than my txnid(%llu)",
+                     committed_txn_id, txn_id);
+      return Status::Busy("SI conflict");
     }
-    // Find the latest committed txn for this key and its commit ts  
-    if (back.second > timestamp) {
-      ROCKS_LOG_WARN(info_log_, "TOTDB WriteConflict a committed txn commit_ts(%llu) greater than my read_ts(%llu) \n", 
-        back.second, timestamp);
-      return Status::Busy();
+    // Find the latest committed txn for this key and its commit ts
+    if (committed_ts > timestamp) {
+      ROCKS_LOG_WARN(info_log_,
+                     "TOTDB WriteConflict a committed txn commit_ts(%llu) "
+                     "greater than my read_ts(%llu)",
+                     committed_ts, timestamp);
+      return Status::Busy("timestamp conflict");
     }
   }
   return Status::OK();
@@ -194,16 +334,18 @@ TOTransaction* TOTransactionDBImpl::BeginTransaction(const WriteOptions& write_o
 
     TOTxnOptions totxn_option;
     totxn_option.max_write_batch_size = txn_options.max_write_batch_size;
-    totxn_option.txn_snapshot = dbimpl_->GetSnapshot();
     totxn_option.log_ = info_log_;
     newActiveTxnNode = std::shared_ptr<ATN>(new ATN);
     newTransaction = new TOTransactionImpl(this, write_options, totxn_option, newActiveTxnNode);
 
+    newActiveTxnNode->txn_id_ = TOTransactionImpl::GenTxnID();
+    newActiveTxnNode->txn_snapshot = dbimpl_->GetSnapshot();
+    newActiveTxnNode->timestamp_round_prepared_ =
+        txn_options.timestamp_round_prepared;
+    newActiveTxnNode->timestamp_round_read_ = txn_options.timestamp_round_read;
+    newActiveTxnNode->read_only_ = txn_options.read_only;
+    newActiveTxnNode->ignore_prepare_ = txn_options.ignore_prepare;
     // Add the transaction to active txns
-    newActiveTxnNode->txn_id_ = newTransaction->GetID();
-
-    newActiveTxnNode->txn_snapshot = totxn_option.txn_snapshot;
-
     AddToActiveTxns(newActiveTxnNode);
   }
   
@@ -213,21 +355,19 @@ TOTransaction* TOTransactionDBImpl::BeginTransaction(const WriteOptions& write_o
 
 }
 
-Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family,
-                                        const Slice& key, 
-										const TransactionID& txn_id,
-                                        const RocksTimeStamp& readts) {
-  (void)column_family;
+Status TOTransactionDBImpl::CheckWriteConflict(const TxnKey& key,
+                                               const TransactionID& txn_id,
+                                               const RocksTimeStamp& readts) {
   //if first check the uc key and ck busy ,it will need remove uc key ,so we check commit key first
-  auto stripe_num = GetStripe(key.ToString());
+  auto stripe_num = GetStripe(key);
   assert(keys_mutex_.size() > stripe_num);
   std::lock_guard<std::mutex> lock(*keys_mutex_[stripe_num]);
   // Check whether some txn commits the key after current txn started
   // Check whether the commit ts of latest committed txn for key is less than my read ts
   Status s = committed_keys_.CheckKeyInLock(key, txn_id, readts, stripe_num);
   if (!s.ok()) {
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck \n",
-                    txn_id, key.ToString(true).c_str());
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict ck", txn_id,
+                    rocksdb::Slice(key.second).ToString(true).c_str());
     return s;
   }
 
@@ -236,8 +376,8 @@ Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family
   s = uncommitted_keys_.CheckKeyAndAddInLock(key, txn_id, stripe_num,
                                              max_conflict_bytes_, &current_conflict_bytes_);
   if (!s.ok()) {
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk \n",
-                    txn_id, key.ToString(true).c_str());
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk", txn_id,
+                    rocksdb::Slice(key.second).ToString(true).c_str());
     return s;
   }
 
@@ -249,25 +389,31 @@ void TOTransactionDBImpl::CleanCommittedKeys() {
   RocksTimeStamp ts = 0;
   
   while(clean_job_.IsRunning()) {
+    TEST_SYNC_POINT("TOTransactionDBImpl::CleanCommittedKeys::OnRunning");
     if (clean_job_.NeedToClean(&txn, &ts)) {
       for (size_t i = 0; i < num_stripes_; i++) {
-        std::lock_guard<std::mutex> lock(*keys_mutex_[i]);
+        std::unique_lock<std::mutex> lock(*keys_mutex_[i]);
         CommittedLockMapStripe* stripe = committed_keys_.lock_map_stripes_.at(i);
-    
         auto map_iter = stripe->committed_keys_map_.begin();
         while (map_iter != stripe->committed_keys_map_.end()) {
           auto history = map_iter->second;
-          if (history.first <= txn && (history.second < ts || history.second == 0)) {
-             auto ccbytes = current_conflict_bytes_.fetch_sub(
-               map_iter->first.size() + sizeof(history.first) + sizeof(history.second), std::memory_order_relaxed);
-             assert(ccbytes >= 0);
-             (void)ccbytes;
-             map_iter = stripe->committed_keys_map_.erase(map_iter);
+          const TransactionID& txn_id = std::get<0>(history);
+          const RocksTimeStamp& prepare_ts = std::get<1>(history);
+          const RocksTimeStamp& commit_ts = std::get<2>(history);
+          if (txn_id <= txn && (commit_ts < ts || commit_ts == 0)) {
+            auto ccbytes = current_conflict_bytes_.fetch_sub(
+                TxnKeySize(map_iter->first) + sizeof(txn_id) +
+                    sizeof(prepare_ts) + sizeof(commit_ts),
+                std::memory_order_relaxed);
+            assert(ccbytes >= 0);
+            (void)ccbytes;
+            map_iter = stripe->committed_keys_map_.erase(map_iter);
           } else {
-             map_iter ++;
+            map_iter++;
           }
         }
       }
+      prepare_heap_.Purge(txn, ts);
       clean_job_.FinishClean(txn, ts);
     } else {
       std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -276,17 +422,99 @@ void TOTransactionDBImpl::CleanCommittedKeys() {
   // End run clean thread
 }
 
+Status TOTransactionDBImpl::GetConsiderPrepare(
+    const std::shared_ptr<ATN>& core, ReadOptions& options,
+    ColumnFamilyHandle* column_family, const Slice& key, std::string* value) {
+  RocksTimeStamp read_ts = core->read_ts_set_
+                               ? core->read_ts_
+                               : std::numeric_limits<RocksTimeStamp>::max();
+  const auto lookup_key = std::make_pair(column_family->GetID(),
+                                         std::string(key.data(), key.size()));
+  std::shared_ptr<ATN> it = prepare_heap_.Find(core.get(), lookup_key);
+  // 1) key is not in prepare_heap_, read data from self and db
+  if (it == nullptr) {
+    return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                                column_family, key, value);
+  }
+
+  // 2) myself should not appear in prepare_heap because not allowed to read
+  // after prepared
+  assert(it->txn_id_ != core->txn_id_);
+  assert(it->prepare_ts_set_);
+  const auto state = it->state_.load(std::memory_order_relaxed);
+  assert(state != TOTransaction::TOTransactionState::kRollback);
+
+  // 3) if the txn in prepare_ts_set_ is actually prepared
+  if (state == TOTransaction::TOTransactionState::kPrepared) {
+    assert(it->prepare_ts_set_);
+    if (it->prepare_ts_ > read_ts) {
+      return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                                  column_family, key, value);
+    }
+    if (core->ignore_prepare_) {
+      return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                                  column_family, key, value);
+    }
+    return Status::PrepareConflict("prepare conflict");
+  }
+
+  assert(state == TOTransaction::TOTransactionState::kCommitted);
+  assert(it->commit_ts_set_);
+  if (it->commit_ts_ > read_ts) {
+    return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                                column_family, key, value);
+  }
+
+  // TODO(wolfkdy): by rocksdb5.18.3's Get api, there is no way to get
+  // internalkey, here we
+  // use Iterator to get internalkey, which may be slower
+  options.use_internal_key = true;
+  auto db_iter = std::unique_ptr<Iterator>(NewIterator(options, column_family));
+  assert(db_iter);
+  db_iter->Seek(key);
+  options.use_internal_key = false;
+  if (!db_iter->Valid()) {
+    return it->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                              column_family, key, value);
+  }
+  ParsedInternalKey internalkey;
+  bool parse_result = ParseInternalKey(db_iter->key(), &internalkey);
+  (void)parse_result;
+  assert(parse_result);
+  if (internalkey.user_key != key || internalkey.timestamp < it->commit_ts_) {
+    return it->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+                                              column_family, key, value);
+  }
+  *value = std::string(db_iter->value().data(), db_iter->value().size());
+  return Status::OK();
+}
+
+Iterator* TOTransactionDBImpl::NewIteratorConsiderPrepare(
+    const std::shared_ptr<ATN>& core, ColumnFamilyHandle* column_family,
+    Iterator* db_iter) {
+  std::unique_ptr<Iterator> base_writebatch(
+      core->write_batch_.NewIteratorWithBase(column_family, db_iter,
+                                             true /*use_internal_key*/));
+  auto pmap_iter = std::unique_ptr<PrepareMapIterator>(
+      new PrepareMapIterator(column_family, &prepare_heap_, core.get()));
+  auto merge_iter =
+      std::unique_ptr<PrepareMergingIterator>(new PrepareMergingIterator(
+          std::move(base_writebatch), std::move(pmap_iter)));
+  return new PrepareFilterIterator(GetRootDB(), column_family, core.get(),
+                                   std::move(merge_iter), info_log_);
+}
+
 void TOTransactionDBImpl::StartBackgroundCleanThread() {
   clean_thread_ = std::thread([this] { CleanCommittedKeys(); });
 }
 
 void TOTransactionDBImpl::AdvanceTS(RocksTimeStamp* pMaxToCleanTs) {
-  RocksTimeStamp maxToCleanTs = 0;
+  RocksTimeStamp max_to_clean_ts = 0;
 
   {
     ReadLock rl(&ts_meta_mutex_);
     if (oldest_ts_ != nullptr) {
-      maxToCleanTs = *oldest_ts_;
+      max_to_clean_ts = *oldest_ts_;
     }
   }
 
@@ -295,28 +523,24 @@ void TOTransactionDBImpl::AdvanceTS(RocksTimeStamp* pMaxToCleanTs) {
     for (auto it = read_q_.begin(); it != read_q_.end();) {
       if (it->second->state_.load() == TOTransaction::kStarted) {
         assert(it->second->read_ts_set_);
-        maxToCleanTs = std::min(maxToCleanTs, it->second->read_ts_);
+        max_to_clean_ts = std::min(max_to_clean_ts, it->second->read_ts_);
         break;
       }
       it++;
     }
   }
-  *pMaxToCleanTs = maxToCleanTs;
+  *pMaxToCleanTs = max_to_clean_ts;
 
   return;
 }
 
 Status TOTransactionDBImpl::AddReadQueue(const std::shared_ptr<ATN>& core,
-                                         const RocksTimeStamp& ts,
-                                         const uint32_t& round) {
-  // the puzzle is the critical-area length of ts_meta_mutex_
-  // between AddReadQueue and AddCommitQueue 
-
+                                         const RocksTimeStamp& ts) {
   RocksTimeStamp realTs = ts;
   ReadLock rl(&ts_meta_mutex_);
   if (oldest_ts_ != nullptr) {
     if (realTs < *oldest_ts_) {
-      if (round == 0) { 
+      if (!core->timestamp_round_read_) {
         return Status::InvalidArgument("read-ts smaller than oldest ts");
       }
       realTs = *oldest_ts_;
@@ -347,76 +571,225 @@ Status TOTransactionDBImpl::AddReadQueue(const std::shared_ptr<ATN>& core,
   return Status::OK();
 }
 
-Status TOTransactionDBImpl::AddCommitQueue(const std::shared_ptr<ATN>& core,
-                                           const RocksTimeStamp& ts) {
-  // we have no need to protect this action within
-  // ts_meta_mutex_, because mongodb primary can guarantee AddCommitQueue
-  // is within the hlc-allocator critical-area. And oldestTs is forked from
-  // allcommitted-ts, so there is no way that pending-add ts is smaller
-  // than oldestTs. But a check without ts_meta_mutex_ is not costive
-  // and at some degree can guarantee corectness.
-
-  {
-    ReadLock rl(&ts_meta_mutex_);
-    // see the comments above, we have no need to hold the rl too long.
-    if (oldest_ts_ != nullptr && ts < *oldest_ts_) {
-      return Status::InvalidArgument("commit-ts smaller than oldest ts");
-    }
-  }
-
-  if (core->commit_ts_set_) {
-    if (ts < core->first_commit_ts_) {
-      return Status::InvalidArgument("commit-ts smaller than first-commit-ts");
-    }
-    core->commit_ts_ = ts;
+Status TOTransactionDBImpl::PublushTimeStamp(const std::shared_ptr<ATN>& core) {
+  if (core->timestamp_published_) {
     return Status::OK();
   }
 
+  RocksTimeStamp ts;
+  if (core->durable_ts_set_) {
+    ts = core->durable_ts_;
+  } else if (core->commit_ts_set_) {
+    /*
+     * If we know for a fact that this is a prepared transaction and we only
+     * have a commit timestamp, don't add to the durable queue. If we poll
+     * all_durable after
+     * setting the commit timestamp of a prepared transaction, that prepared
+     * transaction
+     * should NOT be visible.
+     */
+    if (core->state_.load(std::memory_order_relaxed) ==
+        TOTransaction::kPrepared) {
+      return Status::OK();
+    }
+    ts = core->commit_ts_;
+  } else {
+    // no reason to reach here
+    assert(0);
+  }
+
   {
-    // if we dont have a commit_ts, the ts set this time
-    // shall be the first-commit-timestamp. And the commit-ts(es) set in
-    // the following times will always be greater than first-commit-ts.
-    // we publish first-commit-ts into the commit-queue, first-commit-ts
-    // is fixed, never changed during a transaction.
     WriteLock wl(&commit_ts_mutex_);
-    assert(!core->commit_ts_set_);
-    assert(core->state_.load() == TOTransaction::kStarted);
-    // we have to clean commited/aboarted txns, right?
-    // we just start from the beginning and clean until the first active txn
-    // This is only a strategy and has nothing to do with the correctness
-    // You may design other strategies.
+    assert(core->state_.load() == TOTransaction::kStarted ||
+           core->state_.load() == TOTransaction::kPrepared);
     for (auto it = commit_q_.begin(); it != commit_q_.end();) {
-      if (it->second->state_.load() == TOTransaction::kStarted) {
+      const auto state = it->second->state_.load(std::memory_order_relaxed);
+      if (state == TOTransaction::kStarted ||
+          state == TOTransaction::kPrepared) {
         break;
       }
       // TODO: add walk stat
       it = commit_q_.erase(it);
     }
-    assert(!core->commit_ts_set_);
-    core->commit_ts_set_ = true;
-    core->first_commit_ts_ = ts;
-    core->commit_ts_ = ts;
     commit_q_.insert({{ts, core->txn_id_}, core});
+    core->timestamp_published_ = true;
   }
   return Status::OK();
 }
-Status TOTransactionDBImpl::CommitTransaction(std::shared_ptr<ATN> core,
-                                              const std::set<std::string>& written_keys) {
-  TransactionID maxToCleanTxnId = 0;
-  RocksTimeStamp maxToCleanTs = 0;
-  bool needClean = false;
 
+Status TOTransactionDBImpl::SetDurableTimeStamp(
+    const std::shared_ptr<ATN>& core, const RocksTimeStamp& ts) {
+  if (ts == 0) {
+    return Status::NotSupported("not allowed to set durable-ts to 0");
+  }
+  if (core->state_.load(std::memory_order_relaxed) !=
+      TOTransaction::kPrepared) {
+    return Status::InvalidArgument(
+        "durable timestamp should not be specified for non-prepared "
+        "transaction");
+  }
+  if (!core->commit_ts_set_) {
+    return Status::InvalidArgument(
+        "commit timestamp is needed before the durable timestamp");
+  }
+  bool has_oldest = false;
+  uint64_t tmp_oldest = 0;
+  {
+    ReadLock rl(&ts_meta_mutex_);
+    has_oldest = (oldest_ts_ != nullptr);
+    tmp_oldest = has_oldest ? *oldest_ts_ : 0;
+  }
+  if (has_oldest && ts < tmp_oldest) {
+    return Status::InvalidArgument(
+        "durable timestamp is less than oldest timestamp");
+  }
+  if (ts < core->commit_ts_) {
+    return Status::InvalidArgument(
+        "durable timestamp is less than commit timestamp");
+  }
+  core->durable_ts_ = ts;
+  core->durable_ts_set_ = true;
+  return PublushTimeStamp(core);
+}
+
+Status TOTransactionDBImpl::SetCommitTimeStamp(const std::shared_ptr<ATN>& core,
+                                               const RocksTimeStamp& ts_orig) {
+  RocksTimeStamp ts = ts_orig;
+  if (ts == 0) {
+    return Status::NotSupported("not allowed to set committs to 0");
+  }
+  bool has_oldest = false;
+  uint64_t tmp_oldest = 0;
+  {
+    ReadLock rl(&ts_meta_mutex_);
+    has_oldest = (oldest_ts_ != nullptr);
+    tmp_oldest = has_oldest ? *oldest_ts_ : 0;
+  }
+  if (!core->prepare_ts_set_) {
+    if (has_oldest && ts < tmp_oldest) {
+      return Status::InvalidArgument("commit-ts smaller than oldest-ts");
+    }
+    if (core->commit_ts_set_ && ts < core->first_commit_ts_) {
+      return Status::InvalidArgument("commit-ts smaller than first-commit-ts");
+    }
+  } else {
+    if (core->prepare_ts_ > ts) {
+      if (!core->timestamp_round_prepared_) {
+        return Status::InvalidArgument("commit-ts smaller than prepare-ts");
+      }
+      ts = core->prepare_ts_;
+    }
+  }
+
+  assert(!core->durable_ts_set_ || core->durable_ts_ == core->commit_ts_);
+  core->commit_ts_ = ts;
+  if (!core->commit_ts_set_) {
+    core->first_commit_ts_ = ts;
+  }
+  if (!core->durable_ts_set_) {
+    core->durable_ts_ = ts;
+  }
+  core->commit_ts_set_ = true;
+  return PublushTimeStamp(core);
+}
+
+Status TOTransactionDBImpl::TxnAssertAfterReads(
+    const std::shared_ptr<ATN>& core, const char* op,
+    const RocksTimeStamp& timestamp) {
+  ReadLock rl(&read_ts_mutex_);
+  for (auto it = read_q_.rbegin(); it != read_q_.rend(); it++) {
+    if (it->second->state_.load() != TOTransaction::kStarted) {
+      continue;
+    }
+    if (it->second->txn_id_ == core->txn_id_) {
+      continue;
+    }
+    assert(it->second->read_ts_set_);
+    if (it->second->read_ts_ >= timestamp) {
+      ROCKS_LOG_WARN(info_log_,
+                     "%s timestamp: %llu must be greater than the latest "
+                     "active readts :%llu",
+                     op, timestamp, it->second->read_ts_);
+      return Status::InvalidArgument(
+          "commit/prepare ts must be greater than latest readts");
+    } else {
+      return Status::OK();
+    }
+  }
+
+  return Status::OK();
+}
+
+Status TOTransactionDBImpl::PrepareTransaction(
+    const std::shared_ptr<ATN>& core) {
+  assert(core->prepare_ts_set_);
+  prepare_heap_.Insert(core);
+  assert(core->state_ == TOTransaction::TOTransactionState::kPrepared);
+  return Status::OK();
+}
+
+Status TOTransactionDBImpl::SetPrepareTimeStamp(
+    const std::shared_ptr<ATN>& core, const RocksTimeStamp& timestamp) {
+  assert(!core->prepare_ts_set_);
+  auto s = TxnAssertAfterReads(core, "prepare", timestamp);
+  if (!s.ok()) {
+    return s;
+  }
+
+  RocksTimeStamp tmp_oldest = 0;
+  {
+    ReadLock rl(&ts_meta_mutex_);
+    if (oldest_ts_ != nullptr) {
+      tmp_oldest = *oldest_ts_;
+    }
+  }
+
+  // NOTE(deyukong): here wt did not set ts within ts_meta_mutex_, I just
+  // followed
+  if (timestamp < tmp_oldest) {
+    if (core->timestamp_round_prepared_) {
+      core->prepare_ts_ = tmp_oldest;
+      core->prepare_ts_set_ = true;
+      ROCKS_LOG_WARN(info_log_,
+                     "TOTDB round txn:%llu prepare_ts:%llu to oldest:%llu",
+                     core->txn_id_, timestamp, tmp_oldest);
+      return Status::OK();
+    } else {
+      return Status::InvalidArgument(
+          "prepareTs should not be less than oldest ts");
+    }
+  } else {
+    core->prepare_ts_ = timestamp;
+    core->prepare_ts_set_ = true;
+    return Status::OK();
+  }
+
+  // void compiler complain, unreachable
+  assert(0);
+  return Status::OK();
+}
+
+Status TOTransactionDBImpl::CommitTransaction(
+    const std::shared_ptr<ATN>& core, const std::set<TxnKey>& written_keys) {
+  TransactionID max_to_clean_txn_id = 0;
+  RocksTimeStamp max_to_clean_ts = 0;
+  RocksTimeStamp candidate_durable_timestamp = 0;
+  RocksTimeStamp prev_durable_timestamp = 0;
+  bool update_durable_ts = false;
+  bool need_clean = false;
   ROCKS_LOG_DEBUG(info_log_,
                 "TOTDB start to commit txn id(%llu) commit ts(%llu)\n",
                 core->txn_id_,
                 core->commit_ts_);
   // Update Active Txns
+  auto state = core->state_.load(std::memory_order_relaxed);
+  (void)state;
+  assert(state == TOTransaction::kStarted || state == TOTransaction::kPrepared);
   {
     std::lock_guard<std::mutex> lock(active_txns_mutex_);
 
     auto iter = active_txns_.find(core->txn_id_);
     assert(iter != active_txns_.end());
-    assert(iter->second->state_.load() == TOTransaction::kStarted);
   
     iter->second->state_.store(TOTransaction::kCommitted);
     dbimpl_->ReleaseSnapshot(iter->second->txn_snapshot);
@@ -424,42 +797,51 @@ Status TOTransactionDBImpl::CommitTransaction(std::shared_ptr<ATN> core,
 	
     iter = active_txns_.erase(iter);
 
-    if (core->txn_id_ > committed_max_txnid_) {
-      committed_max_txnid_ = core->txn_id_;
+    if (core->commit_txn_id_ > committed_max_txnid_) {
+      committed_max_txnid_ = core->commit_txn_id_;
     }
 	
     if (iter == active_txns_.begin()) {
-      needClean = true;
+      need_clean = true;
       if (!active_txns_.empty()) {
-        maxToCleanTxnId = active_txns_.begin()->first - 1;
+        max_to_clean_txn_id = active_txns_.begin()->first - 1;
       } else {
-        maxToCleanTxnId = committed_max_txnid_;
+        max_to_clean_txn_id = committed_max_txnid_;
       }
     }
   }
   
   //it's okey to publish commit_ts a little later
-  if (core->commit_ts_set_) {
-    auto prev = committed_max_ts_.load(std::memory_order_relaxed);
-    while (core->commit_ts_ > prev) {
+  if (core->durable_ts_set_) {
+    candidate_durable_timestamp = core->durable_ts_;
+  } else if (core->commit_ts_set_) {
+    candidate_durable_timestamp = core->commit_ts_;
+  }
 
+  if (candidate_durable_timestamp != 0) {
+    prev_durable_timestamp = committed_max_ts_.load(std::memory_order_relaxed);
+    update_durable_ts = candidate_durable_timestamp > prev_durable_timestamp;
+  }
+  if (update_durable_ts) {
+    while (candidate_durable_timestamp > prev_durable_timestamp) {
       update_max_commit_ts_times_.fetch_add(1, std::memory_order_relaxed);
-      if (committed_max_ts_.compare_exchange_strong(prev, core->commit_ts_)) {
+      if (committed_max_ts_.compare_exchange_strong(
+              prev_durable_timestamp, candidate_durable_timestamp)) {
         has_commit_ts_.store(true);
         break;
       }
       update_max_commit_ts_retries_.fetch_add(1, std::memory_order_relaxed);
-      prev = committed_max_ts_.load(std::memory_order_relaxed);
+      prev_durable_timestamp =
+          committed_max_ts_.load(std::memory_order_relaxed);
     }
   } else {
     commit_without_ts_times_.fetch_add(1, std::memory_order_relaxed);
   }
-  
-  AdvanceTS(&maxToCleanTs);
-  
-  // txnid_ts_keys_map[{commit_txn_id, commit_ts}] = std::list<KeyModifyHistory::iterator>();
+
+  AdvanceTS(&max_to_clean_ts);
+
   // Move Uncommited keys for this txn to committed keys
-  std::map<size_t, std::set<std::string>> stripe_keys_map;
+  std::map<size_t, std::set<TxnKey>> stripe_keys_map;
   auto keys_iter = written_keys.begin();
   while (keys_iter != written_keys.end()) {
     auto stripe_num = GetStripe(*keys_iter); 
@@ -474,25 +856,27 @@ Status TOTransactionDBImpl::CommitTransaction(std::shared_ptr<ATN> core,
   while (stripe_keys_iter != stripe_keys_map.end()) {
     std::lock_guard<std::mutex> lock(*keys_mutex_[stripe_keys_iter->first]);
     // the key in one txn insert to the CK with the max commit ts
-    for (auto & key : stripe_keys_iter->second) {  
-      committed_keys_.AddKeyInLock(key, core->commit_txn_id_,
-                                   core->commit_ts_, stripe_keys_iter->first, &current_conflict_bytes_);
+    for (auto& key : stripe_keys_iter->second) {
+      committed_keys_.AddKeyInLock(key, core->commit_txn_id_, core->prepare_ts_,
+                                   core->commit_ts_, stripe_keys_iter->first,
+                                   &current_conflict_bytes_);
       uncommitted_keys_.RemoveKeyInLock(key, stripe_keys_iter->first, &current_conflict_bytes_);
     }
 
     stripe_keys_iter++;
   }
 
-  ROCKS_LOG_DEBUG(info_log_, "TOTDB end commit txn id(%llu) cid(%llu) commit ts(%llu)\n",
-                                                       core->txn_id_, core->commit_txn_id_, core->commit_ts_);
+  ROCKS_LOG_DEBUG(info_log_,
+                  "TOTDB end commit txn id(%llu) cid(%llu) commit ts(%llu)",
+                  core->txn_id_, core->commit_txn_id_, core->commit_ts_);
   // Clean committed keys
-  if (needClean) {
-    // Clean committed keys async 
-    // Clean keys whose commited txnid <= maxToCleanTxnId
-    // and committed ts < maxToCleanTs
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB going to clean txnid(%llu) ts(%llu) \n",
-                  maxToCleanTxnId, maxToCleanTs);
-    clean_job_.SetCleanInfo(maxToCleanTxnId, maxToCleanTs);
+  if (need_clean) {
+    // Clean committed keys async
+    // Clean keys whose commited txnid <= max_to_clean_txn_id
+    // and committed ts < max_to_clean_ts
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB going to clean txnid(%llu) ts(%llu)",
+                    max_to_clean_txn_id, max_to_clean_ts);
+    clean_job_.SetCleanInfo(max_to_clean_txn_id, max_to_clean_ts);
   }
 
   txn_commits_.fetch_add(1, std::memory_order_relaxed);
@@ -505,42 +889,48 @@ Status TOTransactionDBImpl::CommitTransaction(std::shared_ptr<ATN> core,
   return Status::OK();
 }
 
-Status TOTransactionDBImpl::RollbackTransaction(std::shared_ptr<ATN> core,
-                                     const std::set<std::string>& written_keys) {
-
-  ROCKS_LOG_DEBUG(info_log_, "TOTDB start to rollback txn id(%llu) \n", core->txn_id_);
+Status TOTransactionDBImpl::RollbackTransaction(
+    const std::shared_ptr<ATN>& core, const std::set<TxnKey>& written_keys) {
+  ROCKS_LOG_DEBUG(info_log_, "TOTDB start to rollback txn id(%llu)",
+                  core->txn_id_);
+  auto state = core->state_.load(std::memory_order_relaxed);
+  assert(state == TOTransaction::kStarted || state == TOTransaction::kPrepared);
+  // clean prepare_heap_ before set state to keep the invariant that no
+  // kRollback state in prepare_heap
+  if (state == TOTransaction::kPrepared) {
+    uint32_t remove_cnt = prepare_heap_.Remove(core.get());
+    (void)remove_cnt;
+    assert(remove_cnt == written_keys.size());
+  }
   // Remove txn for active txns
-  bool needClean = false;
-  TransactionID maxToCleanTxnId = 0;
-  RocksTimeStamp maxToCleanTs = 0;
+  bool need_clean = false;
+  TransactionID max_to_clean_txn_id = 0;
+  RocksTimeStamp max_to_clean_ts = 0;
   {
     std::lock_guard<std::mutex> lock(active_txns_mutex_);
 
     auto iter = active_txns_.find(core->txn_id_);
     assert(iter != active_txns_.end());
-    assert(iter->second->state_.load() == TOTransaction::kStarted);
     iter->second->state_.store(TOTransaction::kRollback);
     dbimpl_->ReleaseSnapshot(iter->second->txn_snapshot);
     iter = active_txns_.erase(iter); 
     
     if (iter == active_txns_.begin()) {
-      needClean = true;
+      need_clean = true;
       if (!active_txns_.empty()) {
-        maxToCleanTxnId = active_txns_.begin()->first - 1;
+        max_to_clean_txn_id = active_txns_.begin()->first - 1;
       } else {
-        maxToCleanTxnId = committed_max_txnid_;
+        max_to_clean_txn_id = committed_max_txnid_;
       }
     }
   }
   // Calculation the min clean ts between oldest and the read ts
-  AdvanceTS(&maxToCleanTs);
-  
-  // Remove written keys from uncommitted keys
+  AdvanceTS(&max_to_clean_ts);
 
-  std::map<size_t, std::set<std::string>> stripe_keys_map;
+  // Remove written keys from uncommitted keys
+  std::map<size_t, std::set<TxnKey>> stripe_keys_map;
   auto keys_iter = written_keys.begin();
   while (keys_iter != written_keys.end()) {
-    std::set<std::string> stripe_keys;
     auto stripe_num = GetStripe(*keys_iter); 
     if (stripe_keys_map.find(stripe_num) == stripe_keys_map.end()) {
       stripe_keys_map[stripe_num] = {};
@@ -562,10 +952,10 @@ Status TOTransactionDBImpl::RollbackTransaction(std::shared_ptr<ATN> core,
 
   ROCKS_LOG_DEBUG(info_log_, "TOTDB end rollback txn id(%llu) \n", core->txn_id_);
 
-  if (needClean) {
+  if (need_clean) {
     ROCKS_LOG_DEBUG(info_log_, "TOTDB going to clean txnid(%llu) ts(%llu) \n",
-                  maxToCleanTxnId, maxToCleanTs);
-    clean_job_.SetCleanInfo(maxToCleanTxnId, maxToCleanTs);
+                    max_to_clean_txn_id, max_to_clean_ts);
+    clean_job_.SetCleanInfo(max_to_clean_txn_id, max_to_clean_ts);
   }
 
   txn_aborts_.fetch_add(1, std::memory_order_relaxed);
@@ -581,7 +971,7 @@ Status TOTransactionDBImpl::RollbackTransaction(std::shared_ptr<ATN> core,
 Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
                                          const RocksTimeStamp& ts, bool force) {
   if (ts_type == kCommitted) {
-    // NOTE(wolfkdy): committed_max_ts_ is not protected by ts_meta_mutex_,
+    // NOTE(deyukong): committed_max_ts_ is not protected by ts_meta_mutex_,
     // its change is by atomic cas. So here it's meaningless to Wlock
     // ts_meta_mutex_ it's app-level's duty to guarantee that when updating
     // kCommitted-timestamp, there is no paralllel running txns that will also
@@ -601,7 +991,7 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
   }
 
   if (ts_type == kOldest) {
-    // NOTE(wolfkdy): here we must take lock, every txn's readTs-setting
+    // NOTE(deyukong): here we must take lock, every txn's readTs-setting
     // has to be in the same critical area within the set of kOldest
     uint64_t original = 0;
     {
@@ -650,14 +1040,16 @@ Status TOTransactionDBImpl::QueryTimeStamp(const TimeStampType& ts_type,
     ReadLock rl(&commit_ts_mutex_);
     uint64_t walk_cnt = 0;
     for (auto it = commit_q_.begin(); it != commit_q_.end(); ++it) {
-      if (it->second->state_.load(std::memory_order_relaxed) != TOTransaction::kStarted) {
+      const auto state = it->second->state_.load(std::memory_order_relaxed);
+      if (state != TOTransaction::kStarted &&
+          state != TOTransaction::kPrepared) {
         walk_cnt++;
         continue;
       }
       assert(it->second->commit_ts_set_);
       assert(it->second->first_commit_ts_ > 0);
       assert(it->second->commit_ts_ >= it->second->first_commit_ts_);
-      tmp = std::min(tmp, it->second->first_commit_ts_-1);
+      tmp = std::min(tmp, it->first.first - 1);
       break;
     }
     commit_q_walk_len_sum_.fetch_add(commit_q_.size(), std::memory_order_relaxed);

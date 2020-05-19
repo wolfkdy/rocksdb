@@ -562,6 +562,7 @@ ReadOptions::ReadOptions()
       background_purge_on_iterator_cleanup(false),
       ignore_range_deletions(false),
       iter_start_seqnum(0),
+      use_internal_key(false),
       read_timestamp(0) {}
 
 ReadOptions::ReadOptions(bool cksum, bool cache)
@@ -581,6 +582,7 @@ ReadOptions::ReadOptions(bool cksum, bool cache)
       background_purge_on_iterator_cleanup(false),
       ignore_range_deletions(false),
       iter_start_seqnum(0),
+      use_internal_key(false),
       read_timestamp(0) {}
 
 }  // namespace rocksdb
