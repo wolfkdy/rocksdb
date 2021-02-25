@@ -106,6 +106,8 @@ class CompactionJobTest : public testing::Test {
     InternalKey smallest_key, largest_key;
     SequenceNumber smallest_seqno = kMaxSequenceNumber;
     SequenceNumber largest_seqno = 0;
+    uint64_t min_ts = kMaxTimeStamp;
+    uint64_t max_ts = 0;
     for (auto kv : contents) {
       ParsedInternalKey key;
       std::string skey;
@@ -115,6 +117,8 @@ class CompactionJobTest : public testing::Test {
 
       smallest_seqno = std::min(smallest_seqno, key.sequence);
       largest_seqno = std::max(largest_seqno, key.sequence);
+      min_ts = std::min(min_ts, key.timestamp);
+      max_ts = std::max(max_ts, key.timestamp);
 
       if (first_key ||
           cfd_->user_comparator()->Compare(key.user_key, smallest) < 0) {
@@ -136,7 +140,7 @@ class CompactionJobTest : public testing::Test {
 
     VersionEdit edit;
     edit.AddFile(level, file_number, 0, 10, smallest_key, largest_key,
-        smallest_seqno, largest_seqno, false);
+        smallest_seqno, largest_seqno, false, min_ts, max_ts, false);
 
     mutex_.Lock();
     versions_->LogAndApply(versions_->GetColumnFamilySet()->GetDefault(),

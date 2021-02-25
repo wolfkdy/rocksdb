@@ -90,6 +90,8 @@ class TOTransactionDB : public StackableDB {
 
   virtual Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) = 0;
 
+  virtual Status RollbackToStable(ColumnFamilyHandle* column_family) = 0;
+
   virtual Status Stat(TOTransactionStat* stat) = 0;
   //virtual Status Close();
   

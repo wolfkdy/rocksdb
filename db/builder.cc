@@ -146,13 +146,13 @@ Status BuildTable(
         true /* internal key corruption is not ok */,
         range_del_agg.get() /* range_del_agg */, nullptr /* compaction */,
         nullptr /* compaction_filter */, nullptr /* shutting_down */,
-        0 /* preserve_deletes_seqnum */, pin_ts);
+        0 /* preserve_deletes_seqnum */, pin_ts, false /* trim_history */);
     c_iter.SeekToFirst();
     for (; c_iter.Valid(); c_iter.Next()) {
       const Slice& key = c_iter.key();
       const Slice& value = c_iter.value();
       builder->Add(key, value);
-      meta->UpdateBoundaries(key, c_iter.ikey().sequence);
+      meta->UpdateBoundaries(key, c_iter.ikey().sequence, c_iter.ikey().timestamp);
 
       // TODO(noetzli): Update stats after flush, too.
       if (io_priority == Env::IO_HIGH &&

@@ -62,6 +62,8 @@ struct SstFileMetaData {
         largest_seqno(0),
         smallestkey(""),
         largestkey(""),
+        min_timestamp(0),
+        max_timestamp(0),
         num_reads_sampled(0),
         being_compacted(false),
         num_entries(0),
@@ -71,7 +73,9 @@ struct SstFileMetaData {
                   size_t _size, SequenceNumber _smallest_seqno,
                   SequenceNumber _largest_seqno,
                   const std::string& _smallestkey,
-                  const std::string& _largestkey, uint64_t _num_reads_sampled,
+                  const std::string& _largestkey,
+                  uint64_t _min_ts, uint64_t _max_ts,
+                  uint64_t _num_reads_sampled,
                   bool _being_compacted)
       : size(_size),
         name(_file_name),
@@ -80,6 +84,8 @@ struct SstFileMetaData {
         largest_seqno(_largest_seqno),
         smallestkey(_smallestkey),
         largestkey(_largestkey),
+        min_timestamp(_min_ts),
+        max_timestamp(_max_ts),
         num_reads_sampled(_num_reads_sampled),
         being_compacted(_being_compacted),
         num_entries(0),
@@ -96,6 +102,8 @@ struct SstFileMetaData {
   SequenceNumber largest_seqno;   // Largest sequence number in file.
   std::string smallestkey;     // Smallest user defined key in the file.
   std::string largestkey;      // Largest user defined key in the file.
+  uint64_t min_timestamp;      // Min timestamp in file.
+  uint64_t max_timestamp;      // Max timestamp in file.
   uint64_t num_reads_sampled;  // How many times the file is read.
   bool being_compacted;  // true if the file is currently being compacted.
 

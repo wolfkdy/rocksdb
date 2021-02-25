@@ -110,8 +110,8 @@ void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
 
 std::string ParsedInternalKey::DebugString(bool hex) const {
   char buf[100];
-  snprintf(buf, sizeof(buf), "' seq:%" PRIu64 ", type:%d, ts:%" PRIu64, sequence,
-           static_cast<int>(type), timestamp);
+  snprintf(buf, sizeof(buf), "' seq:%" PRIu64 ", type:%d, ts:%u,%u", sequence,
+           static_cast<int>(type), (unsigned int)(timestamp>>32), (unsigned int)(timestamp&0xFFFFFFFF));
   std::string result = "'";
   result += user_key.ToString(hex);
   result += buf;

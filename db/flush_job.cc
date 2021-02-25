@@ -100,8 +100,7 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
                    Directory* output_file_directory,
                    CompressionType output_compression, Statistics* stats,
                    EventLogger* event_logger, bool measure_io_stats,
-                   const bool sync_output_directory, const bool write_manifest
-                   ,
+                   const bool sync_output_directory, const bool write_manifest,
                    uint64_t pin_ts
                    )
     : dbname_(dbname),
@@ -381,7 +380,6 @@ Status FlushJob::WriteLevel0Table() {
                    meta_.fd.GetNumber(), meta_.fd.GetFileSize(),
                    s.ToString().c_str(),
                    meta_.marked_for_compaction ? " (needs compaction)" : "");
-
     if (s.ok() && output_file_directory_ != nullptr && sync_output_directory_) {
       s = output_file_directory_->Fsync();
     }
@@ -401,6 +399,7 @@ Status FlushJob::WriteLevel0Table() {
     edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
                    meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
                    meta_.fd.smallest_seqno, meta_.fd.largest_seqno,
+                   meta_.fd.min_timestamp, meta_.fd.max_timestamp,
                    meta_.marked_for_compaction);
   }
 

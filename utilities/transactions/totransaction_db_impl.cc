@@ -8,6 +8,7 @@
 #include "utilities/transactions/totransaction_db_impl.h"
 #include "util/string_util.h"
 #include "util/logging.h"
+#include <iostream>
 
 namespace rocksdb {
 
@@ -215,7 +216,7 @@ TOTransaction* TOTransactionDBImpl::BeginTransaction(const WriteOptions& write_o
 
 Status TOTransactionDBImpl::CheckWriteConflict(ColumnFamilyHandle* column_family,
                                         const Slice& key, 
-										const TransactionID& txn_id,
+                                        const TransactionID& txn_id,
                                         const RocksTimeStamp& readts) {
   (void)column_family;
   //if first check the uc key and ck busy ,it will need remove uc key ,so we check commit key first
@@ -607,7 +608,9 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
     {
       WriteLock wl(&ts_meta_mutex_);
       if ((oldest_ts_ != nullptr && *oldest_ts_ > ts) && !force) {
-        return Status::InvalidArgument("oldestTs can not travel back");
+        std::stringstream ss;
+        ss << "oldestTs can not travel back. oldest_ts from: " << *oldest_ts_ << " to " << ts;
+        return Status::InvalidArgument(ss.str());
       }
       original = (oldest_ts_ == nullptr) ? 0 : *oldest_ts_;
       oldest_ts_.reset(new RocksTimeStamp(ts));
@@ -632,8 +635,23 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
       read_q_walk_len_sum_.fetch_add(read_q_.size(), std::memory_order_relaxed);
       read_q_walk_times_.fetch_add(walk_cnt, std::memory_order_relaxed);
     }
-    dbimpl_->AdvancePinTs(pin_ts, force);
-    ROCKS_LOG_DEBUG(info_log_, "TOTDB set TS type(%d) value(%llu)\n", ts_type, ts);
+    dbimpl_->SetOldestTimeStamp(pin_ts);
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB set oldest ts type(%d) value(%llu)\n", ts_type, pin_ts);
+    return Status::OK();
+  }
+
+  if (ts_type == kStable) {
+    ReadLock rl(&ts_meta_mutex_);
+    if (oldest_ts_ != nullptr && *oldest_ts_ > ts && !force) {
+      return Status::InvalidArgument(
+          "kStable ts should not be less than kOldestTs");
+    }
+    if (dbimpl_->GetStableTimeStamp() > ts && !force) {
+      return Status::InvalidArgument(
+          "kStable ts should not be less than current stable ts");
+    }
+    dbimpl_->SetStableTimeStamp(ts);
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB set stable ts type(%d) value(%llu)\n", ts_type, ts);
     return Status::OK();
   }
 
@@ -669,14 +687,23 @@ Status TOTransactionDBImpl::QueryTimeStamp(const TimeStampType& ts_type,
     // NOTE: query oldest is not a frequent thing, so I just
     // take the rlock
     ReadLock rl(&ts_meta_mutex_);
-    if (oldest_ts_ == nullptr) {
-      return Status::NotFound("not found");
-    }
-    *timestamp = *oldest_ts_;
+    // todo
+    *timestamp = dbimpl_->GetOldestTimeStamp();
+    oldest_ts_.reset(new RocksTimeStamp(dbimpl_->GetOldestTimeStamp()));
+    ROCKS_LOG_DEBUG(info_log_, "TOTDB query TS type(%llu) value(%llu) \n", ts_type, *timestamp);
+    return Status::OK();
+  }
+  if (ts_type == kStable) {
+    ReadLock rl(&ts_meta_mutex_);
+    *timestamp = dbimpl_->GetStableTimeStamp();
     ROCKS_LOG_DEBUG(info_log_, "TOTDB query TS type(%llu) value(%llu) \n", ts_type, *timestamp);
     return Status::OK();
   }
   return Status::InvalidArgument("invalid ts_type");
+}
+
+Status TOTransactionDBImpl::RollbackToStable(ColumnFamilyHandle* column_family) {
+  return dbimpl_->TrimHistoryToStableTs(column_family);
 }
 
 Status TOTransactionDBImpl::Stat(TOTransactionStat* stat) {

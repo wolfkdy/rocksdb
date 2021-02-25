@@ -38,19 +38,25 @@ struct FileDescriptor {
   uint64_t file_size;  // File size in bytes
   SequenceNumber smallest_seqno;  // The smallest seqno in this file
   SequenceNumber largest_seqno;   // The largest seqno in this file
-
+  uint64_t min_timestamp;  // The smallest timestamp in this file
+  uint64_t max_timestamp;  // The largest timestamp in this file
   FileDescriptor() : FileDescriptor(0, 0, 0) {}
 
   FileDescriptor(uint64_t number, uint32_t path_id, uint64_t _file_size)
-      : FileDescriptor(number, path_id, _file_size, kMaxSequenceNumber, 0) {}
+      : FileDescriptor(number, path_id, _file_size,
+                       kMaxSequenceNumber, 0,
+                       kMaxTimeStamp, 0) {}
 
   FileDescriptor(uint64_t number, uint32_t path_id, uint64_t _file_size,
-                 SequenceNumber _smallest_seqno, SequenceNumber _largest_seqno)
+                 SequenceNumber _smallest_seqno, SequenceNumber _largest_seqno,
+                 uint64_t _min_timestamp, uint64_t _max_timestamp)
       : table_reader(nullptr),
         packed_number_and_path_id(PackFileNumberAndPathId(number, path_id)),
         file_size(_file_size),
         smallest_seqno(_smallest_seqno),
-        largest_seqno(_largest_seqno) {}
+        largest_seqno(_largest_seqno),
+        min_timestamp(_min_timestamp),
+        max_timestamp(_max_timestamp) {}
 
   FileDescriptor& operator=(const FileDescriptor& fd) {
     table_reader = fd.table_reader;
@@ -58,6 +64,8 @@ struct FileDescriptor {
     file_size = fd.file_size;
     smallest_seqno = fd.smallest_seqno;
     largest_seqno = fd.largest_seqno;
+    min_timestamp = fd.min_timestamp;
+    max_timestamp = fd.max_timestamp;
     return *this;
   }
 
@@ -129,17 +137,21 @@ struct FileMetaData {
 
   // REQUIRED: Keys must be given to the function in sorted order (it expects
   // the last key to be the largest).
-  void UpdateBoundaries(const Slice& key, SequenceNumber seqno) {
+  void UpdateBoundaries(const Slice& key, SequenceNumber seqno, uint64_t ts) {
     if (smallest.size() == 0) {
       smallest.DecodeFrom(key);
     }
     largest.DecodeFrom(key);
     fd.smallest_seqno = std::min(fd.smallest_seqno, seqno);
     fd.largest_seqno = std::max(fd.largest_seqno, seqno);
+    fd.min_timestamp = std::min(fd.min_timestamp, ts);
+    fd.max_timestamp = std::max(fd.max_timestamp, ts);
   }
 
   // Unlike UpdateBoundaries, ranges do not need to be presented in any
   // particular order.
+  // NOTE(deyukong): mongoRocks does not use range_deleters, so timestamp is not
+  // maintained here.
   void UpdateBoundariesForRange(const InternalKey& start,
                                 const InternalKey& end, SequenceNumber seqno,
                                 const InternalKeyComparator& icmp) {
@@ -229,22 +241,27 @@ class VersionEdit {
 
   uint64_t log_number() { return log_number_; }
 
+  bool has_stable_ts() const { return has_stable_timestamp_; }
+
+  uint64_t stable_ts() const { return stable_timestamp_; }
+
   // Add the specified file at the specified number.
   // REQUIRES: This version has not been saved (see VersionSet::SaveTo)
   // REQUIRES: "smallest" and "largest" are smallest and largest keys in file
   void AddFile(int level, uint64_t file, uint32_t file_path_id,
                uint64_t file_size, const InternalKey& smallest,
                const InternalKey& largest, const SequenceNumber& smallest_seqno,
-               const SequenceNumber& largest_seqno,
+               const SequenceNumber& largest_seqno, uint64_t min_ts, uint64_t max_ts,
                bool marked_for_compaction) {
     assert(smallest_seqno <= largest_seqno);
     FileMetaData f;
     f.fd = FileDescriptor(file, file_path_id, file_size, smallest_seqno,
-                          largest_seqno);
+                          largest_seqno, min_ts, max_ts);
     f.smallest = smallest;
     f.largest = largest;
-    f.fd.smallest_seqno = smallest_seqno;
-    f.fd.largest_seqno = largest_seqno;
+    // TODO: cuixin
+//    f.fd.smallest_seqno = smallest_seqno;
+//    f.fd.largest_seqno = largest_seqno;
     f.marked_for_compaction = marked_for_compaction;
     new_files_.emplace_back(level, std::move(f));
   }
@@ -308,6 +325,12 @@ class VersionEdit {
   std::string DebugString(bool hex_key = false) const;
   std::string DebugJSON(int edit_num, bool hex_key = false) const;
 
+  void SetStableTimeStamp(uint64_t ts) {
+    has_stable_timestamp_ = true;
+    stable_timestamp_ = ts;
+  }
+
+
  private:
   friend class VersionSet;
   friend class Version;
@@ -328,6 +351,7 @@ class VersionEdit {
   bool has_prev_log_number_;
   bool has_next_file_number_;
   bool has_last_sequence_;
+  bool has_stable_timestamp_;
   bool has_max_column_family_;
   bool has_min_log_number_to_keep_;
 
@@ -346,6 +370,7 @@ class VersionEdit {
 
   bool is_in_atomic_group_;
   uint32_t remaining_entries_;
+  uint64_t stable_timestamp_;
 };
 
 }  // namespace rocksdb

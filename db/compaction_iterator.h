@@ -69,7 +69,8 @@ class CompactionIterator {
                      const CompactionFilter* compaction_filter = nullptr,
                      const std::atomic<bool>* shutting_down = nullptr,
                      const SequenceNumber preserve_deletes_seqnum = 0,
-                     const uint64_t pin_timestamp = 0);
+                     const uint64_t pin_timestamp = 0,
+                     const bool trim_history = false);
 
   // Constructor with custom CompactionProxy, used for tests.
   CompactionIterator(InternalIterator* input, const Comparator* cmp,
@@ -83,7 +84,8 @@ class CompactionIterator {
                      const CompactionFilter* compaction_filter = nullptr,
                      const std::atomic<bool>* shutting_down = nullptr,
                      const SequenceNumber preserve_deletes_seqnum = 0,
-                     const uint64_t pin_timestamp = 0);
+                     const uint64_t pin_timestamp = 0,
+                     const bool trim_history = false);
 
   ~CompactionIterator();
 
@@ -211,7 +213,14 @@ class CompactionIterator {
   // Used to avoid purging uncommitted values. The application can specify
   // uncommitted values by providing a SnapshotChecker object.
   bool current_key_committed_;
+  
   uint64_t pin_timestamp_;
+  // To configure compaction behavior
+  // if trim_history_ == true, versions > pin_timestamp_ will be trimed.
+  // versions <= pin_timestamp_ will be preserved.
+  // if trim_history_ == false, versions > pin_timestamp_ will be preserved,
+  // versions <= pin_timestamp_ will be handled in the usual compaction way.
+  bool trim_history_;
 
   bool IsShuttingDown() {
     // This is a best-effort facility, so memory_order_relaxed is sufficient.

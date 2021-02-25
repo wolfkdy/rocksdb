@@ -925,6 +925,8 @@ void Version::GetColumnFamilyMetaData(ColumnFamilyMetaData* cf_meta) {
           file->fd.largest_seqno,
           file->smallest.user_key().ToString(),
           file->largest.user_key().ToString(),
+          file->fd.min_timestamp,
+          file->fd.max_timestamp,
           file->stats.num_reads_sampled.load(std::memory_order_relaxed),
           file->being_compacted});
       files.back().num_entries = file->num_entries;
@@ -2016,11 +2018,25 @@ void VersionStorageInfo::GenerateBottommostFiles() {
   }
 }
 
-void VersionStorageInfo::UpdateOldestSnapshot(SequenceNumber seqnum) {
+void VersionStorageInfo::UpdateOldestSnapshot(Logger* info_log, SequenceNumber seqnum, uint64_t pin_ts) {
   assert(seqnum >= oldest_snapshot_seqnum_);
   oldest_snapshot_seqnum_ = seqnum;
   if (oldest_snapshot_seqnum_ > bottommost_files_mark_threshold_) {
     ComputeBottommostFilesMarkedForCompaction();
+    if (pin_ts != 0) {
+      autovector<std::pair<int, FileMetaData*>> filtered;
+      for (auto& p : bottommost_files_marked_for_compaction_) {
+        if (p.second->fd.max_timestamp == 0 ||
+          p.second->fd.max_timestamp < pin_ts) {
+          filtered.push_back(p);
+        } else {
+          ROCKS_LOG_WARN(info_log,
+            "File ignored for bottomlevel-compaction, file: %d, max_ts: %llu, pin_ts: %llu",
+            p.first, p.second->fd.max_timestamp, pin_ts);
+        }
+      }
+      bottommost_files_marked_for_compaction_ = filtered;
+    }
   }
 }
 
@@ -3354,7 +3370,7 @@ Status VersionSet::ApplyOneVersionEdit(
     bool* have_prev_log_number, uint64_t* previous_log_number,
     bool* have_next_file, uint64_t* next_file, bool* have_last_sequence,
     SequenceNumber* last_sequence, uint64_t* min_log_number_to_keep,
-    uint32_t* max_column_family) {
+    uint32_t* max_column_family, bool* have_stable_ts, uint64_t* stable_ts) {
   // Not found means that user didn't supply that column
   // family option AND we encountered column family add
   // record. Once we encounter column family drop record,
@@ -3469,6 +3485,11 @@ Status VersionSet::ApplyOneVersionEdit(
     *last_sequence = edit.last_sequence_;
     *have_last_sequence = true;
   }
+
+  if (edit.has_stable_timestamp_) {
+    *stable_ts = edit.stable_timestamp_;
+    *have_stable_ts = true;
+  }  
   return Status::OK();
 }
 
@@ -3530,12 +3551,14 @@ Status VersionSet::Recover(
   bool have_prev_log_number = false;
   bool have_next_file = false;
   bool have_last_sequence = false;
+  bool have_stable_ts = false;
   uint64_t next_file = 0;
   uint64_t last_sequence = 0;
   uint64_t log_number = 0;
   uint64_t previous_log_number = 0;
   uint32_t max_column_family = 0;
   uint64_t min_log_number_to_keep = 0;
+  uint64_t stable_ts = 0;
   std::unordered_map<uint32_t, BaseReferencedVersionBuilder*> builders;
 
   // add default column family
@@ -3594,7 +3617,7 @@ Status VersionSet::Recover(
                 &have_log_number, &log_number, &have_prev_log_number,
                 &previous_log_number, &have_next_file, &next_file,
                 &have_last_sequence, &last_sequence, &min_log_number_to_keep,
-                &max_column_family);
+                &max_column_family, &have_stable_ts, &stable_ts);
             if (!s.ok()) {
               break;
             }
@@ -3615,7 +3638,7 @@ Status VersionSet::Recover(
             &have_log_number, &log_number, &have_prev_log_number,
             &previous_log_number, &have_next_file, &next_file,
             &have_last_sequence, &last_sequence, &min_log_number_to_keep,
-            &max_column_family);
+            &max_column_family, &have_stable_ts, &stable_ts);
       }
       if (!s.ok()) {
         break;
@@ -3710,6 +3733,9 @@ Status VersionSet::Recover(
     last_published_sequence_ = last_sequence;
     last_sequence_ = last_sequence;
     prev_log_number_ = previous_log_number;
+    stable_timestamp_ = stable_ts;
+    oldest_timestamp_ = stable_timestamp_.load(); // only set in recover
+
 
     ROCKS_LOG_INFO(
         db_options_->info_log,
@@ -4167,6 +4193,7 @@ Status VersionSet::WriteSnapshot(log::Writer* log) {
           edit.AddFile(level, f->fd.GetNumber(), f->fd.GetPathId(),
                        f->fd.GetFileSize(), f->smallest, f->largest,
                        f->fd.smallest_seqno, f->fd.largest_seqno,
+                       f->fd.min_timestamp, f->fd.max_timestamp,
                        f->marked_for_compaction);
         }
       }

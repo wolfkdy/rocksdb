@@ -315,9 +315,8 @@ CompactionJob::CompactionJob(
     SequenceNumber earliest_write_conflict_snapshot,
     const SnapshotChecker* snapshot_checker, std::shared_ptr<Cache> table_cache,
     EventLogger* event_logger, bool paranoid_file_checks, bool measure_io_stats,
-    const std::string& dbname, CompactionJobStats* compaction_job_stats
-    ,
-    uint64_t pin_timestamp
+    const std::string& dbname, CompactionJobStats* compaction_job_stats,
+    uint64_t pin_timestamp, bool trim_history, const bool ignore_pin_timestamp
     )
     : job_id_(job_id),
       compact_(new CompactionState(compaction)),
@@ -346,10 +345,11 @@ CompactionJob::CompactionJob(
       bottommost_level_(false),
       paranoid_file_checks_(paranoid_file_checks),
       measure_io_stats_(measure_io_stats),
-      write_hint_(Env::WLTH_NOT_SET)
-      ,
-      pin_timestamp_(pin_timestamp)
-{
+      write_hint_(Env::WLTH_NOT_SET),
+      pin_timestamp_(pin_timestamp),
+      trim_history_(trim_history),
+      ignore_pin_timestamp_(ignore_pin_timestamp) {
+
   assert(log_buffer_ != nullptr);
   const auto* cfd = compact_->compaction->column_family_data();
   ThreadStatusUtil::SetColumnFamily(cfd, cfd->ioptions()->env,
@@ -901,15 +901,15 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     input->SeekToFirst();
   }
 
+  auto pin_timestamp = ignore_pin_timestamp_? 0: pin_timestamp_;
+
   Status status;
   sub_compact->c_iter.reset(new CompactionIterator(
       input.get(), cfd->user_comparator(), &merge, versions_->LastSequence(),
       &existing_snapshots_, earliest_write_conflict_snapshot_,
       snapshot_checker_, env_, ShouldReportDetailedTime(env_, stats_), false,
       &range_del_agg, sub_compact->compaction, compaction_filter,
-      shutting_down_, preserve_deletes_seqnum_
-      ,pin_timestamp_
-  ));
+      shutting_down_, preserve_deletes_seqnum_, pin_timestamp, trim_history_));
   auto c_iter = sub_compact->c_iter.get();
   c_iter->SeekToFirst();
   if (c_iter->Valid() && sub_compact->compaction->output_level() != 0) {
@@ -958,7 +958,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
     sub_compact->builder->Add(key, value);
     sub_compact->current_output_file_size = sub_compact->builder->FileSize();
     sub_compact->current_output()->meta.UpdateBoundaries(
-        key, c_iter->ikey().sequence);
+        key, c_iter->ikey().sequence, c_iter->ikey().timestamp);
     sub_compact->num_output_records++;
 
     if (sub_compact->outputs.size() == 1) {  // first output file

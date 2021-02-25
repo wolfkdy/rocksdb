@@ -19,6 +19,7 @@
 #include "util/testharness.h"
 #include "util/transaction_test_util.h"
 #include "port/port.h"
+#include "db/db_test_util.h"
 
 using std::string;
 
@@ -51,12 +52,23 @@ class TOTransactionTest : public testing::Test {
     Open();
   }
 
+void Reopen(Options newOptions) {
+  delete txn_db;
+  txn_db = nullptr;
+  Open(newOptions);
+}
+
 private:
   void Open() {
     Status s = TOTransactionDBImpl::Open(options, txndb_options, dbname, &txn_db);
     assert(s.ok());
     assert(txn_db != nullptr);
   }
+    void Open(Options newOptions) {
+      Status s = TOTransactionDBImpl::Open(newOptions, txndb_options, dbname, &txn_db);
+      assert(s.ok());
+      assert(txn_db != nullptr);
+    }
 };
 
 TEST_F(TOTransactionTest, ValidateIOWithoutTimestamp) {
@@ -1170,6 +1182,153 @@ TEST_F(TOTransactionTest, MemUsage) {
   ASSERT_EQ(stat.cur_conflict_bytes, 3+16+4+16+1+16);
   delete txn;
 }
+
+
+TEST_F(TOTransactionTest, tsPinBottomLevelCompaction) {
+  // bottom-level files may contain deletions due to snapshots protecting the
+  // deleted keys. Once the snapshot is released, we should see files with many
+  // such deletions undergo single-file compactions.
+  const int kNumKeysPerFile = 1024;
+  const int kNumLevelFiles = 4;
+  const int kValueSize = 128;
+  auto newOptions = options;
+  newOptions.compression = kNoCompression;
+  newOptions.level0_file_num_compaction_trigger = kNumLevelFiles;
+  // inflate it a bit to account for key/metadata overhead
+  newOptions.target_file_size_base = 130 * kNumKeysPerFile * kValueSize / 100;
+  Reopen(newOptions);
+  auto txn_db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+  auto db_imp = txn_db_imp->getDbImpl();
+
+  WriteOptions write_options;
+  ReadOptions read_options;
+  //read_options.read_timestamp = 50;
+  string value;
+  Status s;
+
+  Random rnd(301);
+  const Snapshot* snapshot = nullptr;
+  for (int i = 0; i < kNumLevelFiles; ++i) {
+    TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
+    for (int j = 0; j < kNumKeysPerFile; ++j) {
+      ASSERT_OK(
+          txn->Put(DBTestBase::Key(i * kNumKeysPerFile + j), DBTestBase::RandomString(&rnd, kValueSize)));
+    }
+    if (i == kNumLevelFiles - 1) {
+      snapshot = db_imp->GetSnapshot();
+      // delete every other key after grabbing a snapshot, so these deletions
+      // and the keys they cover can't be dropped until after the snapshot is
+      // released.
+      for (int j = 0; j < kNumLevelFiles * kNumKeysPerFile; j += 2) {
+        ASSERT_OK(txn->Delete(DBTestBase::Key(j)));
+      }
+    }
+    ASSERT_OK(txn->SetCommitTimeStamp(i+1));
+    s = txn->Commit();
+    ASSERT_OK(s);
+    delete txn;
+    db_imp->Flush(FlushOptions());
+  }
+  db_imp->TEST_WaitForCompact();
+  std::string level1FileNum;
+  db_imp->GetProperty("rocksdb.num-files-at-level1", &level1FileNum);
+  ASSERT_EQ(std::to_string(kNumLevelFiles), level1FileNum);
+  std::vector<LiveFileMetaData> pre_release_metadata, post_release_metadata;
+  db_imp->GetLiveFilesMetaData(&pre_release_metadata);
+  // just need to bump seqnum so ReleaseSnapshot knows the newest key in the SST
+  // files does not need to be preserved in case of a future snapshot.
+  TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
+  ASSERT_OK(txn->Put(DBTestBase::Key(0), "val"));
+  s = txn->Commit();
+  ASSERT_OK(s);
+  delete txn;
+
+  // set the pin_ts to 1, which will make bottom compact make no progress since 
+  // every sst file's max ts is >= 1.
+  // if want test Bottom compaction working well, 
+  // see CompactBottomLevelFilesWithDeletions
+  s = txn_db->SetTimeStamp(kOldest, 1);
+  ASSERT_OK(s);
+  db_imp->ReleaseSnapshot(snapshot);
+  rocksdb::SyncPoint::GetInstance()->SetCallBack(
+      "LevelCompactionPicker::PickCompaction:Return", [&](void* arg) {
+        Compaction* compaction = reinterpret_cast<Compaction*>(arg);
+        ASSERT_TRUE(compaction->compaction_reason() ==
+                    CompactionReason::kBottommostFiles);
+      });
+  rocksdb::SyncPoint::GetInstance()->EnableProcessing();
+  db_imp->TEST_WaitForCompact();
+  db_imp->GetLiveFilesMetaData(&post_release_metadata);
+  ASSERT_TRUE(pre_release_metadata.size() == post_release_metadata.size());
+
+  size_t sum_pre = 0, sum_post = 0;
+  for (size_t i = 0; i < pre_release_metadata.size(); ++i) {
+    ASSERT_EQ(1, pre_release_metadata[i].level);
+    sum_pre += pre_release_metadata[i].size;
+  }
+  for (size_t i = 0; i < post_release_metadata.size(); ++i) {
+    sum_post += post_release_metadata[i].size;
+  }
+  ASSERT_EQ(sum_post, sum_pre);
+  rocksdb::SyncPoint::GetInstance()->DisableProcessing();
+}
+
+TEST_F(TOTransactionTest, TrimHistoryToStableTs) {
+  const int kNumKeysPerFile = 1024;
+  const int kNumLevelFiles = 4;
+  const int kValueSize = 128;
+  auto newOptions = options;
+  newOptions.compression = kNoCompression;
+  newOptions.level0_file_num_compaction_trigger = kNumLevelFiles + 1;
+  // inflate it a bit to account for key/metadata overhead
+  newOptions.target_file_size_base = 130 * kNumKeysPerFile * kValueSize / 100;
+  Reopen(newOptions);
+  auto txn_db_imp = dynamic_cast<TOTransactionDBImpl*>(txn_db);
+  auto db_imp = txn_db_imp->getDbImpl();
+
+  WriteOptions write_options;
+  string value;
+  Status s;
+
+  Random rnd(301);
+  for (int i = 0; i < kNumLevelFiles; ++i) {
+    TOTransaction* txn = txn_db->BeginTransaction(write_options, txn_options);
+    for (int j = 0; j < kNumKeysPerFile; ++j) {
+      ASSERT_OK(
+          txn->Put(DBTestBase::Key(i * kNumKeysPerFile + j), DBTestBase::RandomString(&rnd, kValueSize)));
+    }
+    ASSERT_OK(txn->SetCommitTimeStamp(i+1));
+    s = txn->Commit();
+    ASSERT_OK(s);
+    delete txn;
+    db_imp->Flush(FlushOptions());
+  }
+  db_imp->TEST_WaitForCompact();
+  std::string level1FileNum;
+  db_imp->GetProperty("rocksdb.num-files-at-level0", &level1FileNum);
+  ASSERT_EQ(std::to_string(kNumLevelFiles), level1FileNum);
+  std::vector<LiveFileMetaData> pre_release_metadata, post_release_metadata;
+  db_imp->GetLiveFilesMetaData(&pre_release_metadata);
+  s = txn_db->SetTimeStamp(kStable, 1);
+  db_imp->TrimHistoryToStableTs(db_imp->DefaultColumnFamily());
+  db_imp->GetProperty("rocksdb.num-files-at-level0", &level1FileNum);
+  ASSERT_EQ("1", level1FileNum);
+    
+  db_imp->GetLiveFilesMetaData(&post_release_metadata);
+  ASSERT_TRUE(1 == post_release_metadata.size());
+
+  size_t sum_pre = 0, sum_post = 0;
+  for (size_t i = 0; i < pre_release_metadata.size(); ++i) {
+    ASSERT_EQ(0, pre_release_metadata[i].level);
+    sum_pre += pre_release_metadata[i].size;
+  }
+  for (size_t i = 0; i < post_release_metadata.size(); ++i) {
+    ASSERT_EQ(0, post_release_metadata[i].level);
+    sum_post += post_release_metadata[i].size;
+  }
+  ASSERT_LT(sum_post, sum_pre);
+}
+
 
 }  // namespace rocksdb
 

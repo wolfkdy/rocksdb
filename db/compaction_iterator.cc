@@ -21,14 +21,17 @@ CompactionIterator::CompactionIterator(
     CompactionRangeDelAggregator* range_del_agg, const Compaction* compaction,
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
-    const SequenceNumber preserve_deletes_seqnum, const uint64_t pin_timestamp)
+    const SequenceNumber preserve_deletes_seqnum,
+    const uint64_t pin_timestamp,
+    const bool trim_history)
     : CompactionIterator(
           input, cmp, merge_helper, last_sequence, snapshots,
           earliest_write_conflict_snapshot, snapshot_checker, env,
           report_detailed_time, expect_valid_internal_key, range_del_agg,
           std::unique_ptr<CompactionProxy>(
               compaction ? new CompactionProxy(compaction) : nullptr),
-          compaction_filter, shutting_down, preserve_deletes_seqnum, pin_timestamp) {}
+          compaction_filter, shutting_down, preserve_deletes_seqnum,
+          pin_timestamp, trim_history) {}
 
 CompactionIterator::CompactionIterator(
     InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
@@ -41,7 +44,8 @@ CompactionIterator::CompactionIterator(
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
     const SequenceNumber preserve_deletes_seqnum,
-    const uint64_t pin_timestamp)
+    const uint64_t pin_timestamp,
+    const bool trim_history)
     : input_(input),
       cmp_(cmp),
       merge_helper_(merge_helper),
@@ -60,8 +64,9 @@ CompactionIterator::CompactionIterator(
       current_user_key_sequence_(0),
       current_user_key_snapshot_(0),
       merge_out_iter_(merge_helper_),
-      current_key_committed_(false)
-      ,pin_timestamp_(pin_timestamp)
+      current_key_committed_(false),
+      pin_timestamp_(pin_timestamp),
+      trim_history_(trim_history)
 {
   assert(compaction_filter_ == nullptr || compaction_ != nullptr);
   bottommost_level_ =
@@ -251,6 +256,25 @@ void CompactionIterator::NextFromInput() {
     iter_stats_.total_input_raw_key_bytes += key_.size();
     iter_stats_.total_input_raw_value_bytes += value_.size();
 
+    if (trim_history_) {
+      if (ikey_.timestamp > pin_timestamp_) {
+        has_current_user_key_ = false;
+        current_user_key_sequence_ = kMaxSequenceNumber;
+        current_user_key_snapshot_ = 0;
+        iter_stats_.num_record_trimed_by_ts++;
+        valid_ = false;
+        input_->Next();
+        continue;
+      } else {
+        key_ = current_key_.SetInternalKey(key_, &ikey_);
+        has_current_user_key_ = false;
+        current_user_key_sequence_ = kMaxSequenceNumber;
+        current_user_key_snapshot_ = 0;
+        valid_ = true;
+        iter_stats_.num_record_pined_by_ts++;
+        break;
+      }
+    }
     // If need_skip is true, we should seek the input iterator
     // to internal key skip_until and continue from there.
     bool need_skip = false;
@@ -274,6 +298,7 @@ void CompactionIterator::NextFromInput() {
       current_user_key_sequence_ = kMaxSequenceNumber;
       current_user_key_snapshot_ = 0;
       valid_ = true;
+      iter_stats_.num_record_pined_by_ts++;
       break;
     }
     // Check whether the user key changed. After this if statement current_key_

@@ -8,6 +8,7 @@
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
 #include "db/version_edit.h"
+#include <iostream>
 
 #include "db/version_set.h"
 #include "rocksdb/slice.h"
@@ -42,6 +43,8 @@ enum Tag : uint32_t {
   kMaxColumnFamily = 203,
 
   kInAtomicGroup = 300,
+
+  kStableTimestamp = 310,
 };
 
 enum CustomTag : uint32_t {
@@ -52,6 +55,8 @@ enum CustomTag : uint32_t {
   // kMinLogNumberToKeep as part of a CustomTag as a hack. This should be
   // removed when manifest becomes forward-comptabile.
   kMinLogNumberToKeepHack = 3,
+  kMinTimestamp = 4,
+  kMaxTimestamp = 5,
   kPathId = 65,
 };
 // If this bit for the custom tag is set, opening DB should fail if
@@ -87,6 +92,8 @@ void VersionEdit::Clear() {
   column_family_name_.clear();
   is_in_atomic_group_ = false;
   remaining_entries_ = 0;
+  has_stable_timestamp_ = false;
+  stable_timestamp_ = 0;
 }
 
 bool VersionEdit::EncodeTo(std::string* dst) const {
@@ -120,75 +127,70 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
     if (!f.smallest.Valid() || !f.largest.Valid()) {
       return false;
     }
-    bool has_customized_fields = false;
-    if (f.marked_for_compaction || has_min_log_number_to_keep_) {
-      PutVarint32(dst, kNewFile4);
-      has_customized_fields = true;
-    } else if (f.fd.GetPathId() == 0) {
-      // Use older format to make sure user can roll back the build if they
-      // don't config multiple DB paths.
-      PutVarint32(dst, kNewFile2);
-    } else {
-      PutVarint32(dst, kNewFile3);
-    }
+    PutVarint32(dst, kNewFile4);
     PutVarint32Varint64(dst, new_files_[i].first /* level */, f.fd.GetNumber());
-    if (f.fd.GetPathId() != 0 && !has_customized_fields) {
-      // kNewFile3
-      PutVarint32(dst, f.fd.GetPathId());
-    }
     PutVarint64(dst, f.fd.GetFileSize());
     PutLengthPrefixedSlice(dst, f.smallest.Encode());
     PutLengthPrefixedSlice(dst, f.largest.Encode());
     PutVarint64Varint64(dst, f.fd.smallest_seqno, f.fd.largest_seqno);
-    if (has_customized_fields) {
-      // Customized fields' format:
-      // +-----------------------------+
-      // | 1st field's tag (varint32)  |
-      // +-----------------------------+
-      // | 1st field's size (varint32) |
-      // +-----------------------------+
-      // |    bytes for 1st field      |
-      // |  (based on size decoded)    |
-      // +-----------------------------+
-      // |                             |
-      // |          ......             |
-      // |                             |
-      // +-----------------------------+
-      // | last field's size (varint32)|
-      // +-----------------------------+
-      // |    bytes for last field     |
-      // |  (based on size decoded)    |
-      // +-----------------------------+
-      // | terminating tag (varint32)  |
-      // +-----------------------------+
-      //
-      // Customized encoding for fields:
-      //   tag kPathId: 1 byte as path_id
-      //   tag kNeedCompaction:
-      //        now only can take one char value 1 indicating need-compaction
-      //
-      if (f.fd.GetPathId() != 0) {
-        PutVarint32(dst, CustomTag::kPathId);
-        char p = static_cast<char>(f.fd.GetPathId());
-        PutLengthPrefixedSlice(dst, Slice(&p, 1));
-      }
-      if (f.marked_for_compaction) {
-        PutVarint32(dst, CustomTag::kNeedCompaction);
-        char p = static_cast<char>(1);
-        PutLengthPrefixedSlice(dst, Slice(&p, 1));
-      }
-      if (has_min_log_number_to_keep_ && !min_log_num_written) {
-        PutVarint32(dst, CustomTag::kMinLogNumberToKeepHack);
-        std::string varint_log_number;
-        PutFixed64(&varint_log_number, min_log_number_to_keep_);
-        PutLengthPrefixedSlice(dst, Slice(varint_log_number));
-        min_log_num_written = true;
-      }
-      TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
-                               dst);
+    // Customized fields' format:
+    // +-----------------------------+
+    // | 1st field's tag (varint32)  |
+    // +-----------------------------+
+    // | 1st field's size (varint32) |
+    // +-----------------------------+
+    // |    bytes for 1st field      |
+    // |  (based on size decoded)    |
+    // +-----------------------------+
+    // |                             |
+    // |          ......             |
+    // |                             |
+    // +-----------------------------+
+    // | last field's size (varint32)|
+    // +-----------------------------+
+    // |    bytes for last field     |
+    // |  (based on size decoded)    |
+    // +-----------------------------+
+    // | terminating tag (varint32)  |
+    // +-----------------------------+
+    //
+    // Customized encoding for fields:
+    //   tag kPathId: 1 byte as path_id
+    //   tag kNeedCompaction:
+    //        now only can take one char value 1 indicating need-compaction
+    //
+    {
+      PutVarint32(dst, CustomTag::kMinTimestamp);
+      std::string varint_min_ts;
+      PutFixed64(&varint_min_ts, f.fd.min_timestamp);
+      PutLengthPrefixedSlice(dst, Slice(varint_min_ts));
 
-      PutVarint32(dst, CustomTag::kTerminate);
+      PutVarint32(dst, CustomTag::kMaxTimestamp);
+      std::string varint_max_ts;
+      PutFixed64(&varint_max_ts, f.fd.max_timestamp);
+      PutLengthPrefixedSlice(dst, Slice(varint_max_ts));
     }
+    if (f.fd.GetPathId() != 0) {
+      PutVarint32(dst, CustomTag::kPathId);
+      char p = static_cast<char>(f.fd.GetPathId());
+      PutLengthPrefixedSlice(dst, Slice(&p, 1));
+    }
+    if (f.marked_for_compaction) {
+      PutVarint32(dst, CustomTag::kNeedCompaction);
+      char p = static_cast<char>(1);
+      PutLengthPrefixedSlice(dst, Slice(&p, 1));
+    }
+    if (has_min_log_number_to_keep_ && !min_log_num_written) {
+      PutVarint32(dst, CustomTag::kMinLogNumberToKeepHack);
+      std::string varint_log_number;
+      PutFixed64(&varint_log_number, min_log_number_to_keep_);
+      PutLengthPrefixedSlice(dst, Slice(varint_log_number));
+      min_log_num_written = true;
+    }
+    TEST_SYNC_POINT_CALLBACK("VersionEdit::EncodeTo:NewFile4:CustomizeFields",
+                             dst);
+
+    PutVarint32(dst, CustomTag::kTerminate);
   }
 
   // 0 is default and does not need to be explicitly written
@@ -208,6 +210,9 @@ bool VersionEdit::EncodeTo(std::string* dst) const {
   if (is_in_atomic_group_) {
     PutVarint32(dst, kInAtomicGroup);
     PutVarint32(dst, remaining_entries_);
+  }
+  if (has_stable_timestamp_) {              
+    PutVarint32Varint64(dst, kStableTimestamp, stable_timestamp_);
   }
   return true;
 }
@@ -244,6 +249,8 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
   uint64_t file_size;
   SequenceNumber smallest_seqno;
   SequenceNumber largest_seqno;
+  uint64_t min_ts = 0;
+  uint64_t max_ts = 0;
   // Since this is the only forward-compatible part of the code, we hack new
   // extension into this record. When we do, we set this boolean to distinguish
   // the record from the normal NewFile records.
@@ -289,6 +296,16 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
           }
           has_min_log_number_to_keep_ = true;
           break;
+        case kMinTimestamp:
+          if (!GetFixed64(&field, &min_ts)) {
+            return "min_ts malformatted";
+          }
+          break;
+        case kMaxTimestamp:
+          if (!GetFixed64(&field, &max_ts)) {
+            return "max_ts malformatted";
+          }
+          break;
         default:
           if ((custom_tag & kCustomTagNonSafeIgnoreMask) != 0) {
             // Should not proceed if cannot understand it
@@ -301,7 +318,7 @@ const char* VersionEdit::DecodeNewFile4From(Slice* input) {
     return "new-file4 entry";
   }
   f.fd =
-      FileDescriptor(number, path_id, file_size, smallest_seqno, largest_seqno);
+      FileDescriptor(number, path_id, file_size, smallest_seqno, largest_seqno, min_ts, max_ts);
   new_files_.push_back(std::make_pair(level, f));
   return nullptr;
 }
@@ -430,7 +447,7 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
             GetVarint64(&input, &smallest_seqno) &&
             GetVarint64(&input, &largest_seqno)) {
           f.fd = FileDescriptor(number, 0, file_size, smallest_seqno,
-                                largest_seqno);
+                                largest_seqno, 0, 0);
           new_files_.push_back(std::make_pair(level, f));
         } else {
           if (!msg) {
@@ -453,7 +470,7 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
             GetVarint64(&input, &smallest_seqno) &&
             GetVarint64(&input, &largest_seqno)) {
           f.fd = FileDescriptor(number, path_id, file_size, smallest_seqno,
-                                largest_seqno);
+                                largest_seqno, 0, 0);
           new_files_.push_back(std::make_pair(level, f));
         } else {
           if (!msg) {
@@ -497,6 +514,14 @@ Status VersionEdit::DecodeFrom(const Slice& src) {
           if (!msg) {
             msg = "remaining entries";
           }
+        }
+        break;
+
+      case kStableTimestamp:
+        if (GetVarint64(&input, &stable_timestamp_)) {
+          has_stable_timestamp_ = true; 
+        } else {
+          msg = "stable timestamp";
         }
         break;
 

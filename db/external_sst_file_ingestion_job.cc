@@ -202,9 +202,12 @@ Status ExternalSstFileIngestionJob::Run() {
     if (!status.ok()) {
       return status;
     }
+    const uint64_t minTs = 0;
+    const uint64_t maxTs = 0;
     edit_.AddFile(f.picked_level, f.fd.GetNumber(), f.fd.GetPathId(),
                   f.fd.GetFileSize(), f.smallest_internal_key(),
                   f.largest_internal_key(), f.assigned_seqno, f.assigned_seqno,
+                  minTs, maxTs,
                   false);
   }
 
