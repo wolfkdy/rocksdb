@@ -101,10 +101,8 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
                    CompressionType output_compression, Statistics* stats,
                    EventLogger* event_logger, bool measure_io_stats,
                    const bool sync_output_directory, const bool write_manifest
-#ifdef USE_TIMESTAMPS
                    ,
                    uint64_t pin_ts
-#endif  // USE_TIMESTAMPS
                    )
     : dbname_(dbname),
       cfd_(cfd),
@@ -128,9 +126,7 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
       measure_io_stats_(measure_io_stats),
       sync_output_directory_(sync_output_directory),
       write_manifest_(write_manifest),
-#ifdef USE_TIMESTAMPS
       pin_ts_(pin_ts),
-#endif  // USE_TIMESTAMPS
       edit_(nullptr),
       base_(nullptr),
       pick_memtable_called(false) {
@@ -362,9 +358,7 @@ Status FlushJob::WriteLevel0Table() {
           mems_.front()->ApproximateOldestKeyTime();
 
       uint64_t pin_ts = 0;
-#ifdef USE_TIMESTAMPS
       pin_ts = pin_ts_;
-#endif  // USE_TIMESTAMPS
       s = BuildTable(
           dbname_, db_options_.env, *cfd_->ioptions(), mutable_cf_options_,
           env_options_, cfd_->table_cache(), iter.get(),

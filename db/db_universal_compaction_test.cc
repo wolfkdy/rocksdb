@@ -15,11 +15,7 @@
 
 namespace rocksdb {
 
-#ifdef USE_TIMESTAMPS
 #define VSIZE 982
-#else
-#define VSIZE 990
-#endif  // USE_TIMESTAMPS
 
 static std::string CompressibleString(Random* rnd, int len) {
   std::string r;

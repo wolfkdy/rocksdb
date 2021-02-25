@@ -853,12 +853,8 @@ std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
     iter.set(dbfull()->NewInternalIterator(&arena, &range_del_agg,
                                            kMaxSequenceNumber, handles_[cf]));
   }
-#ifdef USE_TIMESTAMPS
   InternalKey target;
   target.SetMinPossibleForUserKeyAndType(user_key, kTypeValue);
-#else
-  InternalKey target(user_key, kMaxSequenceNumber, kTypeValue);
-#endif  // USE_TIMESTAMPS
   iter->Seek(target.Encode());
   std::string result;
   if (!iter->status().ok()) {
@@ -867,11 +863,7 @@ std::string DBTestBase::AllEntriesFor(const Slice& user_key, int cf) {
     result = "[ ";
     bool first = true;
     while (iter->Valid()) {
-#ifdef USE_TIMESTAMPS
       ParsedInternalKey ikey(Slice(), 0, kTypeValue, 0);
-#else
-      ParsedInternalKey ikey(Slice(), 0, kTypeValue);
-#endif  // USE_TIMESTAMPS
       if (!ParseInternalKey(iter->key(), &ikey)) {
         result += "CORRUPTED";
       } else {
@@ -1141,11 +1133,7 @@ int DBTestBase::GetSstFileCount(std::string path) {
 void DBTestBase::GenerateNewFile(int cf, Random* rnd, int* key_idx,
                                  bool nowait) {
   for (int i = 0; i < KNumKeysByGenerateNewFile; i++) {
-#ifdef USE_TIMESTAMPS
     ASSERT_OK(Put(cf, Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 982)));
-#else
-    ASSERT_OK(Put(cf, Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 990)));
-#endif  // USE_TIMESTAMPS
     (*key_idx)++;
   }
   if (!nowait) {
@@ -1157,11 +1145,7 @@ void DBTestBase::GenerateNewFile(int cf, Random* rnd, int* key_idx,
 // this will generate non-overlapping files since it keeps increasing key_idx
 void DBTestBase::GenerateNewFile(Random* rnd, int* key_idx, bool nowait) {
   for (int i = 0; i < KNumKeysByGenerateNewFile; i++) {
-#ifdef USE_TIMESTAMPS
     ASSERT_OK(Put(Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 982)));
-#else
-    ASSERT_OK(Put(Key(*key_idx), RandomString(rnd, (i == 99) ? 1 : 990)));
-#endif  // USE_TIMESTAMPS
     (*key_idx)++;
   }
   if (!nowait) {

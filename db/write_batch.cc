@@ -1507,12 +1507,8 @@ class MemTableInserter : public WriteBatch::Handler {
     // So we disable merge in recovery
     if (moptions->max_successive_merges > 0 && db_ != nullptr &&
         recovering_log_number_ == 0) {
-#ifdef USE_TIMESTAMPS
       Slice raw_key = {key.data(), key.size() - 8};
       LookupKey lkey(raw_key, sequence_);
-#else
-      LookupKey lkey(key, sequence_);
-#endif  // USE_TIMESTAMPS
       // Count the number of successive merges at the head
       // of the key in the memtable
       size_t num_merges = mem->CountSuccessiveMergeEntries(lkey);
@@ -1537,14 +1533,10 @@ class MemTableInserter : public WriteBatch::Handler {
       if (cf_handle == nullptr) {
         cf_handle = db_->DefaultColumnFamily();
       }
-#ifdef USE_TIMESTAMPS
       // Note: MergeCf, all key append the `timestamp' already,
       //      db::Get key timestamp is irrelevant
       Slice raw_key = {key.data(), key.size() - 8};
       db_->Get(read_options, cf_handle, raw_key, &get_value);
-#else
-      db_->Get(read_options, cf_handle, key, &get_value);
-#endif  // USE_TIMESTAMPS
 
       Slice get_value_slice = Slice(get_value);
 
@@ -1887,7 +1879,6 @@ size_t WriteBatchInternal::AppendedByteSize(size_t leftByteSize,
   }
 }
 
-#ifdef USE_TIMESTAMPS
 Status WriteBatchInternal::RewriteBatch(WriteBatch* dst, const WriteBatch* src,
                                         const WriteOptions& write_options) {
   Slice input(src->rep_);
@@ -2107,5 +2098,4 @@ Status WriteBatchInternal::RewriteBatch(WriteBatch* dst, const WriteBatch* src,
     return Status::OK();
   }
 }
-#endif
 }  // namespace rocksdb

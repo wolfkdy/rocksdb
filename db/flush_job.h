@@ -69,10 +69,8 @@ class FlushJob {
            Directory* output_file_directory, CompressionType output_compression,
            Statistics* stats, EventLogger* event_logger, bool measure_io_stats,
            const bool sync_output_directory, const bool write_manifest
-#ifdef USE_TIMESTAMPS
            ,
            uint64_t pin_ts
-#endif  // USE_TIMESTAMPS
            );
 
   ~FlushJob();

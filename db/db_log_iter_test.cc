@@ -252,45 +252,26 @@ TEST_F(DBTestXactLogIterator, TransactionLogIteratorBlobs) {
     virtual Status PutCF(uint32_t cf, const Slice& key,
                          const Slice& value) override {
         //FIXME badcode, need a helper func to trim out timestamp
-#ifdef USE_TIMESTAMPS
       Slice v(key.data(), key.size() - sizeof(uint64_t));
       seen += "Put(" + ToString(cf) + ", " + v.ToString() + ", " +
               ToString(value.size()) + ")";
-#else
-      seen += "Put(" + ToString(cf) + ", " + key.ToString() + ", " +
-              ToString(value.size()) + ")";
-#endif
       return Status::OK();
     }
     virtual Status MergeCF(uint32_t cf, const Slice& key,
                            const Slice& value) override {
-#ifdef USE_TIMESTAMPS
       Slice v(key.data(), key.size() - sizeof(uint64_t));
       seen += "Merge(" + ToString(cf) + ", " + v.ToString() + ", " +
               ToString(value.size()) + ")";
-#else
-      seen += "Merge(" + ToString(cf) + ", " + key.ToString() + ", " +
-              ToString(value.size()) + ")";
-#endif
       return Status::OK();
     }
     virtual void LogData(const Slice& blob) override {
-#ifdef USE_TIMESTAMPS
       Slice v(blob.data(), blob.size() - sizeof(uint64_t));
       seen += "LogData(" + v.ToString() + ")";
-#else
-      seen += "LogData(" + blob.ToString() + ")";
-#endif
     }
     virtual Status DeleteCF(uint32_t cf, const Slice& key) override {
-#ifdef USE_TIMESTAMPS
       Slice v(key.data(),key.size()-sizeof(uint64_t));
       seen += "Delete(" + ToString(cf) + ", " + v.ToString() + ")";
       return Status::OK();
-#else
-      seen += "Delete(" + ToString(cf) + ", " + key.ToString() + ")";
-      return Status::OK();
-#endif
     }
   } handler;
   res.writeBatchPtr->Iterate(&handler);

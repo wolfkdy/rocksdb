@@ -266,11 +266,7 @@ void TestCustomizedTablePropertiesCollector(
 
   SequenceNumber seqNum = 0U;
   for (const auto& kv : kvs) {
-#ifdef USE_TIMESTAMPS
     InternalKey ikey(kv.first.first, seqNum++, kv.first.second, 0);
-#else
-    InternalKey ikey(kv.first.first, seqNum++, kv.first.second);
-#endif  // USE_TIMESTAMPS
     builder->Add(ikey.Encode(), kv.second);
   }
   ASSERT_OK(builder->Finish());
@@ -368,7 +364,6 @@ namespace {
 void TestInternalKeyPropertiesCollector(
     bool backward_mode, uint64_t magic_number, bool sanitized,
     std::shared_ptr<TableFactory> table_factory) {
-#ifdef USE_TIMESTAMPS
   InternalKey keys[] = {
       InternalKey("A       ", 0, ValueType::kTypeValue, 0),
       InternalKey("B       ", 1, ValueType::kTypeValue, 0),
@@ -381,20 +376,6 @@ void TestInternalKeyPropertiesCollector(
       InternalKey("b       ", 8, ValueType::kTypeMerge, 0),
       InternalKey("c       ", 9, ValueType::kTypeMerge, 0),
   };
-#else
-  InternalKey keys[] = {
-      InternalKey("A       ", 0, ValueType::kTypeValue),
-      InternalKey("B       ", 1, ValueType::kTypeValue),
-      InternalKey("C       ", 2, ValueType::kTypeValue),
-      InternalKey("W       ", 3, ValueType::kTypeDeletion),
-      InternalKey("X       ", 4, ValueType::kTypeDeletion),
-      InternalKey("Y       ", 5, ValueType::kTypeDeletion),
-      InternalKey("Z       ", 6, ValueType::kTypeDeletion),
-      InternalKey("a       ", 7, ValueType::kTypeSingleDeletion),
-      InternalKey("b       ", 8, ValueType::kTypeMerge),
-      InternalKey("c       ", 9, ValueType::kTypeMerge),
-  };
-#endif  // USE_TIMESTAMPS
   std::unique_ptr<TableBuilder> builder;
   std::unique_ptr<WritableFileWriter> writable;
   Options options;

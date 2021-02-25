@@ -421,13 +421,8 @@ class TruncatedRangeDelMergingIter : public InternalIterator {
 
   Slice key() const override {
     auto* top = heap_.top();
-#ifdef USE_TIMESTAMPS
     cur_start_key_.Set(top->start_key().user_key, top->seq(),
                        kTypeRangeDeletion, 0);
-#else
-    cur_start_key_.Set(top->start_key().user_key, top->seq(),
-                       kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
     return cur_start_key_.Encode();
   }
 

@@ -132,10 +132,8 @@ Status DBImpl::FlushMemTableToOutputFile(
       GetCompressionFlush(*cfd->ioptions(), mutable_cf_options), stats_,
       &event_logger_, mutable_cf_options.report_bg_io_stats,
       true /* sync_output_directory */, true /* write_manifest */
-#ifdef USE_TIMESTAMPS
       ,
       pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
           );
 
   FileMetaData file_meta;
@@ -313,10 +311,8 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         data_dir, GetCompressionFlush(*cfd->ioptions(), mutable_cf_options),
         stats_, &event_logger_, mutable_cf_options.report_bg_io_stats,
         false /* sync_output_directory */, false /* write_manifest */
-#ifdef USE_TIMESTAMPS
         ,
         pin_timestamp_.load()
-#endif
             );
     jobs.back().PickMemTable();
   }
@@ -952,9 +948,7 @@ Status DBImpl::CompactFilesImpl(
                  // support for CompactFiles, we should have CompactFiles API
                  // pass a pointer of CompactionJobStats as the out-value
                  // instead of using EventListener.
-#ifdef USE_TIMESTAMPS
       ,pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
   );
 
   // Creating a compaction influences the compaction score because the score
@@ -2557,9 +2551,7 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         c->mutable_cf_options()->paranoid_file_checks,
         c->mutable_cf_options()->report_bg_io_stats, dbname_,
         &compaction_job_stats
-#ifdef USE_TIMESTAMPS
         ,pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
     );
     compaction_job.Prepare();
 

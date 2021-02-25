@@ -98,7 +98,6 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   assert(!WriteBatchInternal::IsLatestPersistentState(my_batch) ||
          disable_memtable);
 
-  #ifdef USE_TIMESTAMPS
     WriteBatch tmp_batch;
     if (!write_options.already_has_timestamp) {
       auto status =
@@ -108,7 +107,6 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
       }    
       my_batch = &tmp_batch;
     }
-  #endif  // USE_TIMESTAMPS
 
   Status status;
   if (write_options.low_pri) {

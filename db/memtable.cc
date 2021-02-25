@@ -522,13 +522,9 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
 
     if (prefix_bloom_) {
       assert(prefix_extractor_);
-#ifdef USE_TIMESTAMPS
       // NOTE(xxxxxxxx): remove the timestamp from key
       assert(key.size() >= 8);
       prefix_bloom_->Add(prefix_extractor_->Transform(Slice(key.data(), key.size() - 8)));
-#else
-      prefix_bloom_->Add(prefix_extractor_->Transform(key));
-#endif  // USE_TIMESTAMPS
     }
 
     // The first sequence number inserted into the memtable
@@ -559,13 +555,9 @@ bool MemTable::Add(SequenceNumber s, ValueType type,
 
     if (prefix_bloom_) {
       assert(prefix_extractor_);
-#ifdef USE_TIMESTAMPS
       // NOTE(xxxxxxxx): remove the timestamp from key
       assert(key.size() >= 8);
       prefix_bloom_->Add(prefix_extractor_->Transform(Slice(key.data(), key.size() - 8)));
-#else
-      prefix_bloom_->AddConcurrently(prefix_extractor_->Transform(key));
-#endif // USE_TIMESTAMPS
     }
 
     // atomically update first_seqno_ and earliest_seqno_.
@@ -650,12 +642,10 @@ static bool SaveValue(void* arg, const char* entry) {
       return true;  // to continue to the next seq
     }
 
-#ifdef USE_TIMESTAMPS
     const uint64_t ts = DecodeFixed64(key_ptr + key_length - 16);
     if (ts > s->key->timestamp()) {
       return true;
     }
-#endif  // USE_TIMESTAMPS
 
     s->seq = seq;
 
@@ -824,12 +814,8 @@ bool MemTable::Get(const LookupKey& key, std::string* value, Status* s,
 void MemTable::Update(SequenceNumber seq,
                       const Slice& key,
                       const Slice& value) {
-#ifdef USE_TIMESTAMPS
   Slice raw_key = {key.data(), key.size() - 8};
   LookupKey lkey(raw_key, seq);
-#else
-  LookupKey lkey(key, seq);
-#endif  // USE_TIMESTAMPS
 
   Slice mem_key = lkey.memtable_key();
 
@@ -889,12 +875,8 @@ void MemTable::Update(SequenceNumber seq,
 bool MemTable::UpdateCallback(SequenceNumber seq,
                               const Slice& key,
                               const Slice& delta) {
-#ifdef USE_TIMESTAMPS
   Slice raw_key = {key.data(), key.size() - 8};
   LookupKey lkey(raw_key, seq);
-#else
-  LookupKey lkey(key, seq);
-#endif  // USE_TIMESTAMPS
   Slice memkey = lkey.memtable_key();
 
   std::unique_ptr<MemTableRep::Iterator> iter(

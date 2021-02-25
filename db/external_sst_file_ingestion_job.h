@@ -63,22 +63,13 @@ struct IngestedFileInfo {
 
   // NOTE(xxxxxxxx): ingesting files in timestamp-mode is not tested
   InternalKey smallest_internal_key() const {
-#ifdef USE_TIMESTAMPS
     return InternalKey(smallest_user_key, assigned_seqno,
                        ValueType::kTypeValue, 0);
-#else
-    return InternalKey(smallest_user_key, assigned_seqno,
-                       ValueType::kTypeValue);
-#endif // USE_TIMESTAMPS
   }
 
   // NOTE(xxxxxxxx): ingesting files in timestamp-mode is not tested
   InternalKey largest_internal_key() const {
-#ifdef USE_TIMESTAMPS
     return InternalKey(largest_user_key, assigned_seqno, ValueType::kTypeValue, 0);
-#else
-    return InternalKey(largest_user_key, assigned_seqno, ValueType::kTypeValue);
-#endif // USE_TIMESTAMPS
   }
 };
 
