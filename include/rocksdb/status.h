@@ -198,9 +198,11 @@ class Status {
   static Status SpaceLimit(const Slice& msg, const Slice& msg2 = Slice()) {
     return Status(kIOError, kSpaceLimit, msg, msg2);
   }
+
   static Status PrepareConflict(const Slice& msg, const Slice& msg2 = Slice()) {
     return Status(kPrepareConflict, msg, msg2);
   }
+  //
   // Returns true iff the status indicates success.
   bool ok() const { return code() == kOk; }
 

@@ -239,7 +239,7 @@ void InternalKeyComparator::FindShortSuccessor(std::string* key) const {
 }
 
 #ifdef USE_TIMESTAMPS
-LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s , uint64_t timestamp) {
+LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s , uint64_t time_stamp) {
   size_t usize = _user_key.size();
   size_t needed = usize + 21;  // A conservative estimate
   char* dst;
@@ -254,7 +254,7 @@ LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s , uint64_t timesta
   kstart_ = dst;
   memcpy(dst, _user_key.data(), usize);
   dst += usize;
-  EncodeFixed64(dst, timestamp);
+  EncodeFixed64(dst, time_stamp);
   dst += 8;
   EncodeFixed64(dst, PackSequenceAndType(s, kValueTypeForSeek));
   dst += 8;

@@ -5512,7 +5512,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
            oldest_ts = 0;
         }
         if(all_committed_ts>oldest_ts){
-          s = to_txn_db->SetTimeStamp(kOldest, all_committed_ts);
+          s = to_txn_db->SetTimeStamp(kOldest, all_committed_ts, false);
           if(!s.ok()){
            fprintf(stderr, "Set kOldest TimeStamp error: %s\n",
                 s.ToString().c_str());
@@ -5582,7 +5582,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
     RandomTransactionInserter inserter(&thread->rand, write_options_,
                                        read_options, FLAGS_num,
                                        num_prefix_ranges,FLAGS_readwritepercent,
-                                       FLAGS_deletepercent,100 - FLAGS_readwritepercent - FLAGS_deletepercent,
+                                       FLAGS_deletepercent, /* 100 - FLAGS_readwritepercent - FLAGS_deletepercent, */
                                        FLAGS_conflict_level);
 
     if (FLAGS_num_multi_db > 1) {
@@ -5640,7 +5640,7 @@ void VerifyDBFromDB(std::string& truth_db_name) {
            oldest_ts = 0;
         }
         if(all_committed_ts>oldest_ts){
-          s = txn_db->SetTimeStamp(kOldest, all_committed_ts);
+          s = txn_db->SetTimeStamp(kOldest, all_committed_ts, false);
           if(!s.ok()){
            fprintf(stderr, "Set kOldest TimeStamp error: %s\n",
                 s.ToString().c_str());
