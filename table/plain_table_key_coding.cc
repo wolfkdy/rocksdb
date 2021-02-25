@@ -268,9 +268,7 @@ Status PlainTableKeyDecoder::ReadInternalKey(
     parsed_key->user_key = Slice(tmp_slice.data(), user_key_size);
     parsed_key->sequence = 0;
     parsed_key->type = kTypeValue;
-#ifdef USE_TIMESTAMPS
     parsed_key->timestamp = 0;
-#endif  // USE_TIMESTAMPS
     *bytes_read += user_key_size + 1;
     *internal_key_valid = false;
   } else {

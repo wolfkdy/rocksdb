@@ -1517,11 +1517,9 @@ class DBImpl : public DB {
   // REQUIRES: mutex locked
   std::unique_ptr<rocksdb::RepeatableThread> thread_dump_stats_;
 
-#ifdef USE_TIMESTAMPS
   // set by TOTransactionDB to hint the timestamp boundary
   // for compacting unnecessary key versions
   std::atomic<uint64_t> pin_timestamp_;
-#endif // USE_TIMESTAMPS
 
   // No copying allowed
   DBImpl(const DBImpl&);

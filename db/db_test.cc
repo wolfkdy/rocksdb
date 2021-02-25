@@ -92,7 +92,6 @@ class DBTestWithParam
   bool exclusive_manual_compaction_;
 };
 
-#ifdef USE_TIMESTAMPS
 void MockEnvTestTimestamp(bool flush) {
   unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
   Options options;
@@ -343,7 +342,6 @@ TEST_F(DBTest, MockEnvWithZeroTsDel1) {
   delete db;
 }
 
-#endif  // USE_TIMESTAMPS
 
 TEST_F(DBTest, MockEnvTest) {
   std::unique_ptr<MockEnv> env{new MockEnv(Env::Default())};
@@ -5098,10 +5096,6 @@ TEST_F(DBTest, DynamicMiscOptions) {
     iter->Next();
     ASSERT_TRUE(iter->Valid());
     ASSERT_EQ(iter->key().compare(Key(key2)), 0);
-#ifndef USE_TIMESTAMPS
-    ASSERT_EQ(num_reseek,
-              TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION));
-#endif  // USE_TIMESTAMPS
   };
   // No reseek
   assert_reseek_count(100, 0);

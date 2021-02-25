@@ -14,11 +14,7 @@ namespace rocksdb {
 struct RangeTombstoneForTest : public RangeTombstone {
  public:
   RangeTombstoneForTest(Slice sk, Slice ek, SequenceNumber sn)
-#ifdef USE_TIMESTAMPS
     :RangeTombstone(sk, ek, sn, 0)
-#else
-    :RangeTombstone(sk, ek, sn)
-#endif  // USE_TIMESTAMPS
   {}
 
   RangeTombstoneForTest()

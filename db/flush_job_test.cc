@@ -20,11 +20,7 @@
 
 namespace rocksdb {
 
-#ifdef USE_TIMESTAMPS
 #define TS_ZERO ,((0))
-#else
-#define TS_ZERO
-#endif  // USE_TIMESTAMPS
 
 // TODO(icanadi) Mock out everything else:
 // 1. VersionSet
@@ -156,20 +152,12 @@ TEST_F(FlushJobTest, NonEmpty) {
     std::string value("value" + key);
     new_mem->Add(SequenceNumber(i), kTypeValue, Userkey2Timestamped(key), value);
     if ((i + 1000) % 10000 < 9995) {
-#ifdef USE_TIMESTAMPS
       InternalKey internal_key(key, SequenceNumber(i), kTypeValue, 0);
-#else
-      InternalKey internal_key(key, SequenceNumber(i), kTypeValue);
-#endif  // USE_TIMESTAMPS
       inserted_keys.insert({internal_key.Encode().ToString(), value});
     }
   }
   new_mem->Add(SequenceNumber(10000), kTypeRangeDeletion, Userkey2Timestamped("9995"), "9999a");
-#ifdef USE_TIMESTAMPS
   InternalKey internal_key("9995", SequenceNumber(10000), kTypeRangeDeletion, 0);
-#else
-  InternalKey internal_key("9995", SequenceNumber(10000), kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
   inserted_keys.insert({internal_key.Encode().ToString(), "9999a"});
 
   autovector<MemTable*> to_delete;
@@ -417,11 +405,7 @@ TEST_F(FlushJobTest, Snapshots) {
       bool visible = (j == insertions - 1) ||
                      (snapshots_set.find(seqno) != snapshots_set.end());
       if (visible) {
-#ifdef USE_TIMESTAMPS
         InternalKey internal_key(key, seqno, kTypeValue, 0);
-#else
-        InternalKey internal_key(key, seqno, kTypeValue);
-#endif  // USE_TIMESTAMPS
         inserted_keys.insert({internal_key.Encode().ToString(), value});
       }
     }

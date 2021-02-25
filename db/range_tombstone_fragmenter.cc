@@ -194,11 +194,7 @@ void FragmentedRangeTombstoneList::FragmentTombstones(
       flush_current_tombstones(tombstone_start_key);
     }
     cur_start_key = tombstone_start_key;
-#ifdef USE_TIMESTAMPS
     cur_end_keys.emplace(tombstone_end_key, tombstone_seq, kTypeRangeDeletion, 0);
-#else
-    cur_end_keys.emplace(tombstone_end_key, tombstone_seq, kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
   }
   if (!cur_end_keys.empty()) {
     ParsedInternalKey last_end_key = *std::prev(cur_end_keys.end());

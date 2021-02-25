@@ -33,13 +33,8 @@ TEST_F(VersionEditTest, EncodeDecode) {
   for (int i = 0; i < 4; i++) {
     TestEncodeDecode(edit);
     edit.AddFile(3, kBig + 300 + i, kBig32Bit + 400 + i, 0,
-#ifdef USE_TIMESTAMPS
                  InternalKey("foo", kBig + 500 + i, kTypeValue, 0),
                  InternalKey("zoo", kBig + 600 + i, kTypeDeletion, 0),
-#else
-                 InternalKey("foo", kBig + 500 + i, kTypeValue),
-                 InternalKey("zoo", kBig + 600 + i, kTypeDeletion),
-#endif  // USE_TIMESTAMPS
                  kBig + 500 + i, kBig + 600 + i, false);
     edit.DeleteFile(4, kBig + 700 + i);
   }
@@ -55,7 +50,6 @@ TEST_F(VersionEditTest, EncodeDecodeNewFile4) {
   static const uint64_t kBig = 1ull << 50;
 
   VersionEdit edit;
-#ifdef USE_TIMESTAMPS
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
                kBig + 600, true);
@@ -65,17 +59,6 @@ TEST_F(VersionEditTest, EncodeDecodeNewFile4) {
   edit.AddFile(5, 302, 0, 100, InternalKey("foo", kBig + 502, kTypeValue, 0),
                InternalKey("zoo", kBig + 602, kTypeDeletion, 0), kBig + 502,
                kBig + 602, true);
-#else
-  edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue),
-               InternalKey("zoo", kBig + 600, kTypeDeletion), kBig + 500,
-               kBig + 600, true);
-  edit.AddFile(4, 301, 3, 100, InternalKey("foo", kBig + 501, kTypeValue),
-               InternalKey("zoo", kBig + 601, kTypeDeletion), kBig + 501,
-               kBig + 601, false);
-  edit.AddFile(5, 302, 0, 100, InternalKey("foo", kBig + 502, kTypeValue),
-               InternalKey("zoo", kBig + 602, kTypeDeletion), kBig + 502,
-               kBig + 602, true);
-#endif  // USE_TIMESTAMPS
   edit.DeleteFile(4, 700);
 
   edit.SetComparatorName("foo");
@@ -101,21 +84,12 @@ TEST_F(VersionEditTest, EncodeDecodeNewFile4) {
 TEST_F(VersionEditTest, ForwardCompatibleNewFile4) {
   static const uint64_t kBig = 1ull << 50;
   VersionEdit edit;
-#ifdef USE_TIMESTAMPS
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
                kBig + 600, true);
   edit.AddFile(4, 301, 3, 100, InternalKey("foo", kBig + 501, kTypeValue, 0),
                InternalKey("zoo", kBig + 601, kTypeDeletion, 0), kBig + 501,
                kBig + 601, false);
-#else
-  edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue),
-               InternalKey("zoo", kBig + 600, kTypeDeletion), kBig + 500,
-               kBig + 600, true);
-  edit.AddFile(4, 301, 3, 100, InternalKey("foo", kBig + 501, kTypeValue),
-               InternalKey("zoo", kBig + 601, kTypeDeletion), kBig + 501,
-               kBig + 601, false);
-#endif  // USE_TIMESTAMPS
   edit.DeleteFile(4, 700);
 
   edit.SetComparatorName("foo");
@@ -159,15 +133,9 @@ TEST_F(VersionEditTest, ForwardCompatibleNewFile4) {
 TEST_F(VersionEditTest, NewFile4NotSupportedField) {
   static const uint64_t kBig = 1ull << 50;
   VersionEdit edit;
-#ifdef USE_TIMESTAMPS
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
                kBig + 600, true);
-#else
-  edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue),
-               InternalKey("zoo", kBig + 600, kTypeDeletion), kBig + 500,
-               kBig + 600, true);
-#endif  // USE_TIMESTAMPS
   edit.SetComparatorName("foo");
   edit.SetLogNumber(kBig + 100);
   edit.SetNextFile(kBig + 200);

@@ -148,7 +148,6 @@ void CorruptKeyType(InternalKey* ikey) {
   ikey->DecodeFrom(Slice(keystr.data(), keystr.size()));
 }
 
-#ifdef USE_TIMESTAMPS
 std::string KeyStr(const std::string& user_key, const SequenceNumber& seq,
                    uint64_t ts, const ValueType& t, bool corrupt) {
   InternalKey k(user_key, seq, t, ts);
@@ -157,15 +156,10 @@ std::string KeyStr(const std::string& user_key, const SequenceNumber& seq,
   }
   return k.Encode().ToString();
 }
-#endif  // USE_TIMESTAMPS
 
 std::string KeyStr(const std::string& user_key, const SequenceNumber& seq,
                    const ValueType& t, bool corrupt) {
-#ifdef USE_TIMESTAMPS
   InternalKey k(user_key, seq, t, 0);
-#else
-  InternalKey k(user_key, seq, t);
-#endif  // USE_TIMESTAMPS
   if (corrupt) {
     CorruptKeyType(&k);
   }

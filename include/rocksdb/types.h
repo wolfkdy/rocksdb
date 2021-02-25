@@ -31,7 +31,6 @@ struct FullKey {
   Slice user_key;
   SequenceNumber sequence;
   EntryType type;
-#ifdef USE_TIMESTAMPS
   uint64_t timestamp;
   FullKey()
       : sequence(0),
@@ -39,22 +38,13 @@ struct FullKey {
   {}  // Intentionally left uninitialized (for speed)
   FullKey(const Slice& u, const SequenceNumber& seq, EntryType t, uint64_t ts)
       : user_key(u), sequence(seq), type(t), timestamp(ts) { }
-#else
-  FullKey()
-      : sequence(0)
-  {}  // Intentionally left uninitialized (for speed)
-  FullKey(const Slice& u, const SequenceNumber& seq, EntryType t)
-      : user_key(u), sequence(seq), type(t) { }
-#endif  // USE_TIMESTAMPS
   std::string DebugString(bool hex = false) const;
 
   void clear() {
     user_key.clear();
     sequence = 0;
     type = EntryType::kEntryPut;
-#ifdef USE_TIMESTAMPS
     timestamp = 0;
-#endif // USE_TIMESTAMPS
   }
 };
 

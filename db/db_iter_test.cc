@@ -63,11 +63,7 @@ class TestIterator : public InternalIterator {
   void Add(std::string argkey, ValueType type, std::string argvalue,
            size_t seq_num, bool update_iter = false) {
     valid_ = true;
-#ifdef USE_TIMESTAMPS
     ParsedInternalKey internal_key(argkey, seq_num, type, 0);
-#else
-    ParsedInternalKey internal_key(argkey, seq_num, type);
-#endif  // USE_TIMESTAMPS
     data_.push_back(
         std::pair<std::string, std::string>(std::string(), argvalue));
     AppendInternalKey(&data_.back().first, internal_key);
@@ -709,11 +705,7 @@ TEST_F(DBIteratorTest, DBIteratorUseSkipCountSkips) {
   auto f = [](uint32_t v) {
 // reseek is disabled in USE_TIMESTAMPS mode
     (void)v;
-#ifdef USE_TIMESTAMPS
     return 0;
-#else
-    return v;
-#endif  // USE_TIMESTAMPS
   };
   std::unique_ptr<Iterator> db_iter(NewDBIterator(
       env_, ro, ImmutableCFOptions(options), MutableCFOptions(options),
@@ -1255,100 +1247,6 @@ TEST_F(DBIteratorTest, DBIteratorSkipInternalKeys) {
     ASSERT_TRUE(db_iter->status().IsIncomplete());
   }
 
-#ifndef USE_TIMESTAMPS
-  // Test for large number of skippable internal keys with *default*
-  // max_sequential_skip_in_iterations.
-  {
-    for (size_t i = 1; i <= 200; ++i) {
-      TestIterator* internal_iter = new TestIterator(BytewiseComparator());
-      internal_iter->AddPut("a", "val_a");
-      for (size_t j = 1; j <= i; ++j) {
-        internal_iter->AddPut("b", "val_b");
-        internal_iter->AddDeletion("b");
-      }
-      internal_iter->AddPut("c", "val_c");
-      internal_iter->Finish();
-
-      ro.max_skippable_internal_keys = i;
-      std::unique_ptr<Iterator> db_iter(NewDBIterator(
-          env_, ro, cf_options, mutable_cf_options, BytewiseComparator(),
-          internal_iter, 2 * i + 1, options.max_sequential_skip_in_iterations,
-          nullptr /*read_callback*/));
-
-      db_iter->SeekToFirst();
-      ASSERT_TRUE(db_iter->Valid());
-      ASSERT_EQ(db_iter->key().ToString(), "a");
-      ASSERT_EQ(db_iter->value().ToString(), "val_a");
-
-      db_iter->Next();
-      if ((options.max_sequential_skip_in_iterations + 1) >=
-          ro.max_skippable_internal_keys) {
-        ASSERT_TRUE(!db_iter->Valid());
-        ASSERT_TRUE(db_iter->status().IsIncomplete());
-      } else {
-        ASSERT_TRUE(db_iter->Valid());
-        ASSERT_EQ(db_iter->key().ToString(), "c");
-        ASSERT_EQ(db_iter->value().ToString(), "val_c");
-      }
-
-      db_iter->SeekToLast();
-      ASSERT_TRUE(db_iter->Valid());
-      ASSERT_EQ(db_iter->key().ToString(), "c");
-      ASSERT_EQ(db_iter->value().ToString(), "val_c");
-
-      db_iter->Prev();
-      if ((options.max_sequential_skip_in_iterations + 1) >=
-          ro.max_skippable_internal_keys) {
-        ASSERT_TRUE(!db_iter->Valid());
-        ASSERT_TRUE(db_iter->status().IsIncomplete());
-      } else {
-        ASSERT_TRUE(db_iter->Valid());
-        ASSERT_EQ(db_iter->key().ToString(), "a");
-        ASSERT_EQ(db_iter->value().ToString(), "val_a");
-      }
-    }
-  }
-
-  // Test for large number of skippable internal keys with a *non-default*
-  // max_sequential_skip_in_iterations.
-  {
-    for (size_t i = 1; i <= 200; ++i) {
-      TestIterator* internal_iter = new TestIterator(BytewiseComparator());
-      internal_iter->AddPut("a", "val_a");
-      for (size_t j = 1; j <= i; ++j) {
-        internal_iter->AddPut("b", "val_b");
-        internal_iter->AddDeletion("b");
-      }
-      internal_iter->AddPut("c", "val_c");
-      internal_iter->Finish();
-
-      options.max_sequential_skip_in_iterations = 1000;
-      ro.max_skippable_internal_keys = i;
-      std::unique_ptr<Iterator> db_iter(NewDBIterator(
-          env_, ro, cf_options, mutable_cf_options, BytewiseComparator(),
-          internal_iter, 2 * i + 1, options.max_sequential_skip_in_iterations,
-          nullptr /*read_callback*/));
-
-      db_iter->SeekToFirst();
-      ASSERT_TRUE(db_iter->Valid());
-      ASSERT_EQ(db_iter->key().ToString(), "a");
-      ASSERT_EQ(db_iter->value().ToString(), "val_a");
-
-      db_iter->Next();
-      ASSERT_TRUE(!db_iter->Valid());
-      ASSERT_TRUE(db_iter->status().IsIncomplete());
-
-      db_iter->SeekToLast();
-      ASSERT_TRUE(db_iter->Valid());
-      ASSERT_EQ(db_iter->key().ToString(), "c");
-      ASSERT_EQ(db_iter->value().ToString(), "val_c");
-
-      db_iter->Prev();
-      ASSERT_TRUE(!db_iter->Valid());
-      ASSERT_TRUE(db_iter->status().IsIncomplete());
-    }
-  }
-#endif  // USE_TIMESTAMPS
 }
 
 TEST_F(DBIteratorTest, DBIterator1) {

@@ -16,28 +16,18 @@ namespace rocksdb {
 // store multiple versions of a same user key due to snapshots, compaction not
 // happening yet, etc.
 struct KeyVersion {
-#ifdef USE_TIMESTAMPS
   KeyVersion() : user_key(""), value(""), sequence(0), type(0), timestamp(0) {}
 
   KeyVersion(const std::string& _user_key, const std::string& _value,
              SequenceNumber _sequence, int _type, uint64_t _ts)
       : user_key(_user_key), value(_value), sequence(_sequence), type(_type), timestamp(_ts) {}
-#else
-  KeyVersion() : user_key(""), value(""), sequence(0), type(0) {}
-
-  KeyVersion(const std::string& _user_key, const std::string& _value,
-             SequenceNumber _sequence, int _type)
-      : user_key(_user_key), value(_value), sequence(_sequence), type(_type) {}
-#endif  // USE_TIMESTAMPS
   std::string user_key;
   std::string value;
   SequenceNumber sequence;
   // TODO(ajkr): we should provide a helper function that converts the int to a
   // string describing the type for easier debugging.
   int type;
-#ifdef USE_TIMESTAMPS
   uint64_t timestamp;
-#endif  // USE_TIMESTAMPS
 };
 
 // Returns listing of all versions of keys in the provided user key range.

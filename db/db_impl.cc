@@ -198,9 +198,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       bg_compaction_paused_(0),
       refitting_level_(false),
       opened_successfully_(false),
-#ifdef USE_TIMESTAMPS
       pin_timestamp_(0),
-#endif  // USE_TIMESTAMPS
       two_write_queues_(options.two_write_queues),
       manual_wal_flush_(options.manual_wal_flush),
       seq_per_batch_(seq_per_batch),
@@ -689,15 +687,11 @@ void DBImpl::DumpStats() {
 }
 
 Status DBImpl::AdvancePinTs(uint64_t pinTs, bool force) {
-#ifdef USE_TIMESTAMPS
   InstrumentedMutexLock l(&mutex_);
   if (pinTs < pin_timestamp_.load(std::memory_order_relaxed) && !force) {
     return Status::InvalidArgument("pinTs can not travel back");
   }
   pin_timestamp_.store(pinTs, std::memory_order_relaxed);
-#else
-  (void)pinTs;
-#endif // USE_TIMESTAMPS
   return Status::OK();
 }
 
@@ -1297,11 +1291,7 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   // First look in the memtable, then in the immutable memtable (if any).
   // s is both in/out. When in, s could either be OK or MergeInProgress.
   // merge_operands will contain the sequence of merges in the latter case.
-#ifdef USE_TIMESTAMPS
   LookupKey lkey(key, snapshot, read_options.read_timestamp);
-#else
-  LookupKey lkey(key, snapshot);
-#endif  // USE_TIMESTAMPS
   PERF_TIMER_STOP(get_snapshot_time);
 
   bool skip_memtable = (read_options.read_tier == kPersistedTier &&
@@ -1411,11 +1401,7 @@ std::vector<Status> DBImpl::MultiGet(
     Status& s = stat_list[i];
     std::string* value = &(*values)[i];
 
-#ifdef USE_TIMESTAMPS
     LookupKey lkey(keys[i], snapshot, read_options.read_timestamp);
-#else
-    LookupKey lkey(keys[i], snapshot);
-#endif  // USE_TIMESTAMPS
     auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family[i]);
     SequenceNumber max_covering_tombstone_seq = 0;
     auto mgd_iter = multiget_cf_data.find(cfh->cfd()->GetID());
@@ -2978,11 +2964,7 @@ Status DBImpl::GetLatestSequenceForKey(SuperVersion* sv, const Slice& key,
 
   ReadOptions read_options;
   SequenceNumber current_seq = versions_->LastSequence();
-#ifdef USE_TIMESTAMPS
   LookupKey lkey(key, current_seq, kMaxTimeStamp);
-#else
-  LookupKey lkey(key, current_seq);
-#endif  // USE_TIMESTAMPS
 
   *seq = kMaxSequenceNumber;
   *found_record_for_key = false;

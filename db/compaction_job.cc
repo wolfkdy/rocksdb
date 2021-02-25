@@ -316,10 +316,8 @@ CompactionJob::CompactionJob(
     const SnapshotChecker* snapshot_checker, std::shared_ptr<Cache> table_cache,
     EventLogger* event_logger, bool paranoid_file_checks, bool measure_io_stats,
     const std::string& dbname, CompactionJobStats* compaction_job_stats
-#ifdef USE_TIMESTAMPS
     ,
     uint64_t pin_timestamp
-#endif  // USE_TIMESTAMPS
     )
     : job_id_(job_id),
       compact_(new CompactionState(compaction)),
@@ -349,10 +347,8 @@ CompactionJob::CompactionJob(
       paranoid_file_checks_(paranoid_file_checks),
       measure_io_stats_(measure_io_stats),
       write_hint_(Env::WLTH_NOT_SET)
-#ifdef USE_TIMESTAMPS
       ,
       pin_timestamp_(pin_timestamp)
-#endif  // USE_TIMESTAMPS
 {
   assert(log_buffer_ != nullptr);
   const auto* cfd = compact_->compaction->column_family_data();
@@ -899,11 +895,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   Slice* end = sub_compact->end;
   if (start != nullptr) {
     IterKey start_iter;
-#ifdef USE_TIMESTAMPS
     start_iter.SetInternalKey(*start, kMaxSequenceNumber, kMaxTimeStamp, kValueTypeForSeek);
-#else
-    start_iter.SetInternalKey(*start, kMaxSequenceNumber, kValueTypeForSeek);
-#endif  // USE_TIMESTAMPS
     input->Seek(start_iter.GetInternalKey());
   } else {
     input->SeekToFirst();
@@ -916,9 +908,7 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
       snapshot_checker_, env_, ShouldReportDetailedTime(env_, stats_), false,
       &range_del_agg, sub_compact->compaction, compaction_filter,
       shutting_down_, preserve_deletes_seqnum_
-#ifdef USE_TIMESTAMPS
       ,pin_timestamp_
-#endif  // USE_TIMESTAMPS
   ));
   auto c_iter = sub_compact->c_iter.get();
   c_iter->SeekToFirst();
@@ -1308,11 +1298,7 @@ Status CompactionJob::FinishCompactionOutputFile(
         // after the previous file's/subcompaction's largest. The fake seqnum
         // is OK because the read path's file-picking code only considers user
         // key.
-#ifdef USE_TIMESTAMPS
         smallest_candidate = InternalKey(*lower_bound, 0, kTypeRangeDeletion, 0);
-#else
-        smallest_candidate = InternalKey(*lower_bound, 0, kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
       }
       InternalKey largest_candidate = tombstone.SerializeEndKey();
       if (upper_bound != nullptr &&
@@ -1331,13 +1317,8 @@ Status CompactionJob::FinishCompactionOutputFile(
         // kTypeRangeDeletion (0xF), so the range tombstone comes before the
         // Seek() key in InternalKey's ordering. So Seek() will look in the
         // next file for the user key.
-#ifdef USE_TIMESTAMPS
         largest_candidate =
             InternalKey(*upper_bound, kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp);
-#else
-        largest_candidate =
-            InternalKey(*upper_bound, kMaxSequenceNumber, kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
       }
       meta->UpdateBoundariesForRange(smallest_candidate, largest_candidate,
                                      tombstone.seq_,

@@ -211,9 +211,7 @@ class CompactionIterator {
   // Used to avoid purging uncommitted values. The application can specify
   // uncommitted values by providing a SnapshotChecker object.
   bool current_key_committed_;
-#ifdef USE_TIMESTAMPS
   uint64_t pin_timestamp_;
-#endif  // USE_TIMESTAMPS
 
   bool IsShuttingDown() {
     // This is a best-effort facility, so memory_order_relaxed is sufficient.

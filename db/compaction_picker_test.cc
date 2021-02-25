@@ -90,13 +90,8 @@ class CompactionPickerTest : public testing::Test {
     assert(level < vstorage_->num_levels());
     FileMetaData* f = new FileMetaData;
     f->fd = FileDescriptor(file_number, path_id, file_size);
-#ifdef USE_TIMESTAMPS
     f->smallest = InternalKey(smallest, smallest_seq, kTypeValue, 0);
     f->largest = InternalKey(largest, largest_seq, kTypeValue, 0);
-#else
-    f->smallest = InternalKey(smallest, smallest_seq, kTypeValue);
-    f->largest = InternalKey(largest, largest_seq, kTypeValue);
-#endif  // USE_TIMESTAMPS
     f->fd.smallest_seqno = smallest_seq;
     f->fd.largest_seqno = largest_seq;
     f->compensated_file_size = file_size;

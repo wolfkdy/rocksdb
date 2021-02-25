@@ -56,43 +56,24 @@ EntryType GetEntryType(ValueType value_type) {
 }
 
 Slice UserKeyFromRawInternalKey(const char* key, size_t klen) {
-#ifdef USE_TIMESTAMPS
   assert(klen >= 16);
   return {key, klen-16};
-#else
-  assert(klen >= 8);
-  return {key, klen-8};
-#endif  // USE_TIMESTAMPS
 }
 
 uint32_t I2ULen(uint32_t ilen) {
-#ifdef USE_TIMESTAMPS
   assert(ilen >= 16);
   return ilen - 16;
-#else
-  assert(ilen >= 8);
-  return ilen - 8;
-#endif  // USE_TIMESTAMPS
 }
 
 uint32_t U2ILen(uint32_t ulen) {
-#ifdef USE_TIMESTAMPS
   assert(port::kMaxUint32 - 16 >= ulen);
   return ulen + 16;
-#else
-  assert(port::kMaxUint32 - 8 >= ulen);
-  return ulen + 8;
-#endif  // USE_TIMESTAMPS
 }
 
 std::string Userkey2Timestamped(const std::string& uk, uint64_t ts) {
-#ifdef USE_TIMESTAMPS
     std::string tmp(uk.data(), uk.size());
     PutFixed64(&tmp, ts);
     return tmp;
-#else
-    return uk;
-#endif  // USE_TIMESTAMPS
 }
 
 bool ParseFullKey(const Slice& internal_key, FullKey* fkey) {
@@ -103,9 +84,7 @@ bool ParseFullKey(const Slice& internal_key, FullKey* fkey) {
   fkey->user_key = ikey.user_key;
   fkey->sequence = ikey.sequence;
   fkey->type = GetEntryType(ikey.type);
-#ifdef USE_TIMESTAMPS
   fkey->timestamp = ikey.timestamp;
-#endif // USE_TIMESTAMPS
   return true;
 }
 
@@ -119,34 +98,20 @@ void UnPackSequenceAndType(uint64_t packed, uint64_t* seq, ValueType* t) {
 
 void AppendInternalKey(std::string* result, const ParsedInternalKey& key) {
   result->append(key.user_key.data(), key.user_key.size());
-#ifdef USE_TIMESTAMPS
   PutFixed64(result, key.timestamp);
-#endif // USE_TIMESTAMPS
   PutFixed64(result, PackSequenceAndType(key.sequence, key.type));
 }
 
-#ifdef USE_TIMESTAMPS
 void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
                              ValueType t, uint64_t ts) {
   PutFixed64(result, ts);
   PutFixed64(result, PackSequenceAndType(s, t));
 }
-#else
-void AppendInternalKeyFooter(std::string* result, SequenceNumber s,
-                             ValueType t) {
-  PutFixed64(result, PackSequenceAndType(s, t));
-}
-#endif // USE_TIMESTAMPS
 
 std::string ParsedInternalKey::DebugString(bool hex) const {
   char buf[100];
-#ifdef USE_TIMESTAMPS
   snprintf(buf, sizeof(buf), "' seq:%" PRIu64 ", type:%d, ts:%" PRIu64, sequence,
            static_cast<int>(type), timestamp);
-#else
-  snprintf(buf, sizeof(buf), "' seq:%" PRIu64 ", type:%d", sequence,
-           static_cast<int>(type));
-#endif  // USE_TIMESTAMPS
   std::string result = "'";
   result += user_key.ToString(hex);
   result += buf;
@@ -178,14 +143,12 @@ int InternalKeyComparator::Compare(const ParsedInternalKey& a,
   int r = user_comparator_->Compare(a.user_key, b.user_key);
   PERF_COUNTER_ADD(user_key_comparison_count, 1);
   if (r == 0) {
-#ifdef USE_TIMESTAMPS
     // NOTE(xxxxxxxx): to the same key, timestamp order should be the same as
     // txn order
     // allow deleting a key with timestamp 0, (only) in this situation, ts order
     // is not the same with lsn order
     assert((a.timestamp == 0 || b.timestamp == 0) ||
            (a.sequence >= b.sequence) == (a.timestamp >= b.timestamp));
-#endif // USE_TIMESTAMPS
     if (a.sequence > b.sequence) {
       r = -1;
     } else if (a.sequence < b.sequence) {
@@ -209,9 +172,7 @@ void InternalKeyComparator::FindShortestSeparator(
   user_comparator_->FindShortestSeparator(&tmp, user_limit);
   if (tmp.size() <= user_start.size() &&
       user_comparator_->Compare(user_start, tmp) < 0) {
-#ifdef USE_TIMESTAMPS
     PutFixed64(&tmp, kMaxTimeStamp);
-#endif  // USE_TIMESTAMPS
     // User key has become shorter physically, but larger logically.
     // Tack on the earliest possible number to the shortened user key.
     PutFixed64(&tmp, PackSequenceAndType(kMaxSequenceNumber,kValueTypeForSeek));
@@ -227,9 +188,7 @@ void InternalKeyComparator::FindShortSuccessor(std::string* key) const {
   user_comparator_->FindShortSuccessor(&tmp);
   if (tmp.size() <= user_key.size() &&
       user_comparator_->Compare(user_key, tmp) < 0) {
-#ifdef USE_TIMESTAMPS
     PutFixed64(&tmp, kMaxTimeStamp);
-#endif  // USE_TIMESTAMPS
     // User key has become shorter physically, but larger logically.
     // Tack on the earliest possible number to the shortened user key.
     PutFixed64(&tmp, PackSequenceAndType(kMaxSequenceNumber,kValueTypeForSeek));
@@ -238,7 +197,6 @@ void InternalKeyComparator::FindShortSuccessor(std::string* key) const {
   }
 }
 
-#ifdef USE_TIMESTAMPS
 LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s , uint64_t time_stamp) {
   size_t usize = _user_key.size();
   size_t needed = usize + 21;  // A conservative estimate
@@ -260,27 +218,6 @@ LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s , uint64_t time_st
   dst += 8;
   end_ = dst;
 }
-#else
-LookupKey::LookupKey(const Slice& _user_key, SequenceNumber s) {
-  size_t usize = _user_key.size();
-  size_t needed = usize + 13;  // A conservative estimate
-  char* dst;
-  if (needed <= sizeof(space_)) {
-    dst = space_;
-  } else {
-    dst = new char[needed];
-  }
-  start_ = dst;
-  // NOTE: We don't support users keys of more than 2GB :)
-  dst = EncodeVarint32(dst, static_cast<uint32_t>(usize + 8));
-  kstart_ = dst;
-  memcpy(dst, _user_key.data(), usize);
-  dst += usize;
-  EncodeFixed64(dst, PackSequenceAndType(s, kValueTypeForSeek));
-  dst += 8;
-  end_ = dst;
-}
-#endif  // USE_TIMESTAMPS
 
 void IterKey::EnlargeBuffer(size_t key_size) {
   // If size is smaller than buffer size, continue using current buffer,

@@ -141,12 +141,8 @@ class DBIter final: public Iterator {
         allow_blob_(allow_blob),
         is_blob_(false),
         start_seqnum_(read_options.iter_start_seqnum),
-        use_internal_key_(read_options.use_internal_key)
-#ifdef USE_TIMESTAMPS
-        ,
-        read_timestamp_(read_options.read_timestamp)
-#endif  // TIMESTAMPS
-  {
+        use_internal_key_(read_options.use_internal_key),
+        read_timestamp_(read_options.read_timestamp) {
     RecordTick(statistics_, NO_ITERATOR_CREATED);
     prefix_extractor_ = mutable_cf_options.prefix_extractor.get();
     max_skip_ = max_sequential_skip_in_iterations;
@@ -265,11 +261,7 @@ class DBIter final: public Iterator {
 
   void PrevInternal();
   bool TooManyInternalKeysSkipped(bool increment = true);
-#ifdef USE_TIMESTAMPS
   bool IsVisible(SequenceNumber sequence, uint64_t timestamp);
-#else
-  bool IsVisible(SequenceNumber sequence);
-#endif  // USE_TIMESTAMPS
 
   // CanReseekToSkip() returns whether the iterator can use the optimization
   // where it reseek by sequence number to get the next key when there are too
@@ -365,9 +357,7 @@ class DBIter final: public Iterator {
 
   bool use_internal_key_;
 
-#ifdef USE_TIMESTAMPS
   uint64_t read_timestamp_;
-#endif  // USE_TIMESTAMPS
 
   // No copying allowed
   DBIter(const DBIter&);
@@ -483,11 +473,7 @@ bool DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
     if (TooManyInternalKeysSkipped()) {
       return false;
     }
-#ifdef USE_TIMESTAMPS
     const bool is_visiable = IsVisible(ikey_.sequence, ikey_.timestamp);
-#else
-    const bool is_visiable = IsVisible(ikey_.sequence);
-#endif
     if (is_visiable) {
       if (skipping && user_comparator_->Compare(ikey_.user_key,
                                                 saved_key_.GetUserKey()) <= 0) {
@@ -641,15 +627,9 @@ bool DBIter::FindNextUserEntryInternal(bool skipping, bool prefix_check) {
         // Note that this only covers a case when a higher key was overwritten
         // many times since our snapshot was taken, not the case when a lot of
         // different keys were inserted after our snapshot was taken.
-#ifdef USE_TIMESTAMPS
         AppendInternalKey(&last_key,
                           ParsedInternalKey(saved_key_.GetUserKey(), sequence_,
                                             kValueTypeForSeek, 0));
-#else
-        AppendInternalKey(&last_key,
-                          ParsedInternalKey(saved_key_.GetUserKey(), sequence_,
-                                            kValueTypeForSeek));
-#endif  // USE_TIMESTAMPS
       }
       iter_->Seek(last_key);
       RecordTick(statistics_, NUMBER_OF_RESEEKS_IN_ITERATION);
@@ -934,11 +914,7 @@ bool DBIter::FindValueForCurrentKey() {
     if (!ParseKey(&ikey)) {
       return false;
     }
-#ifdef USE_TIMESTAMPS
     const bool is_visiable = IsVisible(ikey.sequence, ikey.timestamp);
-#else
-    const bool is_visiable = IsVisible(ikey.sequence);
-#endif
     if (!is_visiable ||
         !user_comparator_->Equal(ikey.user_key, saved_key_.GetUserKey())) {
       break;
@@ -1079,13 +1055,8 @@ bool DBIter::FindValueForCurrentKeyUsingSeek() {
   // FindValueForCurrentKeyUsingSeek()
   assert(pinned_iters_mgr_.PinningEnabled());
   std::string last_key;
-#ifdef USE_TIMESTAMPS
   AppendInternalKey(&last_key, ParsedInternalKey(saved_key_.GetUserKey(),
                                                  sequence_, kValueTypeForSeek, read_timestamp_));
-#else
-  AppendInternalKey(&last_key, ParsedInternalKey(saved_key_.GetUserKey(),
-                                                 sequence_, kValueTypeForSeek));
-#endif  // USE_TIMESTAMPS
   iter_->Seek(last_key);
   RecordTick(statistics_, NUMBER_OF_RESEEKS_IN_ITERATION);
 
@@ -1109,11 +1080,7 @@ bool DBIter::FindValueForCurrentKeyUsingSeek() {
       return true;
     }
 
-#ifdef USE_TIMESTAMPS
     const bool is_visiable = IsVisible(ikey.sequence, ikey.timestamp);
-#else
-    const bool is_visiable = IsVisible(ikey.sequence);
-#endif
     if (is_visiable) {
       break;
     }
@@ -1256,11 +1223,7 @@ bool DBIter::FindUserKeyBeforeSavedKey() {
     }
 
     assert(ikey.sequence != kMaxSequenceNumber);
-#ifdef USE_TIMESTAMPS
     const bool is_visiable = IsVisible(ikey.sequence, ikey.timestamp);
-#else
-    const bool is_visiable = IsVisible(ikey.sequence);
-#endif
     if (!is_visiable) {
       PERF_COUNTER_ADD(internal_recent_skipped_count, 1);
     } else {
@@ -1306,22 +1269,13 @@ bool DBIter::TooManyInternalKeysSkipped(bool increment) {
   return false;
 }
 
-#ifdef USE_TIMESTAMPS
 bool DBIter::IsVisible(SequenceNumber sequence, uint64_t timestamp) {
   return timestamp <= read_timestamp_ && sequence <= sequence_ &&
          (read_callback_ == nullptr || read_callback_->IsVisible(sequence));
 }
-#else
-bool DBIter::IsVisible(SequenceNumber sequence) {
-  return sequence <= MaxVisibleSequenceNumber() &&
-         (read_callback_ == nullptr || read_callback_->IsVisible(sequence));
-}
-#endif  // USE_TIMESTAMPS
 
 bool DBIter::CanReseekToSkip() {
-#ifdef USE_TIMESTAMPS
   return false;
-#endif  // USE_TIMESTAMPS
   return read_callback_ == nullptr ||
          read_callback_->MaxUnpreparedSequenceNumber() == 0;
 }
@@ -1342,11 +1296,7 @@ void DBIter::Seek(const Slice& target) {
 
   SequenceNumber seq = MaxVisibleSequenceNumber();
   saved_key_.Clear();
-#ifdef USE_TIMESTAMPS
   saved_key_.SetInternalKey(target, seq, read_timestamp_, kValueTypeForSeek);
-#else
-  saved_key_.SetInternalKey(target, seq, kValueTypeForSeek);
-#endif  // USE_TIMESTAMPS
 
 #ifndef ROCKSDB_LITE
   if (db_impl_ != nullptr && cfd_ != nullptr) {
@@ -1358,13 +1308,8 @@ void DBIter::Seek(const Slice& target) {
       user_comparator_->Compare(saved_key_.GetUserKey(),
                                 *iterate_lower_bound_) < 0) {
     saved_key_.Clear();
-#ifdef USE_TIMESTAMPS
     saved_key_.SetInternalKey(*iterate_lower_bound_,
                               seq, read_timestamp_, kValueTypeForSeek);
-#else
-    saved_key_.SetInternalKey(*iterate_lower_bound_,
-                              seq, kValueTypeForSeek);
-#endif  // USE_TIMESTAMPS
   }
 
   {

@@ -595,13 +595,8 @@ CompactionJobStats NewManualCompactionJobStats(
       EstimatedFileSize(
           num_output_records / num_output_files,
           key_size, value_size, compression_ratio) * num_output_files;
-#ifdef USE_TIMESTAMPS
   stats.total_input_raw_key_bytes =
       num_input_records * (key_size + 16);
-#else
-  stats.total_input_raw_key_bytes =
-      num_input_records * (key_size + 8);
-#endif  // USE_TIMESTAMPS
   stats.total_input_raw_value_bytes =
       num_input_records * value_size;
 
