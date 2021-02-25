@@ -1946,11 +1946,7 @@ TEST_P(DBCompactionTestWithParam, LevelCompactionThirdPath) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Reopen(options);
@@ -1958,11 +1954,7 @@ TEST_P(DBCompactionTestWithParam, LevelCompactionThirdPath) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Destroy(options);
@@ -2072,11 +2064,7 @@ TEST_P(DBCompactionTestWithParam, LevelCompactionPathUse) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Reopen(options);
@@ -2084,11 +2072,7 @@ TEST_P(DBCompactionTestWithParam, LevelCompactionPathUse) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Destroy(options);
@@ -2155,31 +2139,19 @@ TEST_P(DBCompactionTestWithParam, LevelCompactionCFPathUse) {
     for (int i = 0; i < key_idx; i++) {
       auto v = Get(0, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
       ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
     }
 
     for (int i = 0; i < key_idx1; i++) {
       auto v = Get(1, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
       ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
     }
 
     for (int i = 0; i < key_idx2; i++) {
       auto v = Get(2, Key(i));
       ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
       ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-      ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
     }
   };
 
@@ -2894,11 +2866,7 @@ TEST_P(DBCompactionTestWithParam, CompressLevelCompaction) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Reopen(options);
@@ -2906,11 +2874,7 @@ TEST_P(DBCompactionTestWithParam, CompressLevelCompaction) {
   for (int i = 0; i < key_idx; i++) {
     auto v = Get(Key(i));
     ASSERT_NE(v, "NOT_FOUND");
-#ifdef USE_TIMESTAMPS
     ASSERT_TRUE(v.size() == 1 || v.size() == 982);
-#else
-    ASSERT_TRUE(v.size() == 1 || v.size() == 990);
-#endif  // USE_TIMESTAMPS
   }
 
   Destroy(options);
@@ -3374,11 +3338,7 @@ TEST_F(DBCompactionTest, CompactBottomLevelFilesWithDeletions) {
   options.compression = kNoCompression;
   options.level0_file_num_compaction_trigger = kNumLevelFiles;
   // inflate it a bit to account for key/metadata overhead
-#ifdef USE_TIMESTAMPS
   options.target_file_size_base = 130 * kNumKeysPerFile * kValueSize / 100;
-#else
-  options.target_file_size_base = 120 * kNumKeysPerFile * kValueSize / 100;
-#endif  // USE_TIMESTAMPS
   Reopen(options);
 
   Random rnd(301);

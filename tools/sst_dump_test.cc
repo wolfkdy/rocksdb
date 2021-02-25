@@ -27,11 +27,7 @@ namespace {
 static std::string MakeKey(int i) {
   char buf[100];
   snprintf(buf, sizeof(buf), "k_%04d", i);
-#ifdef USE_TIMESTAMPS
 	InternalKey key(std::string(buf), 0, ValueType::kTypeValue, 0);
-#else
-	InternalKey key(std::string(buf), 0, ValueType::kTypeValue);
-#endif
 
   return key.Encode().ToString();
 }
@@ -39,11 +35,7 @@ static std::string MakeKey(int i) {
 static std::string MakeValue(int i) {
   char buf[100];
   snprintf(buf, sizeof(buf), "v_%04d", i);
-#ifdef USE_TIMESTAMPS
 	InternalKey key(std::string(buf), 0, ValueType::kTypeValue, 0);
-#else
-	InternalKey key(std::string(buf), 0, ValueType::kTypeValue);
-#endif
 
   return key.Encode().ToString();
 }

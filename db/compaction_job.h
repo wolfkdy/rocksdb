@@ -72,10 +72,9 @@ class CompactionJob {
                 std::shared_ptr<Cache> table_cache, EventLogger* event_logger,
                 bool paranoid_file_checks, bool measure_io_stats,
                 const std::string& dbname,
-                CompactionJobStats* compaction_job_stats
-#ifdef USE_TIMESTAMPS
-                ,uint64_t pin_timestamp
-#endif  // USE_TIMESTAMPS
+                CompactionJobStats* compaction_job_stats,
+                uint64_t pin_timestamp, bool trim_history,
+                const bool ignore_pin_timestamp
   );
 
   ~CompactionJob();
@@ -176,9 +175,9 @@ class CompactionJob {
   // Stores the approx size of keys covered in the range of each subcompaction
   std::vector<uint64_t> sizes_;
   Env::WriteLifeTimeHint write_hint_;
-#ifdef USE_TIMESTAMPS
   uint64_t pin_timestamp_;
-#endif  // USE_TIMESTAMPS
+  bool trim_history_;
+  bool ignore_pin_timestamp_;
 };
 
 }  // namespace rocksdb

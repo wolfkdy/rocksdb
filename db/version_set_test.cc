@@ -36,13 +36,8 @@ class GenerateLevelFilesBriefTest : public testing::Test {
            SequenceNumber largest_seq = 100) {
     FileMetaData* f = new FileMetaData;
     f->fd = FileDescriptor(files_.size() + 1, 0, 0);
-#ifdef USE_TIMESTAMPS
     f->smallest = InternalKey(smallest, smallest_seq, kTypeValue, 0);
     f->largest = InternalKey(largest, largest_seq, kTypeValue, 0);
-#else
-    f->smallest = InternalKey(smallest, smallest_seq, kTypeValue);
-    f->largest = InternalKey(largest, largest_seq, kTypeValue);
-#endif  // USE_TIMESTAMPS
     files_.push_back(f);
   }
 
@@ -110,11 +105,7 @@ class VersionStorageInfoTest : public testing::Test {
 
   InternalKey GetInternalKey(const char* ukey,
                              SequenceNumber smallest_seq = 100) {
-#ifdef USE_TIMESTAMPS
     return InternalKey(ukey, smallest_seq, kTypeValue, 0);
-#else
-    return InternalKey(ukey, smallest_seq, kTypeValue);
-#endif  // USE_TIMESTAMPS
   }
 
   VersionStorageInfoTest()
@@ -389,7 +380,6 @@ TEST_F(VersionStorageInfoTest, EstimateLiveDataSize2) {
 
 TEST_F(VersionStorageInfoTest, GetOverlappingInputs) {
   // Two files that overlap at the range deletion tombstone sentinel.
-#ifdef USE_TIMESTAMPS
   Add(1, 1U, {"a", 0, kTypeValue, 0}, {"b", kMaxSequenceNumber, kTypeRangeDeletion, kMaxTimeStamp}, 1);
   Add(1, 2U, {"b", 0, kTypeValue, 0}, {"c", 0, kTypeValue, 0}, 1);
   // Two files that overlap at the same user key.
@@ -398,20 +388,9 @@ TEST_F(VersionStorageInfoTest, GetOverlappingInputs) {
   // Two files that do not overlap.
   Add(1, 5U, {"g", 0, kTypeValue, 0}, {"h", 0, kTypeValue, 0}, 1);
   Add(1, 6U, {"i", 0, kTypeValue, 0}, {"j", 0, kTypeValue, 0}, 1);
-#else
-  Add(1, 1U, {"a", 0, kTypeValue}, {"b", kMaxSequenceNumber, kTypeRangeDeletion}, 1);
-  Add(1, 2U, {"b", 0, kTypeValue}, {"c", 0, kTypeValue}, 1);
-  // Two files that overlap at the same user key.
-  Add(1, 3U, {"d", 0, kTypeValue}, {"e", kMaxSequenceNumber, kTypeValue}, 1);
-  Add(1, 4U, {"e", 0, kTypeValue}, {"f", 0, kTypeValue}, 1);
-  // Two files that do not overlap.
-  Add(1, 5U, {"g", 0, kTypeValue}, {"h", 0, kTypeValue}, 1);
-  Add(1, 6U, {"i", 0, kTypeValue}, {"j", 0, kTypeValue}, 1);
-#endif  // USE_TIMESTAMPS
   vstorage_.UpdateNumNonEmptyLevels();
   vstorage_.GenerateLevelFilesBrief();
 
-#ifdef USE_TIMESTAMPS
   ASSERT_EQ("1,2", GetOverlappingFiles(
       1, {"a", 0, kTypeValue, 0}, {"b", 0, kTypeValue, 0}));
   ASSERT_EQ("1", GetOverlappingFiles(
@@ -430,26 +409,6 @@ TEST_F(VersionStorageInfoTest, GetOverlappingInputs) {
       1, {"g", 0, kTypeValue, 0}, {"h", 0, kTypeValue, 0}));
   ASSERT_EQ("6", GetOverlappingFiles(
       1, {"i", 0, kTypeValue, 0}, {"j", 0, kTypeValue, 0}));
-#else
-  ASSERT_EQ("1,2", GetOverlappingFiles(
-      1, {"a", 0, kTypeValue}, {"b", 0, kTypeValue}));
-  ASSERT_EQ("1", GetOverlappingFiles(
-      1, {"a", 0, kTypeValue}, {"b", kMaxSequenceNumber, kTypeRangeDeletion}));
-  ASSERT_EQ("2", GetOverlappingFiles(
-      1, {"b", kMaxSequenceNumber, kTypeValue}, {"c", 0, kTypeValue}));
-  ASSERT_EQ("3,4", GetOverlappingFiles(
-      1, {"d", 0, kTypeValue}, {"e", 0, kTypeValue}));
-  ASSERT_EQ("3", GetOverlappingFiles(
-      1, {"d", 0, kTypeValue}, {"e", kMaxSequenceNumber, kTypeRangeDeletion}));
-  ASSERT_EQ("3,4", GetOverlappingFiles(
-      1, {"e", kMaxSequenceNumber, kTypeValue}, {"f", 0, kTypeValue}));
-  ASSERT_EQ("3,4", GetOverlappingFiles(
-      1, {"e", 0, kTypeValue}, {"f", 0, kTypeValue}));
-  ASSERT_EQ("5", GetOverlappingFiles(
-      1, {"g", 0, kTypeValue}, {"h", 0, kTypeValue}));
-  ASSERT_EQ("6", GetOverlappingFiles(
-      1, {"i", 0, kTypeValue}, {"j", 0, kTypeValue}));
-#endif  // USE_TIMESTAMPS
 }
 
 
@@ -473,13 +432,8 @@ class FindLevelFileTest : public testing::Test {
   void Add(const char* smallest, const char* largest,
            SequenceNumber smallest_seq = 100,
            SequenceNumber largest_seq = 100) {
-#ifdef USE_TIMESTAMPS
     InternalKey smallest_key = InternalKey(smallest, smallest_seq, kTypeValue, 0);
     InternalKey largest_key = InternalKey(largest, largest_seq, kTypeValue, 0);
-#else
-    InternalKey smallest_key = InternalKey(smallest, smallest_seq, kTypeValue);
-    InternalKey largest_key = InternalKey(largest, largest_seq, kTypeValue);
-#endif  // USE_TIMESTAMPS
     Slice smallest_slice = smallest_key.Encode();
     Slice largest_slice = largest_key.Encode();
 
@@ -500,11 +454,7 @@ class FindLevelFileTest : public testing::Test {
   }
 
   int Find(const char* key) {
-#ifdef USE_TIMESTAMPS
     InternalKey target(key, 100, kTypeValue, 0);
-#else
-    InternalKey target(key, 100, kTypeValue);
-#endif  // USE_TIMESTAMPS
     InternalKeyComparator cmp(BytewiseComparator());
     return FindFile(cmp, file_level_, target.Encode());
   }

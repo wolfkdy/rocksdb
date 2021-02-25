@@ -104,7 +104,6 @@ TEST_P(DBIteratorTest, IteratorProperty) {
   Close();
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IteratorProperty_WithTimestamp) {
   // The test needs to be changed if kPersistedTier is supported in iterator.
   Options options = CurrentOptions();
@@ -135,7 +134,6 @@ TEST_P(DBIteratorTest, IteratorProperty_WithTimestamp) {
   }
   Close();
 }
-#endif
 
 TEST_P(DBIteratorTest, PersistedTierOnIterator) {
   // The test needs to be changed if kPersistedTier is supported in iterator.
@@ -217,7 +215,6 @@ TEST_P(DBIteratorTest, NonBlockingIteration) {
                          kSkipMmapReads));
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, NonBlockingIteration_WithTimestamp) {
   do {
     ReadOptions non_blocking_opts, regular_opts;
@@ -286,7 +283,6 @@ TEST_P(DBIteratorTest, NonBlockingIteration_WithTimestamp) {
   } while (ChangeOptions(kSkipPlainTable | kSkipNoSeekToLast | kSkipHashCuckoo |
                          kSkipMmapReads));
 }
-#endif
 
 #ifndef ROCKSDB_LITE
 TEST_P(DBIteratorTest, ManagedNonBlockingIteration) {
@@ -355,7 +351,6 @@ TEST_P(DBIteratorTest, ManagedNonBlockingIteration) {
 }
 #endif  // ROCKSDB_LITE
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterSeekBeforePrevWithTimestamp) {
   std::vector<const Snapshot*> snapshots;
   // snapshots[0] null
@@ -528,7 +523,6 @@ TEST_P(DBIteratorTest, IterSeekBeforePrevWithTimestamp) {
     db_->ReleaseSnapshot(v);
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, IterSeekBeforePrev) {
   ASSERT_OK(Put("a", "b"));
@@ -546,7 +540,6 @@ TEST_P(DBIteratorTest, IterSeekBeforePrev) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterSeekForPrevBeforeNextWithTimestamp) {
   std::vector<const Snapshot*> snapshots;
   // snapshots[0] null
@@ -734,7 +727,6 @@ TEST_P(DBIteratorTest, IterSeekForPrevBeforeNextWithTimestamp) {
     db_->ReleaseSnapshot(v);
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, IterSeekForPrevBeforeNext) {
   ASSERT_OK(Put("a", "b"));
@@ -798,7 +790,6 @@ TEST_P(DBIteratorTest, IterLongKeys) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterLongKeys_WithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 200000;
@@ -852,9 +843,7 @@ TEST_P(DBIteratorTest, IterLongKeys_WithTimestamp) {
   // ASSERT_EQ(IterStatus(iter), "(invalid)");
   delete iter;
 }
-#endif
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterNextWithNewerSeqWithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 3000;
@@ -884,7 +873,6 @@ TEST_P(DBIteratorTest, IterNextWithNewerSeqWithTimestamp) {
 
   delete iter;
 }
-#endif
 TEST_P(DBIteratorTest, IterNextWithNewerSeq) {
   ASSERT_OK(Put("0", "0"));
   dbfull()->Flush(FlushOptions());
@@ -911,7 +899,6 @@ TEST_P(DBIteratorTest, IterNextWithNewerSeq) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevWithNewerSeqWithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 3000;
@@ -946,7 +933,6 @@ TEST_P(DBIteratorTest, IterPrevWithNewerSeqWithTimestamp) {
   iter->Prev();
   delete iter;
 }
-#endif
 TEST_P(DBIteratorTest, IterPrevWithNewerSeq) {
   ASSERT_OK(Put("0", "0"));
   dbfull()->Flush(FlushOptions());
@@ -978,7 +964,6 @@ TEST_P(DBIteratorTest, IterPrevWithNewerSeq) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevWithNewerSeq_WithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 111111111111;
@@ -1019,7 +1004,6 @@ TEST_P(DBIteratorTest, IterPrevWithNewerSeq_WithTimestamp) {
   ASSERT_FALSE(iter->Valid());
   delete iter;
 }
-#endif
 
 TEST_P(DBIteratorTest, IterPrevWithNewerSeq2) {
   ASSERT_OK(Put("0", "0"));
@@ -1050,7 +1034,6 @@ TEST_P(DBIteratorTest, IterPrevWithNewerSeq2) {
   delete iter2;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevWithNewerSeq2_WithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 3000;
@@ -1085,7 +1068,6 @@ TEST_P(DBIteratorTest, IterPrevWithNewerSeq2_WithTimestamp) {
   delete iter;
   delete iter2;
 }
-#endif
 TEST_P(DBIteratorTest, IterEmpty) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
@@ -1107,7 +1089,6 @@ TEST_P(DBIteratorTest, IterEmpty) {
   } while (ChangeCompactOptions());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterEmptyWithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 2;
@@ -1130,7 +1111,6 @@ TEST_P(DBIteratorTest, IterEmptyWithTimestamp) {
     delete iter;
   } while (ChangeCompactOptions());
 }
-#endif
 
 TEST_P(DBIteratorTest, IterSingle) {
   do {
@@ -1182,7 +1162,6 @@ TEST_P(DBIteratorTest, IterSingle) {
     delete iter;
   } while (ChangeCompactOptions());
 }
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterSingleWithTimestamp) {
   ReadOptions ro;
   ro.read_timestamp = 10000;
@@ -1237,7 +1216,6 @@ TEST_P(DBIteratorTest, IterSingleWithTimestamp) {
     delete iter;
   } while (ChangeCompactOptions());
 }
-#endif
 
 TEST_P(DBIteratorTest, IterMulti) {
   do {
@@ -1336,7 +1314,6 @@ TEST_P(DBIteratorTest, IterMulti) {
   } while (ChangeCompactOptions());
 }
 
-//#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterMultiWithTimestamp) {
   ReadOptions ro;
 
@@ -1449,96 +1426,6 @@ TEST_P(DBIteratorTest, IterMultiWithTimestamp) {
 }
 //#endif
 
-#ifndef USE_TIMESTAMPS
-// Check that we can skip over a run of user keys
-// by using reseek rather than sequential scan
-TEST_P(DBIteratorTest, IterReseek) {
-  anon::OptionsOverride options_override;
-  options_override.skip_policy = kSkipNoSnapshot;
-  Options options = CurrentOptions(options_override);
-  options.max_sequential_skip_in_iterations = 3;
-  options.create_if_missing = true;
-  options.statistics = rocksdb::CreateDBStatistics();
-  DestroyAndReopen(options);
-  CreateAndReopenWithCF({"pikachu"}, options);
-
-  // insert three keys with same userkey and verify that
-  // reseek is not invoked. For each of these test cases,
-  // verify that we can find the next key "b".
-  ASSERT_OK(Put(1, "a", "zero"));
-  ASSERT_OK(Put(1, "a", "one"));
-  ASSERT_OK(Put(1, "a", "two"));
-  ASSERT_OK(Put(1, "b", "bone"));
-  Iterator* iter = NewIterator(ReadOptions(), handles_[1]);
-  iter->SeekToFirst();
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 0);
-  ASSERT_EQ(IterStatus(iter), "a->two");
-  iter->Next();
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 0);
-  ASSERT_EQ(IterStatus(iter), "b->bone");
-  delete iter;
-
-  // insert a total of three keys with same userkey and verify
-  // that reseek is still not invoked.
-  ASSERT_OK(Put(1, "a", "three"));
-  iter = NewIterator(ReadOptions(), handles_[1]);
-  iter->SeekToFirst();
-  ASSERT_EQ(IterStatus(iter), "a->three");
-  iter->Next();
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 0);
-  ASSERT_EQ(IterStatus(iter), "b->bone");
-  delete iter;
-
-  // insert a total of four keys with same userkey and verify
-  // that reseek is invoked.
-  ASSERT_OK(Put(1, "a", "four"));
-  iter = NewIterator(ReadOptions(), handles_[1]);
-  iter->SeekToFirst();
-  ASSERT_EQ(IterStatus(iter), "a->four");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 0);
-  iter->Next();
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION), 1);
-  ASSERT_EQ(IterStatus(iter), "b->bone");
-  delete iter;
-
-  // Testing reverse iterator
-  // At this point, we have three versions of "a" and one version of "b".
-  // The reseek statistics is already at 1.
-  int num_reseeks = static_cast<int>(
-      TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION));
-
-  // Insert another version of b and assert that reseek is not invoked
-  ASSERT_OK(Put(1, "b", "btwo"));
-  iter = NewIterator(ReadOptions(), handles_[1]);
-  iter->SeekToLast();
-  ASSERT_EQ(IterStatus(iter), "b->btwo");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION),
-            num_reseeks);
-  iter->Prev();
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION),
-            num_reseeks + 1);
-  ASSERT_EQ(IterStatus(iter), "a->four");
-  delete iter;
-
-  // insert two more versions of b. This makes a total of 4 versions
-  // of b and 4 versions of a.
-  ASSERT_OK(Put(1, "b", "bthree"));
-  ASSERT_OK(Put(1, "b", "bfour"));
-  iter = NewIterator(ReadOptions(), handles_[1]);
-  iter->SeekToLast();
-  ASSERT_EQ(IterStatus(iter), "b->bfour");
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION),
-            num_reseeks + 2);
-  iter->Prev();
-
-  // the previous Prev call should have invoked reseek
-  ASSERT_EQ(TestGetTickerCount(options, NUMBER_OF_RESEEKS_IN_ITERATION),
-            num_reseeks + 3);
-  ASSERT_EQ(IterStatus(iter), "a->four");
-  delete iter;
-}
-
-#else
 TEST_P(DBIteratorTest, IterReseekWithTimestamp) {
   anon::OptionsOverride options_override;
   options_override.skip_policy = kSkipNoSnapshot;
@@ -1674,7 +1561,6 @@ TEST_P(DBIteratorTest, IterReseekWithTimestamp1) {
   ASSERT_EQ(IterStatus(iter), "b->bone");
   delete iter;
 }
-#endif
 
 TEST_P(DBIteratorTest, IterSmallAndLargeMix) {
   do {
@@ -1717,7 +1603,6 @@ TEST_P(DBIteratorTest, IterSmallAndLargeMix) {
   } while (ChangeCompactOptions());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterSmallAndLargeMix_WithTimestamp) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
@@ -1802,7 +1687,6 @@ TEST_P(DBIteratorTest, IterSmallAndLargeMix_WithTimestamp) {
     delete iter;
   } while (ChangeCompactOptions());
 }
-#endif
 TEST_P(DBIteratorTest, IterMultiWithDelete) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
@@ -1829,7 +1713,6 @@ TEST_P(DBIteratorTest, IterMultiWithDelete) {
   } while (ChangeOptions());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterMultiWithDelete_WithTimestamp) {
   do {
     WriteOptions wo;
@@ -1859,7 +1742,6 @@ TEST_P(DBIteratorTest, IterMultiWithDelete_WithTimestamp) {
     delete iter;
   } while (ChangeOptions());
 }
-#endif
 
 TEST_P(DBIteratorTest, IterPrevMaxSkip) {
   do {
@@ -1891,7 +1773,6 @@ TEST_P(DBIteratorTest, IterPrevMaxSkip) {
   } while (ChangeOptions(kSkipMergePut | kSkipNoSeekToLast));
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevMaxSkip_WithTimestamp) {
   WriteOptions wo;
   wo.asif_commit_timestamps = {1000};
@@ -1927,7 +1808,6 @@ TEST_P(DBIteratorTest, IterPrevMaxSkip_WithTimestamp) {
     VerifyIterLast("(invalid)", ro, 1);
   } while (ChangeOptions(kSkipMergePut | kSkipNoSeekToLast));
 }
-#endif
 
 TEST_P(DBIteratorTest, IterWithSnapshot) {
   anon::OptionsOverride options_override;
@@ -1996,7 +1876,6 @@ TEST_P(DBIteratorTest, IterWithSnapshot) {
   } while (ChangeOptions(kSkipHashCuckoo));
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterWithSnapshot_WithTimestamp) {
   anon::OptionsOverride options_override;
   options_override.skip_policy = kSkipNoSnapshot;
@@ -2072,7 +1951,6 @@ TEST_P(DBIteratorTest, IterWithSnapshot_WithTimestamp) {
     // skip as HashCuckooRep does not support snapshot
   } while (ChangeOptions(kSkipHashCuckoo));
 }
-#endif
 
 TEST_P(DBIteratorTest, IteratorPinsRef) {
   do {
@@ -2100,7 +1978,6 @@ TEST_P(DBIteratorTest, IteratorPinsRef) {
   } while (ChangeCompactOptions());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IteratorPinsRef_WithTimestamp) {
   do {
     CreateAndReopenWithCF({"pikachu"}, CurrentOptions());
@@ -2137,7 +2014,6 @@ TEST_P(DBIteratorTest, IteratorPinsRef_WithTimestamp) {
     delete iter;
   } while (ChangeCompactOptions());
 }
-#endif
 // SetOptions not defined in ROCKSDB LITE
 #ifndef ROCKSDB_LITE
 TEST_P(DBIteratorTest, DBIteratorBoundTest) {
@@ -2367,7 +2243,6 @@ TEST_P(DBIteratorTest, DBIteratorBoundMultiSeek) {
 }
 #endif
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, DBIteratorBoundTest_WithTimestamp) {
   Options options = CurrentOptions();
   options.env = env_;
@@ -2594,7 +2469,6 @@ TEST_P(DBIteratorTest, DBIteratorBoundTest_WithTimestamp) {
         static_cast<int>(get_perf_context()->internal_delete_skipped_count), 0);
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, DBIteratorBoundOptimizationTest) {
   int upper_bound_hits = 0;
@@ -2641,7 +2515,6 @@ TEST_P(DBIteratorTest, DBIteratorBoundOptimizationTest) {
   ASSERT_EQ(upper_bound_hits, 1);
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, DBIteratorBoundOptimizationTest_WithTimestamp) {
   int upper_bound_hits = 0;
   Options options = CurrentOptions();
@@ -2693,7 +2566,6 @@ TEST_P(DBIteratorTest, DBIteratorBoundOptimizationTest_WithTimestamp) {
   iter->Seek("foo");
   ASSERT_TRUE(!iter->Valid());
 }
-#endif
 
 // TODO(3.13): fix the issue of Seek() + Prev() which might not necessary
 //             return the biggest key which is smaller than the seek key.
@@ -2729,7 +2601,6 @@ TEST_P(DBIteratorTest, PrevAfterAndNextAfterMerge) {
   ASSERT_EQ("2", it->key().ToString());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, PrevAfterAndNextAfterMerge_WithTimestamp) {
   Options options;
   options.create_if_missing = true;
@@ -2768,7 +2639,6 @@ TEST_P(DBIteratorTest, PrevAfterAndNextAfterMerge_WithTimestamp) {
   it->Seek("2");
   ASSERT_TRUE(!it->Valid());
 }
-#endif
 
 class DBIteratorTestForPinnedData : public DBIteratorTest {
  public:
@@ -3028,7 +2898,6 @@ TEST_P(DBIteratorTest, PinnedDataIteratorMultipleFiles) {
 }
 #endif
 
-#ifdef USE_TIMESTAMPS
 #ifndef ROCKSDB_LITE
 TEST_P(DBIteratorTest, PinnedDataIteratorMultipleFiles_WithTimestamp) {
   Options options = CurrentOptions();
@@ -3130,7 +2999,6 @@ TEST_P(DBIteratorTest, PinnedDataIteratorMultipleFiles_WithTimestamp) {
   }
   ASSERT_LT(results.size(), 2000);
 }
-#endif
 #endif
 
 TEST_P(DBIteratorTest, PinnedDataIteratorMergeOperator) {
@@ -3372,7 +3240,6 @@ TEST_P(DBIteratorTest, IterSeekForPrevCrossingFilesCustomPrefixExtractor) {
   }
 }
 
-#ifdef USE_TIMESTAMPS
 
 TEST_P(DBIteratorTest, PinnedDataIteratorReadAfterUpdate_WithTimestamp) {
   Options options = CurrentOptions();
@@ -3508,7 +3375,6 @@ TEST_P(DBIteratorTest, IterSeekForPrevCrossingFiles_WithTimestamp) {
     delete iter;
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocks) {
   Options options = CurrentOptions();
@@ -3578,7 +3444,6 @@ TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocks) {
   }
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocks_Withtimestamp) {
   Options options = CurrentOptions();
   BlockBasedTableOptions table_options;
@@ -3648,7 +3513,6 @@ TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocks_Withtimestamp) {
     delete iter;
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocksRandomized) {
   Options options = CurrentOptions();
@@ -3797,7 +3661,6 @@ TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocksRandomized) {
   }
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocksRandomized_WithTimestamp) {
   Options options = CurrentOptions();
   options.merge_operator = MergeOperators::CreateStringAppendTESTOperator();
@@ -3947,7 +3810,6 @@ TEST_P(DBIteratorTest, IterPrevKeyCrossingBlocksRandomized_WithTimestamp) {
     delete iter;
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, IteratorWithLocalStatistics) {
   Options options = CurrentOptions();
@@ -4117,7 +3979,6 @@ TEST_P(DBIteratorTest, ReadAhead) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, ReadAhead_WithTimestamp) {
   Options options;
   env_->count_random_reads_ = true;
@@ -4199,66 +4060,7 @@ TEST_P(DBIteratorTest, ReadAhead_WithTimestamp) {
   }
   delete iter;
 }
-#endif
 
-#ifndef USE_TIMESTAMPS
-// Insert a key, create a snapshot iterator, overwrite key lots of times,
-// seek to a smaller key. Expect DBIter to fall back to a seek instead of
-// going through all the overwrites linearly.
-TEST_P(DBIteratorTest, DBIteratorSkipRecentDuplicatesTest) {
-  Options options = CurrentOptions();
-  options.env = env_;
-  options.create_if_missing = true;
-  options.max_sequential_skip_in_iterations = 3;
-  options.prefix_extractor = nullptr;
-  options.write_buffer_size = 1 << 27;  // big enough to avoid flush
-  options.statistics = rocksdb::CreateDBStatistics();
-  DestroyAndReopen(options);
-
-  // Insert.
-  ASSERT_OK(Put("b", "0"));
-
-  // Create iterator.
-  ReadOptions ro;
-  std::unique_ptr<Iterator> iter(NewIterator(ro));
-
-  // Insert a lot.
-  for (int i = 0; i < 100; ++i) {
-    ASSERT_OK(Put("b", std::to_string(i + 1).c_str()));
-  }
-
-#ifndef ROCKSDB_LITE
-  // Check that memtable wasn't flushed.
-  std::string val;
-  ASSERT_TRUE(db_->GetProperty("rocksdb.num-files-at-level0", &val));
-  EXPECT_EQ("0", val);
-#endif
-
-  // Seek iterator to a smaller key.
-  get_perf_context()->Reset();
-  iter->Seek("a");
-  ASSERT_TRUE(iter->Valid());
-  EXPECT_EQ("b", iter->key().ToString());
-  EXPECT_EQ("0", iter->value().ToString());
-
-  // Check that the seek didn't do too much work.
-  // Checks are not tight, just make sure that everything is well below 100.
-  EXPECT_LT(get_perf_context()->internal_key_skipped_count, 4);
-  EXPECT_LT(get_perf_context()->internal_recent_skipped_count, 8);
-  EXPECT_LT(get_perf_context()->seek_on_memtable_count, 10);
-  EXPECT_LT(get_perf_context()->next_on_memtable_count, 10);
-  EXPECT_LT(get_perf_context()->prev_on_memtable_count, 10);
-
-  // Check that iterator did something like what we expect.
-  EXPECT_EQ(get_perf_context()->internal_delete_skipped_count, 0);
-  EXPECT_EQ(get_perf_context()->internal_merge_count, 0);
-  EXPECT_GE(get_perf_context()->internal_recent_skipped_count, 2);
-  EXPECT_GE(get_perf_context()->seek_on_memtable_count, 2);
-  EXPECT_EQ(1, options.statistics->getTickerCount(
-                 NUMBER_OF_RESEEKS_IN_ITERATION));
-}
-
-#else
 TEST_P(DBIteratorTest, DBIteratorSkipRecentDuplicatesTest_WithTimestamp) {
   Options options = CurrentOptions();
   options.env = env_;
@@ -4313,7 +4115,6 @@ TEST_P(DBIteratorTest, DBIteratorSkipRecentDuplicatesTest_WithTimestamp) {
   EXPECT_EQ(0,
             options.statistics->getTickerCount(NUMBER_OF_RESEEKS_IN_ITERATION));
 }
-#endif  // USE_TIMESTAMPS
 
 TEST_P(DBIteratorTest, Refresh) {
   ASSERT_OK(Put("x", "y"));
@@ -4402,7 +4203,6 @@ TEST_P(DBIteratorTest, RefreshWithSnapshot) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, Refresh_WithTimestamp) {
   // basicly like snapshot, refresh doesn't work
   WriteOptions wo;
@@ -4454,7 +4254,6 @@ TEST_P(DBIteratorTest, Refresh_WithTimestamp) {
 
   iter.reset();
 }
-#endif
 
 TEST_P(DBIteratorTest, CreationFailure) {
   SyncPoint::GetInstance()->SetCallBack(
@@ -4506,7 +4305,6 @@ TEST_P(DBIteratorTest, UpperBoundWithChangeDirection) {
   delete iter;
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, UpperBoundWithChangeDirection_WithTimestamp) {
   Options options = CurrentOptions();
   options.max_sequential_skip_in_iterations = 3;
@@ -4554,7 +4352,6 @@ TEST_P(DBIteratorTest, UpperBoundWithChangeDirection_WithTimestamp) {
   ASSERT_FALSE(iter->Valid());
   delete iter;
 }
-#endif
 
 TEST_P(DBIteratorTest, TableFilter) {
   ASSERT_OK(Put("a", "1"));
@@ -4622,7 +4419,6 @@ TEST_P(DBIteratorTest, TableFilter) {
   }
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, TableFilter_WithTimestamp) {
   WriteOptions wo;
   wo.asif_commit_timestamps = {100000};
@@ -4727,7 +4523,6 @@ TEST_P(DBIteratorTest, TableFilter_WithTimestamp) {
     delete iter;
   }
 }
-#endif
 
 TEST_P(DBIteratorTest, UpperBoundWithPrevReseek) {
   Options options = CurrentOptions();
@@ -4770,7 +4565,6 @@ TEST_P(DBIteratorTest, UpperBoundWithPrevReseek) {
   db_->ReleaseSnapshot(snapshot);
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, UpperBoundWithPrevReseek_WithTimestamp) {
   Options options = CurrentOptions();
   options.max_sequential_skip_in_iterations = 3;
@@ -4820,7 +4614,6 @@ TEST_P(DBIteratorTest, UpperBoundWithPrevReseek_WithTimestamp) {
   delete iter;
   db_->ReleaseSnapshot(snapshot);
 }
-#endif
 
 TEST_P(DBIteratorTest, SkipStatistics) {
   Options options = CurrentOptions();
@@ -4903,7 +4696,6 @@ TEST_P(DBIteratorTest, SkipStatistics) {
   ASSERT_EQ(skip_count, TestGetTickerCount(options, NUMBER_ITER_SKIP));
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, SkipStatistics_WithTimestamp) {
   Options options = CurrentOptions();
   options.statistics = rocksdb::CreateDBStatistics();
@@ -4992,7 +4784,6 @@ TEST_P(DBIteratorTest, SkipStatistics_WithTimestamp) {
   ASSERT_TRUE(!iter->Valid());
   delete iter;
 }
-#endif
 
 TEST_P(DBIteratorTest, SeekAfterHittingManyInternalKeys) {
   Options options = CurrentOptions();
@@ -5036,7 +4827,6 @@ TEST_P(DBIteratorTest, SeekAfterHittingManyInternalKeys) {
   ASSERT_EQ(iter2->value().ToString(), "val_6");
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, SeekAfterHittingManyInternalKeys_WithTimestamp) {
   Options options = CurrentOptions();
   DestroyAndReopen(options);
@@ -5085,7 +4875,6 @@ TEST_P(DBIteratorTest, SeekAfterHittingManyInternalKeys_WithTimestamp) {
   iter3->Seek(prop_value);
   ASSERT_TRUE(!iter3->Valid());
 }
-#endif
 
 // Reproduces a former bug where iterator would skip some records when DBIter
 // re-seeks subiterator with Incomplete status.
@@ -5151,7 +4940,6 @@ TEST_P(DBIteratorTest, SeekBackwardAfterOutOfUpperBound) {
   ASSERT_EQ("a", it->key().ToString());
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_P(DBIteratorTest, NonBlockingIterationBugRepro_WithTimestamp) {
   Options options = CurrentOptions();
   BlockBasedTableOptions table_options;
@@ -5193,7 +4981,6 @@ TEST_P(DBIteratorTest, NonBlockingIterationBugRepro_WithTimestamp) {
   // "d".
   EXPECT_TRUE(iter->status().IsIncomplete());
 }
-#endif
 
 INSTANTIATE_TEST_CASE_P(DBIteratorTestInstance, DBIteratorTest,
                         testing::Values(true, false));

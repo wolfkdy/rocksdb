@@ -312,24 +312,15 @@ class ColumnFamilyTestBase : public testing::Test {
       // 10 bytes for key, rest is value
       if (!save) {
         // Note: 8 bytes timestamp
-#ifdef USE_TIMESTAMPS
         int kval = key_value_size>18? (key_value_size - 18):0;
         ASSERT_OK(Put(cf, test::RandomKey(&rnd_, 11),
             RandomString(&rnd_, kval )));
-#else
-        ASSERT_OK(Put(cf, test::RandomKey(&rnd_, 11),
-                      RandomString(&rnd_, key_value_size - 10)));
-#endif  // USE_TIMESTAMPS
       } else {
         std::string key = test::RandomKey(&rnd_, 11);
         keys_[cf].insert(key);
-#ifdef USE_TIMESTAMPS
         int kval = key_value_size>18? (key_value_size - 18):0;
         ASSERT_OK(Put(cf, key,
                       RandomString(&rnd_, kval )));
-#else
-        ASSERT_OK(Put(cf, key, RandomString(&rnd_, key_value_size - 10)));
-#endif  // USE_TIMESTAMPS
       }
     }
     db_->FlushWAL(false);

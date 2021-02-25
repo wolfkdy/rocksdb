@@ -21,14 +21,17 @@ CompactionIterator::CompactionIterator(
     CompactionRangeDelAggregator* range_del_agg, const Compaction* compaction,
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
-    const SequenceNumber preserve_deletes_seqnum, const uint64_t pin_timestamp)
+    const SequenceNumber preserve_deletes_seqnum,
+    const uint64_t pin_timestamp,
+    const bool trim_history)
     : CompactionIterator(
           input, cmp, merge_helper, last_sequence, snapshots,
           earliest_write_conflict_snapshot, snapshot_checker, env,
           report_detailed_time, expect_valid_internal_key, range_del_agg,
           std::unique_ptr<CompactionProxy>(
               compaction ? new CompactionProxy(compaction) : nullptr),
-          compaction_filter, shutting_down, preserve_deletes_seqnum, pin_timestamp) {}
+          compaction_filter, shutting_down, preserve_deletes_seqnum,
+          pin_timestamp, trim_history) {}
 
 CompactionIterator::CompactionIterator(
     InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
@@ -41,7 +44,8 @@ CompactionIterator::CompactionIterator(
     const CompactionFilter* compaction_filter,
     const std::atomic<bool>* shutting_down,
     const SequenceNumber preserve_deletes_seqnum,
-    const uint64_t pin_timestamp)
+    const uint64_t pin_timestamp,
+    const bool trim_history)
     : input_(input),
       cmp_(cmp),
       merge_helper_(merge_helper),
@@ -60,14 +64,10 @@ CompactionIterator::CompactionIterator(
       current_user_key_sequence_(0),
       current_user_key_snapshot_(0),
       merge_out_iter_(merge_helper_),
-      current_key_committed_(false)
-#ifdef USE_TIMESTAMPS
-      ,pin_timestamp_(pin_timestamp)
-#endif
+      current_key_committed_(false),
+      pin_timestamp_(pin_timestamp),
+      trim_history_(trim_history)
 {
-#ifndef USE_TIMESTAMPS
-  (void)pin_timestamp;
-#endif  // USE_TIMESTAMPS
   assert(compaction_filter_ == nullptr || compaction_ != nullptr);
   bottommost_level_ =
       compaction_ == nullptr ? false : compaction_->bottommost_level();
@@ -136,11 +136,7 @@ void CompactionIterator::Next() {
       // include them in the result, so we expect the keys here to be valid.
       assert(valid_key);
       // Keep current_key_ in sync.
-#ifdef USE_TIMESTAMPS
       current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type, ikey_.timestamp);
-#else
-      current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
-#endif  // USE_TIMESTAMPS
       key_ = current_key_.GetInternalKey();
       ikey_.user_key = current_key_.GetUserKey();
       valid_ = true;
@@ -212,11 +208,7 @@ void CompactionIterator::InvokeFilterIfNeeded(bool* need_skip,
       // convert the current key to a delete; key_ is pointing into
       // current_key_ at this point, so updating current_key_ updates key()
       ikey_.type = kTypeDeletion;
-#ifdef USE_TIMESTAMPS
       current_key_.UpdateInternalKey(ikey_.sequence, kTypeDeletion, ikey_.timestamp);
-#else
-      current_key_.UpdateInternalKey(ikey_.sequence, kTypeDeletion);
-#endif  // USE_TIMESTAMPS
       // no value associated with delete
       value_.clear();
       iter_stats_.num_record_drop_user++;
@@ -264,6 +256,25 @@ void CompactionIterator::NextFromInput() {
     iter_stats_.total_input_raw_key_bytes += key_.size();
     iter_stats_.total_input_raw_value_bytes += value_.size();
 
+    if (trim_history_) {
+      if (ikey_.timestamp > pin_timestamp_) {
+        has_current_user_key_ = false;
+        current_user_key_sequence_ = kMaxSequenceNumber;
+        current_user_key_snapshot_ = 0;
+        iter_stats_.num_record_trimed_by_ts++;
+        valid_ = false;
+        input_->Next();
+        continue;
+      } else {
+        key_ = current_key_.SetInternalKey(key_, &ikey_);
+        has_current_user_key_ = false;
+        current_user_key_sequence_ = kMaxSequenceNumber;
+        current_user_key_snapshot_ = 0;
+        valid_ = true;
+        iter_stats_.num_record_pined_by_ts++;
+        break;
+      }
+    }
     // If need_skip is true, we should seek the input iterator
     // to internal key skip_until and continue from there.
     bool need_skip = false;
@@ -272,7 +283,6 @@ void CompactionIterator::NextFromInput() {
     Slice skip_until;
 
     bool new_nontimestamped_del_stripe = false;
-#ifdef USE_TIMESTAMPS
     // the judge of pin_timestamp_ != 0 makes unittests happy
     if (pin_timestamp_ != 0 &&
         (ikey_.type == kTypeDeletion && ikey_.timestamp == 0)) {
@@ -288,9 +298,9 @@ void CompactionIterator::NextFromInput() {
       current_user_key_sequence_ = kMaxSequenceNumber;
       current_user_key_snapshot_ = 0;
       valid_ = true;
+      iter_stats_.num_record_pined_by_ts++;
       break;
     }
-#endif  // USE_TIMESTAMPS
     // Check whether the user key changed. After this if statement current_key_
     // is a copy of the current input key (maybe converted to a delete by the
     // compaction filter). ikey_.user_key is pointing to the copy.
@@ -302,7 +312,6 @@ void CompactionIterator::NextFromInput() {
       key_ = current_key_.SetInternalKey(key_, &ikey_);
       current_user_key_ = ikey_.user_key;
       has_current_user_key_ = true;
-#ifdef USE_TIMESTAMPS
       coverd_nontimestamped_del_.reset();
       if (new_nontimestamped_del_stripe) {
         // dirty trick. we allow nontimestamped DEL to delete timestamped PUT
@@ -312,7 +321,6 @@ void CompactionIterator::NextFromInput() {
             new ParsedInternalKey(Slice(cnd_holder_.data(), cnd_holder_.size()),
                                   ikey_.sequence, kTypeDeletion, 0));
       }
-#endif  // USE_TIMESTAMPS
       has_outputted_key_ = false;
       current_user_key_sequence_ = kMaxSequenceNumber;
       current_user_key_snapshot_ = 0;
@@ -331,11 +339,7 @@ void CompactionIterator::NextFromInput() {
       // TODO(rven): Compaction filter does not process keys in this path
       // Need to have the compaction filter process multiple versions
       // if we have versions on both sides of a snapshot
-#ifdef USE_TIMESTAMPS
       current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type, ikey_.timestamp);
-#else
-      current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
-#endif  // USE_TIMESTAMPS
       key_ = current_key_.GetInternalKey();
       ikey_.user_key = current_key_.GetUserKey();
 
@@ -578,9 +582,7 @@ void CompactionIterator::NextFromInput() {
               (snapshot_checker_ != nullptr &&
                UNLIKELY(!snapshot_checker_->IsInSnapshot(next_ikey.sequence,
                                                          prev_snapshot))))) {
-#ifdef USE_TIMESTAMPS
         assert(ikey_.timestamp == 0 || ikey_.timestamp > next_ikey.timestamp);
-#endif  // USE_TIMESTAMPS
         input_->Next();
       }
       // If you find you still need to output a row with this key, we need to output the
@@ -620,11 +622,7 @@ void CompactionIterator::NextFromInput() {
         // include them in the result, so we expect the keys here to valid.
         assert(valid_key);
         // Keep current_key_ in sync.
-#ifdef USE_TIMESTAMPS
         current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type, ikey_.timestamp);
-#else
-        current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
-#endif  // USE_TIMESTAMPS
         key_ = current_key_.GetInternalKey();
         ikey_.user_key = current_key_.GetUserKey();
         valid_ = true;
@@ -683,17 +681,11 @@ void CompactionIterator::PrepareOutput() {
         ikey_.sequence, earliest_snapshot_))) &&
       ikey_.type != kTypeMerge &&
       !cmp_->Equal(compaction_->GetLargestUserKey(), ikey_.user_key)) {
-#ifdef USE_TIMESTAMPS
     // give up this silly and useless optimization if we have timestamps
     if (pin_timestamp_ == 0) {  // make unittests happy
       ikey_.sequence = 0;
       current_key_.UpdateInternalKey(0, ikey_.type, ikey_.timestamp);
     }
-#else
-    assert(ikey_.type != kTypeDeletion && ikey_.type != kTypeSingleDeletion);
-    ikey_.sequence = 0;
-    current_key_.UpdateInternalKey(0, ikey_.type);
-#endif  // USE_TIMESTAMPS
   }
 }
 

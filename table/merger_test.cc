@@ -24,13 +24,8 @@ class MergerTest : public testing::Test {
     std::vector<std::string> ret;
 
     for (size_t i = 0; i < len; ++i) {
-#ifdef USE_TIMESTAMPS
       InternalKey ik(test::RandomHumanReadableString(&rnd_, string_len), 0,
                      ValueType::kTypeValue, 0);
-#else
-      InternalKey ik(test::RandomHumanReadableString(&rnd_, string_len), 0,
-                     ValueType::kTypeValue);
-#endif  // USE_TIMESTAMPS
       ret.push_back(ik.Encode().ToString(false));
     }
     return ret;
@@ -49,13 +44,8 @@ class MergerTest : public testing::Test {
   }
 
   void SeekToRandom() {
-#ifdef USE_TIMESTAMPS
     InternalKey ik(test::RandomHumanReadableString(&rnd_, 5), 0,
                    ValueType::kTypeValue, 0);
-#else
-    InternalKey ik(test::RandomHumanReadableString(&rnd_, 5), 0,
-                   ValueType::kTypeValue);
-#endif  // USE_TIMESTAMPS
     Seek(ik.Encode().ToString(false));
   }
 

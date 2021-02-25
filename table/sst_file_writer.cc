@@ -106,11 +106,7 @@ struct SstFileWriter::Rep {
       return Status::InvalidArgument("File is not opened");
     }
 
-#ifdef USE_TIMESTAMPS
     RangeTombstone tombstone(begin_key, end_key, 0 /* Sequence Number */, 0);
-#else
-    RangeTombstone tombstone(begin_key, end_key, 0 /* Sequence Number */);
-#endif  // USE_TIMESTAMPS
     if (file_info.num_range_del_entries == 0) {
       file_info.smallest_range_del_key.assign(tombstone.start_key_.data(),
                                               tombstone.start_key_.size());

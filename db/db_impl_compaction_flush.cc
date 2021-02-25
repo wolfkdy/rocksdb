@@ -12,6 +12,7 @@
 #define __STDC_FORMAT_MACROS
 #endif
 #include <inttypes.h>
+#include <iostream>
 
 #include "db/builder.h"
 #include "db/error_handler.h"
@@ -131,11 +132,8 @@ Status DBImpl::FlushMemTableToOutputFile(
       GetDataDir(cfd, 0U),
       GetCompressionFlush(*cfd->ioptions(), mutable_cf_options), stats_,
       &event_logger_, mutable_cf_options.report_bg_io_stats,
-      true /* sync_output_directory */, true /* write_manifest */
-#ifdef USE_TIMESTAMPS
-      ,
-      pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
+      true /* sync_output_directory */, true /* write_manifest */,
+      versions_->GetOldestTimeStamp()
           );
 
   FileMetaData file_meta;
@@ -312,11 +310,8 @@ Status DBImpl::AtomicFlushMemTablesToOutputFiles(
         snapshot_checker, job_context, log_buffer, directories_.GetDbDir(),
         data_dir, GetCompressionFlush(*cfd->ioptions(), mutable_cf_options),
         stats_, &event_logger_, mutable_cf_options.report_bg_io_stats,
-        false /* sync_output_directory */, false /* write_manifest */
-#ifdef USE_TIMESTAMPS
-        ,
-        pin_timestamp_.load()
-#endif
+        false /* sync_output_directory */, false /* write_manifest */,
+        versions_->GetOldestTimeStamp()
             );
     jobs.back().PickMemTable();
   }
@@ -688,7 +683,8 @@ Status DBImpl::CompactRange(const CompactRangeOptions& options,
     }
     s = RunManualCompaction(cfd, ColumnFamilyData::kCompactAllLevels,
                             final_output_level, options.target_path_id,
-                            options.max_subcompactions, begin, end, exclusive);
+                            options.max_subcompactions, begin, end, exclusive,
+                            options.trim_history, options.ignore_pin_timestamp);
   } else {
     for (int level = 0; level <= max_level_with_files; level++) {
       int output_level;
@@ -722,7 +718,8 @@ Status DBImpl::CompactRange(const CompactRangeOptions& options,
         }
       }
       s = RunManualCompaction(cfd, level, output_level, options.target_path_id,
-                              options.max_subcompactions, begin, end, exclusive);
+                              options.max_subcompactions, begin, end, exclusive,
+                              options.trim_history, options.ignore_pin_timestamp);
       if (!s.ok()) {
         break;
       }
@@ -759,6 +756,72 @@ Status DBImpl::CompactRange(const CompactRangeOptions& options,
   }
 
   return s;
+}
+
+Status DBImpl::TrimHistoryToStableTs(ColumnFamilyHandle* column_family) {
+  // 1) make sure no writes are in progress
+  // 2) flush this cf, so no writes are in wal
+  // 3) invariant all the files are not in compaction, perhaps we should stop compaction
+  //    first.
+  // 4) foreach file with max_ts > pin_ts, compact with new parameter: trim_history_=true
+  //    4.1) perhaps CompactFiles api can be used.
+  //    4.2) sanity check that input files won't be augmented into more files.
+  assert(column_family != nullptr);
+  Status status;
+  PauseBackgroundCompaction();
+  auto* cfd = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family)->cfd();
+
+  FlushOptions fo;
+  status = FlushMemTable(cfd, fo, FlushReason::kManualCompaction,
+                      false /* writes_stopped*/);
+  if (!status.ok()) {
+    LogFlush(immutable_db_options_.info_log);
+    ContinueBackgroundCompaction();
+    return status;
+  }
+  CompactionOptions compact_options;
+  compact_options.trim_history = true;
+  compact_options.exclusive_manual_compaction = true;
+  Version* current;
+  {
+    InstrumentedMutexLock l(&mutex_);
+    current = cfd->current();
+    current->Ref();
+  }
+  VersionStorageInfo* vstorage = current->storage_info();
+  assert(versions_->GetStableTimeStamp() != 0);
+  for (int level = 0; level < vstorage->num_levels(); level++) {
+    std::vector<std::string> files;
+    for (FileMetaData* f : vstorage->LevelFiles(level)) {
+      if (f->fd.max_timestamp <= versions_->GetStableTimeStamp()) {
+        // sst file's max_timestamp is smaller than stable ts
+        // means this sst is stable.
+        continue;
+      }
+      if (f->being_compacted) {
+        ROCKS_LOG_ERROR(immutable_db_options_.info_log,
+                        "Unable to perform TrimHistoryToStableTs, file is in compaction: %s\n",
+                        MakeTableFileName("", f->fd.GetNumber()).c_str());
+        abort();
+      }
+      files.push_back(MakeTableFileName("", f->fd.GetNumber()));
+    }
+    if(files.empty()) {
+      continue;
+    }
+    status = CompactFiles(compact_options, column_family, files, level);
+    if (!status.ok()) {
+      ROCKS_LOG_ERROR(immutable_db_options_.info_log,
+                      "Unable to perform CompactFiles(): %s\n",
+                      status.ToString().c_str());
+      current->Unref();
+      ContinueBackgroundCompaction();
+      return status;
+    }
+  }  
+  current->Unref();
+  ContinueBackgroundCompaction();
+  return status;
 }
 
 Status DBImpl::CompactFiles(const CompactionOptions& compact_options,
@@ -902,6 +965,18 @@ Status DBImpl::CompactFilesImpl(
     return Status::CompactionTooLarge();
   }
 
+  if (compact_options.exclusive_manual_compaction) {
+    while (bg_bottom_compaction_scheduled_ > 0 ||
+           bg_compaction_scheduled_ > 0) {
+      ROCKS_LOG_INFO(
+          immutable_db_options_.info_log,
+          "[%s] CompactFiles waiting for all other scheduled background "
+          "compactions to finish",
+          cfd->GetName().c_str());
+      bg_cv_.Wait();
+    }
+  }
+
   // At this point, CompactFiles will be run.
   bg_compaction_scheduled_++;
 
@@ -939,7 +1014,7 @@ Status DBImpl::CompactFilesImpl(
       snapshot_checker, table_cache_, &event_logger_,
       c->mutable_cf_options()->paranoid_file_checks,
       c->mutable_cf_options()->report_bg_io_stats, dbname_,
-      nullptr    // Here we pass a nullptr for CompactionJobStats because
+      nullptr,   // Here we pass a nullptr for CompactionJobStats because
                  // CompactFiles does not trigger OnCompactionCompleted(),
                  // which is the only place where CompactionJobStats is
                  // returned.  The idea of not triggering OnCompationCompleted()
@@ -952,9 +1027,9 @@ Status DBImpl::CompactFilesImpl(
                  // support for CompactFiles, we should have CompactFiles API
                  // pass a pointer of CompactionJobStats as the out-value
                  // instead of using EventListener.
-#ifdef USE_TIMESTAMPS
-      ,pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
+      compact_options.trim_history ? versions_->GetStableTimeStamp() : versions_->GetOldestTimeStamp(),
+      compact_options.trim_history, 
+      compact_options.ignore_pin_timestamp
   );
 
   // Creating a compaction influences the compaction score because the score
@@ -1236,6 +1311,7 @@ Status DBImpl::ReFitLevel(ColumnFamilyData* cfd, int level, int target_level) {
       edit.AddFile(to_level, f->fd.GetNumber(), f->fd.GetPathId(),
                    f->fd.GetFileSize(), f->smallest, f->largest,
                    f->fd.smallest_seqno, f->fd.largest_seqno,
+                   f->fd.min_timestamp, f->fd.max_timestamp,
                    f->marked_for_compaction);
     }
     ROCKS_LOG_DEBUG(immutable_db_options_.info_log,
@@ -1344,7 +1420,9 @@ Status DBImpl::RunManualCompaction(ColumnFamilyData* cfd, int input_level,
                                    int output_level, uint32_t output_path_id,
                                    uint32_t max_subcompactions,
                                    const Slice* begin, const Slice* end,
-                                   bool exclusive, bool disallow_trivial_move) {
+                                   bool exclusive, bool trim_history,
+                                   bool ignore_pin_timestamp,
+                                   bool disallow_trivial_move) {
   assert(input_level == ColumnFamilyData::kCompactAllLevels ||
          input_level >= 0);
 
@@ -1363,6 +1441,8 @@ Status DBImpl::RunManualCompaction(ColumnFamilyData* cfd, int input_level,
   manual.incomplete = false;
   manual.exclusive = exclusive;
   manual.disallow_trivial_move = disallow_trivial_move;
+  manual.trim_history = trim_history;
+  manual.ignore_pin_timestamp = ignore_pin_timestamp;
   // For universal compaction, we enforce every manual compaction to compact
   // all files.
   if (begin == nullptr ||
@@ -1426,7 +1506,7 @@ Status DBImpl::RunManualCompaction(ColumnFamilyData* cfd, int input_level,
     manual_conflict = false;
     Compaction* compaction = nullptr;
     if (ShouldntRunManualCompaction(&manual) || (manual.in_progress == true) ||
-        scheduled ||
+        scheduled || 
         (((manual.manual_end = &manual.tmp_storage1) != nullptr) &&
          ((compaction = manual.cfd->CompactRange(
                *manual.cfd->GetLatestMutableCFOptions(), manual.input_level,
@@ -2256,7 +2336,6 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
   // (manual_compaction->in_progress == false);
   bool trivial_move_disallowed =
       is_manual && manual_compaction->disallow_trivial_move;
-
   CompactionJobStats compaction_job_stats;
   Status status;
   if (!error_handler_.IsBGWorkStopped()) {
@@ -2472,8 +2551,9 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         c->edit()->DeleteFile(c->level(l), f->fd.GetNumber());
         c->edit()->AddFile(c->output_level(), f->fd.GetNumber(),
                            f->fd.GetPathId(), f->fd.GetFileSize(), f->smallest,
-                           f->largest, f->fd.smallest_seqno,
-                           f->fd.largest_seqno, f->marked_for_compaction);
+                           f->largest, f->fd.smallest_seqno, f->fd.largest_seqno,
+                           f->fd.min_timestamp, f->fd.max_timestamp,
+                           f->marked_for_compaction);
 
         ROCKS_LOG_BUFFER(
             log_buffer,
@@ -2556,10 +2636,9 @@ Status DBImpl::BackgroundCompaction(bool* made_progress,
         snapshot_checker, table_cache_, &event_logger_,
         c->mutable_cf_options()->paranoid_file_checks,
         c->mutable_cf_options()->report_bg_io_stats, dbname_,
-        &compaction_job_stats
-#ifdef USE_TIMESTAMPS
-        ,pin_timestamp_.load()
-#endif  // USE_TIMESTAMPS
+        &compaction_job_stats,
+        is_manual && manual_compaction->trim_history ? versions_->GetStableTimeStamp() : versions_->GetOldestTimeStamp(), 
+        is_manual && manual_compaction->trim_history, is_manual && manual_compaction->ignore_pin_timestamp
     );
     compaction_job.Prepare();
 

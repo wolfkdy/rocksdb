@@ -840,15 +840,11 @@ class RecoveryTestHelper {
         batch.Clear();
         batch.Put(key, value);
         WriteBatchInternal::SetSequence(&batch, seq);
-#ifdef USE_TIMESTAMPS
         WriteBatch rewritebatch;
         WriteOptions opt = WriteOptions();
         opt.asif_commit_timestamps = {};
         WriteBatchInternal::RewriteBatch(&rewritebatch, &batch, opt);
         current_log_writer->AddRecord(WriteBatchInternal::Contents(&rewritebatch));
-#else
-        current_log_writer->AddRecord(WriteBatchInternal::Contents(&batch));
-#endif  // USE_TIMESTAMPS
         versions->SetLastAllocatedSequence(seq);
         versions->SetLastPublishedSequence(seq);
         versions->SetLastSequence(seq);

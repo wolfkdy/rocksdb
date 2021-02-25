@@ -93,17 +93,10 @@ class CompactionJobTest : public testing::Test {
     return TableFileName(db_paths, meta.fd.GetNumber(), meta.fd.GetPathId());
   }
 
-#ifdef USE_TIMESTAMPS
   std::string KeyStr(const std::string& user_key, const SequenceNumber seq_num,
       const ValueType t, uint64_t timestamp = 0) {
     return InternalKey(user_key, seq_num, t, timestamp).Encode().ToString();
   }
-#else
-  std::string KeyStr(const std::string& user_key, const SequenceNumber seq_num,
-      const ValueType t) {
-    return InternalKey(user_key, seq_num, t).Encode().ToString();
-  }
-#endif  // USE_TIMESTAMPS
 
   void AddMockFile(const stl_wrappers::KVMap& contents, int level = 0) {
     assert(contents.size() > 0);
@@ -113,6 +106,8 @@ class CompactionJobTest : public testing::Test {
     InternalKey smallest_key, largest_key;
     SequenceNumber smallest_seqno = kMaxSequenceNumber;
     SequenceNumber largest_seqno = 0;
+    uint64_t min_ts = kMaxTimeStamp;
+    uint64_t max_ts = 0;
     for (auto kv : contents) {
       ParsedInternalKey key;
       std::string skey;
@@ -122,6 +117,8 @@ class CompactionJobTest : public testing::Test {
 
       smallest_seqno = std::min(smallest_seqno, key.sequence);
       largest_seqno = std::max(largest_seqno, key.sequence);
+      min_ts = std::min(min_ts, key.timestamp);
+      max_ts = std::max(max_ts, key.timestamp);
 
       if (first_key ||
           cfd_->user_comparator()->Compare(key.user_key, smallest) < 0) {
@@ -143,7 +140,7 @@ class CompactionJobTest : public testing::Test {
 
     VersionEdit edit;
     edit.AddFile(level, file_number, 0, 10, smallest_key, largest_key,
-        smallest_seqno, largest_seqno, false);
+        smallest_seqno, largest_seqno, false, min_ts, max_ts, false);
 
     mutex_.Lock();
     versions_->LogAndApply(versions_->GetColumnFamilySet()->GetDefault(),
@@ -174,20 +171,11 @@ class CompactionJobTest : public testing::Test {
       for (int k = 0; k < kKeysPerFile; ++k) {
         auto key = ToString(i * kMatchingKeys + k);
         auto value = ToString(i * kKeysPerFile + k);
-#ifdef USE_TIMESTAMPS
         InternalKey internal_key(key, ++sequence_number, kTypeValue, 0);
         // This is how the key will look like once it's written in bottommost
         // file
         InternalKey bottommost_internal_key(
           key, (key == "9999") ? sequence_number : 0, kTypeValue, 0);
-#else
-        InternalKey internal_key(key, ++sequence_number, kTypeValue);
-
-        // This is how the key will look like once it's written in bottommost
-        // file
-        InternalKey bottommost_internal_key(
-            key, (key == "9999") ? sequence_number : 0, kTypeValue);
-#endif  // USE_TIMESTAMPS
         if (corrupt_id(k)) {
           test::CorruptKeyType(&internal_key);
           test::CorruptKeyType(&bottommost_internal_key);
@@ -272,21 +260,12 @@ class CompactionJobTest : public testing::Test {
     EventLogger event_logger(db_options_.info_log.get());
     // TODO(yiwu) add a mock snapshot checker and add test for it.
     SnapshotChecker* snapshot_checker = nullptr;
-#ifdef USE_TIMESTAMPS
     CompactionJob compaction_job(
         0, &compaction, db_options_, env_options_, versions_.get(),
         &shutting_down_, preserve_deletes_seqnum_, &log_buffer, nullptr,
         nullptr, nullptr, &mutex_, &error_handler_, snapshots,
         earliest_write_conflict_snapshot, snapshot_checker, table_cache_,
         &event_logger, false, false, dbname_, &compaction_job_stats_, pin_ts);
-#else
-    CompactionJob compaction_job(
-        0, &compaction, db_options_, env_options_, versions_.get(),
-        &shutting_down_, preserve_deletes_seqnum_, &log_buffer, nullptr,
-        nullptr, nullptr, &mutex_, &error_handler_, snapshots,
-        earliest_write_conflict_snapshot, snapshot_checker, table_cache_,
-        &event_logger, false, false, dbname_, &compaction_job_stats_);
-#endif  // USE_TIMESTAMPS
     VerifyInitializationOfCompactionJobStats(compaction_job_stats_);
 
     compaction_job.Prepare();
@@ -439,7 +418,6 @@ TEST_F(CompactionJobTest, SimpleNonLastLevel) {
   RunCompaction({lvl0_files, lvl1_files}, expected_results);
 }
 
-#ifdef USE_TIMESTAMPS
 TEST_F(CompactionJobTest, TimestampNoSnapshot1) {
   NewDB();
 
@@ -647,7 +625,6 @@ TEST_F(CompactionJobTest, ZeroDel5) {
   RunCompaction({files}, expected_results, {2}, kMaxSequenceNumber, 97);
 }
 
-#endif  // USE_TIMESTAMPS
 
 TEST_F(CompactionJobTest, SimpleMerge) {
   merge_op_ = MergeOperators::CreateStringAppendOperator();
@@ -1146,7 +1123,6 @@ TEST_F(CompactionJobTest, MultiSingleDelete) {
 // single deletion and the (single) deletion gets removed while the corrupt key
 // gets written out. TODO(noetzli): We probably want a better way to treat
 // corrupt keys.
-#ifdef USE_TIMESTAMPS
 TEST_F(CompactionJobTest, CorruptionAfterDeletion) {
   NewDB();
 
@@ -1172,33 +1148,6 @@ TEST_F(CompactionJobTest, CorruptionAfterDeletion) {
   auto files = cfd_->current()->storage_info()->LevelFiles(0);
   RunCompaction({files}, expected_results);
 }
-#else
-TEST_F(CompactionJobTest, CorruptionAfterDeletion) {
-  NewDB();
-
-  auto file1 =
-      mock::MakeMockFile({{test::KeyStr("A", 6U, kTypeValue), "val3"},
-                          {test::KeyStr("a", 5U, kTypeDeletion), ""},
-                          {test::KeyStr("a", 4U, kTypeValue, true), "val"}});
-  AddMockFile(file1);
-
-  auto file2 =
-      mock::MakeMockFile({{test::KeyStr("b", 3U, kTypeSingleDeletion), ""},
-                          {test::KeyStr("b", 2U, kTypeValue, true), "val"},
-                          {test::KeyStr("c", 1U, kTypeValue), "val2"}});
-  AddMockFile(file2);
-
-  auto expected_results =
-      mock::MakeMockFile({{test::KeyStr("A", 0U, kTypeValue), "val3"},
-                          {test::KeyStr("a", 0U, kTypeValue, true), "val"},
-                          {test::KeyStr("b", 0U, kTypeValue, true), "val"},
-                          {test::KeyStr("c", 1U, kTypeValue), "val2"}});
-
-  SetLastSequence(6U);
-  auto files = cfd_->current()->storage_info()->LevelFiles(0);
-  RunCompaction({files}, expected_results);
-}
-#endif  // USE_TIMESTAMPS
 }  // namespace rocksdb
 
 int main(int argc, char** argv) {

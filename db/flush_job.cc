@@ -100,11 +100,8 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
                    Directory* output_file_directory,
                    CompressionType output_compression, Statistics* stats,
                    EventLogger* event_logger, bool measure_io_stats,
-                   const bool sync_output_directory, const bool write_manifest
-#ifdef USE_TIMESTAMPS
-                   ,
+                   const bool sync_output_directory, const bool write_manifest,
                    uint64_t pin_ts
-#endif  // USE_TIMESTAMPS
                    )
     : dbname_(dbname),
       cfd_(cfd),
@@ -128,9 +125,7 @@ FlushJob::FlushJob(const std::string& dbname, ColumnFamilyData* cfd,
       measure_io_stats_(measure_io_stats),
       sync_output_directory_(sync_output_directory),
       write_manifest_(write_manifest),
-#ifdef USE_TIMESTAMPS
       pin_ts_(pin_ts),
-#endif  // USE_TIMESTAMPS
       edit_(nullptr),
       base_(nullptr),
       pick_memtable_called(false) {
@@ -362,9 +357,7 @@ Status FlushJob::WriteLevel0Table() {
           mems_.front()->ApproximateOldestKeyTime();
 
       uint64_t pin_ts = 0;
-#ifdef USE_TIMESTAMPS
       pin_ts = pin_ts_;
-#endif  // USE_TIMESTAMPS
       s = BuildTable(
           dbname_, db_options_.env, *cfd_->ioptions(), mutable_cf_options_,
           env_options_, cfd_->table_cache(), iter.get(),
@@ -387,7 +380,6 @@ Status FlushJob::WriteLevel0Table() {
                    meta_.fd.GetNumber(), meta_.fd.GetFileSize(),
                    s.ToString().c_str(),
                    meta_.marked_for_compaction ? " (needs compaction)" : "");
-
     if (s.ok() && output_file_directory_ != nullptr && sync_output_directory_) {
       s = output_file_directory_->Fsync();
     }
@@ -407,6 +399,7 @@ Status FlushJob::WriteLevel0Table() {
     edit_->AddFile(0 /* level */, meta_.fd.GetNumber(), meta_.fd.GetPathId(),
                    meta_.fd.GetFileSize(), meta_.smallest, meta_.largest,
                    meta_.fd.smallest_seqno, meta_.fd.largest_seqno,
+                   meta_.fd.min_timestamp, meta_.fd.max_timestamp,
                    meta_.marked_for_compaction);
   }
 

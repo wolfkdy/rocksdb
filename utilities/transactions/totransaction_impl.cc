@@ -101,7 +101,6 @@ Status TOTransactionImpl::SetCommitTimeStamp(const RocksTimeStamp& timestamp) {
   if (!s.ok()) {
     return s;
   }
-  assert(core_->commit_ts_set_ && (core_->first_commit_ts_ <= core_->commit_ts_));
 
   ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) set commit ts(%llu)\n", 
                                                                 core_->txn_id_, timestamp);

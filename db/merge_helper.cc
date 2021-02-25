@@ -215,12 +215,8 @@ Status MergeHelper::MergeUntil(InternalIterator* iter,
         // The original key encountered
         original_key = std::move(keys_.back());
         orig_ikey.type = kTypeValue;
-#ifdef USE_TIMESTAMPS
         UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type,
                           orig_ikey.timestamp);
-#else
-        UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type);
-#endif // USE_TIMESTAMPS
         keys_.clear();
         merge_context_.Clear();
         keys_.emplace_front(std::move(original_key));
@@ -325,12 +321,8 @@ Status MergeHelper::MergeUntil(InternalIterator* iter,
       // lines before).
       original_key = std::move(keys_.back());
       orig_ikey.type = kTypeValue;
-#ifdef USE_TIMESTAMPS
       UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type,
                         orig_ikey.timestamp);
-#else
-      UpdateInternalKey(&original_key, orig_ikey.sequence, orig_ikey.type);
-#endif // USE_TIMESTAMPS
       keys_.clear();
       merge_context_.Clear();
       keys_.emplace_front(std::move(original_key));

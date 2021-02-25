@@ -147,32 +147,18 @@ class FragmentedRangeTombstoneIterator : public InternalIterator {
   }
 
   RangeTombstone Tombstone() const {
-#ifdef USE_TIMESTAMPS
     return RangeTombstone(start_key(), end_key(), seq(), 0);
-#else
-    return RangeTombstone(start_key(), end_key(), seq());
-#endif  // USE_TIMESTAMPS
   }
   Slice start_key() const { return pos_->start_key; }
   Slice end_key() const { return pos_->end_key; }
   SequenceNumber seq() const { return *seq_pos_; }
   ParsedInternalKey parsed_start_key() const {
-#ifdef USE_TIMESTAMPS
     return ParsedInternalKey(pos_->start_key, kMaxSequenceNumber,
                              kTypeRangeDeletion, kMaxTimeStamp);
-#else
-    return ParsedInternalKey(pos_->start_key, kMaxSequenceNumber,
-                             kTypeRangeDeletion);
-#endif // USE_TIMESTAMPS
   }
   ParsedInternalKey parsed_end_key() const {
-#ifdef USE_TIMESTAMPS
     return ParsedInternalKey(pos_->end_key, kMaxSequenceNumber,
                              kTypeRangeDeletion, kMaxTimeStamp);
-#else
-    return ParsedInternalKey(pos_->end_key, kMaxSequenceNumber,
-                             kTypeRangeDeletion);
-#endif // USE_TIMESTAMPS
   }
 
   SequenceNumber MaxCoveringTombstoneSeqnum(const Slice& user_key);
@@ -236,11 +222,7 @@ class FragmentedRangeTombstoneIterator : public InternalIterator {
   void MaybePinKey() const {
     if (pos_ != tombstones_->end() && seq_pos_ != tombstones_->seq_end() &&
         (pinned_pos_ != pos_ || pinned_seq_pos_ != seq_pos_)) {
-#ifdef USE_TIMESTAMPS
       current_start_key_.Set(pos_->start_key, *seq_pos_, kTypeRangeDeletion, 0);
-#else
-      current_start_key_.Set(pos_->start_key, *seq_pos_, kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
       pinned_pos_ = pos_;
       pinned_seq_pos_ = seq_pos_;
     }

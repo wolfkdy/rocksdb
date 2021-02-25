@@ -200,6 +200,8 @@ class DBImpl : public DB {
                               std::vector<std::string>* const output_file_names
                               = nullptr) override;
 
+  Status TrimHistoryToStableTs(ColumnFamilyHandle* column_family);
+
   virtual Status PauseBackgroundWork() override;
   virtual Status ContinueBackgroundWork() override;
 
@@ -247,6 +249,15 @@ class DBImpl : public DB {
   SequenceNumber TEST_GetLastVisibleSequence() const;
 
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) override;
+
+  uint64_t GetOldestTimeStamp();
+  
+  void SetOldestTimeStamp(uint64_t oldest_ts) override;
+
+  uint64_t GetStableTimeStamp();
+  
+  Status SetStableTimeStamp(uint64_t stable_ts) override;
+
 
 #ifndef ROCKSDB_LITE
   using DB::ResetStats;
@@ -352,6 +363,10 @@ class DBImpl : public DB {
   Status TraceIteratorSeekForPrev(const uint32_t& cf_id, const Slice& key);
 #endif  // ROCKSDB_LITE
 
+  Status PauseBackgroundCompaction() ;
+
+  Status ContinueBackgroundCompaction();
+
   // Similar to GetSnapshot(), but also lets the db know that this snapshot
   // will be used for transaction write-conflict checking.  The DB can then
   // make sure not to compact any keys that would prevent a write-conflict from
@@ -366,9 +381,9 @@ class DBImpl : public DB {
 
   Status RunManualCompaction(ColumnFamilyData* cfd, int input_level,
                              int output_level, uint32_t output_path_id,
-                             uint32_t max_subcompactions,
-                             const Slice* begin, const Slice* end,
-                             bool exclusive,
+                             uint32_t max_subcompactions, const Slice* begin,
+                             const Slice* end, bool exclusive,
+                             bool trim_history, bool ignore_pin_timestamp,
                              bool disallow_trivial_move = false);
 
   // Return an internal iterator over the current state of the database.
@@ -707,8 +722,6 @@ class DBImpl : public DB {
                      const bool seq_per_batch, const bool batch_per_txn);
 
   virtual Status Close() override;
-
-  Status AdvancePinTs(uint64_t pinTs, bool force = false);
 
   static Status CreateAndNewDirectory(Env* env, const std::string& dirname,
                                       std::unique_ptr<Directory>* directory);
@@ -1415,6 +1428,8 @@ class DBImpl : public DB {
     InternalKey* manual_end;      // how far we are compacting
     InternalKey tmp_storage;      // Used to keep track of compaction progress
     InternalKey tmp_storage1;     // Used to keep track of compaction progress
+    bool trim_history;            // Whether should considering current pin_ts
+    bool ignore_pin_timestamp;    // Whether ignore pin timestamp
   };
   struct PrepickedCompaction {
     // background compaction takes ownership of `compaction`.
@@ -1516,12 +1531,6 @@ class DBImpl : public DB {
   // handle for scheduling jobs at fixed intervals
   // REQUIRES: mutex locked
   std::unique_ptr<rocksdb::RepeatableThread> thread_dump_stats_;
-
-#ifdef USE_TIMESTAMPS
-  // set by TOTransactionDB to hint the timestamp boundary
-  // for compacting unnecessary key versions
-  std::atomic<uint64_t> pin_timestamp_;
-#endif // USE_TIMESTAMPS
 
   // No copying allowed
   DBImpl(const DBImpl&);

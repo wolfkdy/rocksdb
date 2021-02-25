@@ -198,9 +198,6 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       bg_compaction_paused_(0),
       refitting_level_(false),
       opened_successfully_(false),
-#ifdef USE_TIMESTAMPS
-      pin_timestamp_(0),
-#endif  // USE_TIMESTAMPS
       two_write_queues_(options.two_write_queues),
       manual_wal_flush_(options.manual_wal_flush),
       seq_per_batch_(seq_per_batch),
@@ -686,19 +683,6 @@ void DBImpl::DumpStats() {
 #endif  // !ROCKSDB_LITE
 
   PrintStatistics();
-}
-
-Status DBImpl::AdvancePinTs(uint64_t pinTs, bool force) {
-#ifdef USE_TIMESTAMPS
-  InstrumentedMutexLock l(&mutex_);
-  if (pinTs < pin_timestamp_.load(std::memory_order_relaxed) && !force) {
-    return Status::InvalidArgument("pinTs can not travel back");
-  }
-  pin_timestamp_.store(pinTs, std::memory_order_relaxed);
-#else
-  (void)pinTs;
-#endif // USE_TIMESTAMPS
-  return Status::OK();
 }
 
 void DBImpl::ScheduleBgLogWriterClose(JobContext* job_context) {
@@ -1297,11 +1281,7 @@ Status DBImpl::GetImpl(const ReadOptions& read_options,
   // First look in the memtable, then in the immutable memtable (if any).
   // s is both in/out. When in, s could either be OK or MergeInProgress.
   // merge_operands will contain the sequence of merges in the latter case.
-#ifdef USE_TIMESTAMPS
   LookupKey lkey(key, snapshot, read_options.read_timestamp);
-#else
-  LookupKey lkey(key, snapshot);
-#endif  // USE_TIMESTAMPS
   PERF_TIMER_STOP(get_snapshot_time);
 
   bool skip_memtable = (read_options.read_tier == kPersistedTier &&
@@ -1411,11 +1391,7 @@ std::vector<Status> DBImpl::MultiGet(
     Status& s = stat_list[i];
     std::string* value = &(*values)[i];
 
-#ifdef USE_TIMESTAMPS
     LookupKey lkey(keys[i], snapshot, read_options.read_timestamp);
-#else
-    LookupKey lkey(keys[i], snapshot);
-#endif  // USE_TIMESTAMPS
     auto cfh = reinterpret_cast<ColumnFamilyHandleImpl*>(column_family[i]);
     SequenceNumber max_covering_tombstone_seq = 0;
     auto mgd_iter = multiget_cf_data.find(cfh->cfd()->GetID());
@@ -1963,7 +1939,8 @@ void DBImpl::ReleaseSnapshot(const Snapshot* s) {
       oldest_snapshot = snapshots_.oldest()->number_;
     }
     for (auto* cfd : *versions_->GetColumnFamilySet()) {
-      cfd->current()->storage_info()->UpdateOldestSnapshot(oldest_snapshot);
+      cfd->current()->storage_info()->UpdateOldestSnapshot(immutable_db_options_.info_log.get(), 
+        oldest_snapshot, versions_->GetOldestTimeStamp());
       if (!cfd->current()
                ->storage_info()
                ->BottommostFilesMarkedForCompaction()
@@ -2978,11 +2955,7 @@ Status DBImpl::GetLatestSequenceForKey(SuperVersion* sv, const Slice& key,
 
   ReadOptions read_options;
   SequenceNumber current_seq = versions_->LastSequence();
-#ifdef USE_TIMESTAMPS
   LookupKey lkey(key, current_seq, kMaxTimeStamp);
-#else
-  LookupKey lkey(key, current_seq);
-#endif  // USE_TIMESTAMPS
 
   *seq = kMaxSequenceNumber;
   *found_record_for_key = false;
@@ -3352,4 +3325,94 @@ Status DBImpl::TraceIteratorSeekForPrev(const uint32_t& cf_id,
 
 #endif  // ROCKSDB_LITE
 
+Status DBImpl::PauseBackgroundCompaction() {
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "pause background compaction");
+
+  InstrumentedMutexLock l(&mutex_);
+  if (bg_compaction_paused_ < 0) {
+    ROCKS_LOG_WARN(immutable_db_options_.info_log, 
+      "bg_compaction_paused: %d, will be setted to 1", bg_compaction_paused_);
+  }
+  bg_compaction_paused_++;
+
+  uint64_t first_time = env_->NowMicros();
+  uint64_t start_time = 0;
+  uint64_t end_time = 0;
+  while (bg_compaction_paused_ > 0) {
+    start_time = env_->NowMicros();
+    bg_cv_.TimedWait(start_time + 180*1000*1000); // 180s
+    end_time = env_->NowMicros();
+    if(end_time > start_time && end_time - start_time > 180*1000*1000) {
+      // timeout
+      bg_compaction_paused_--;
+      ROCKS_LOG_WARN(immutable_db_options_.info_log, 
+          "PauseBackgroundCompaction timeout, first: %llu, end: %llu, start: %llu, need compaction(%d), flush(%d), purge(%d)", 
+          first_time, end_time, start_time, bg_compaction_scheduled_, bg_flush_scheduled_, bg_purge_scheduled_);
+      return Status::TimedOut("PauseBackgroundCompaction timeout");
+    }
+  }
+  ROCKS_LOG_DEBUG(immutable_db_options_.info_log, 
+                  "PauseBackgroundCompaction finish, first: %llu, end: %llu, start: %llu, paused: %d", 
+                  first_time, end_time, start_time, bg_compaction_paused_);
+  return Status::OK();
+}
+
+Status DBImpl::ContinueBackgroundCompaction(void) {
+  ROCKS_LOG_INFO(immutable_db_options_.info_log, "continue background compaction");
+  
+  InstrumentedMutexLock l(&mutex_);
+  if (bg_compaction_paused_ == 0) {
+      ROCKS_LOG_WARN(immutable_db_options_.info_log, "bg_compaction_paused: %d", bg_compaction_paused_);
+      return Status::InvalidArgument("bg_compaction_paused_ err");
+  }
+  assert(bg_compaction_paused_ > 0);
+  bg_compaction_paused_--;
+  // It's sufficient to check just bg_work_paused_ here since
+  // bg_work_paused_ is always no greater than bg_compaction_paused_
+  if (bg_compaction_paused_ == 0) {
+    MaybeScheduleFlushOrCompaction();
+  }
+  return Status::OK();
+}
+
+uint64_t DBImpl::GetOldestTimeStamp() {
+  return versions_->GetOldestTimeStamp();
+}
+
+void DBImpl::SetOldestTimeStamp(uint64_t oldest_ts) {
+  versions_->SetOldestTimeStamp(oldest_ts);
+}
+
+uint64_t DBImpl::GetStableTimeStamp() {
+      return versions_->GetStableTimeStamp();
+}
+
+Status DBImpl::SetStableTimeStamp(uint64_t stable_ts) {
+  VersionEdit edit;
+  edit.SetColumnFamily(0);
+  edit.SetStableTimeStamp(stable_ts);
+  ColumnFamilyOptions cf_options =
+      versions_->GetColumnFamilySet()->GetDefault()->GetLatestCFOptions();
+  Status status;
+  // LogAndApply to MANIFEST
+  InstrumentedMutexLock l(&mutex_);
+  {
+    // write thread
+    WriteThread::Writer w;
+    write_thread_.EnterUnbatched(&w, &mutex_);
+    versions_->SetStableTimeStamp(stable_ts);
+    status =
+        versions_->LogAndApply(versions_->GetColumnFamilySet()->GetDefault(),
+                               MutableCFOptions(cf_options), &edit, &mutex_,
+                               directories_.GetDbDir(), false, &cf_options);
+    write_thread_.ExitUnbatched(&w);
+    if (!status.ok()) {
+      ROCKS_LOG_ERROR(immutable_db_options_.info_log,
+                      "SetStableTimeStamp failed -- %s",
+                      status.ToString().c_str());
+      return status;
+    }
+  }
+  return status;
+}
 }  // namespace rocksdb

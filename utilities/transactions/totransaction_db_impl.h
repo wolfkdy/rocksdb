@@ -130,12 +130,14 @@ class TOTransactionDBImpl : public TOTransactionDB {
                       bool force) override;
 
   Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) override;
+  
+  Status RollbackToStable(ColumnFamilyHandle* column_family) override;
 
   Status Stat(TOTransactionStat* stat) override;
 
   Status CheckWriteConflict(ColumnFamilyHandle* column_family,
                             const Slice& key, 
-							const TransactionID& txn_id,
+                            const TransactionID& txn_id,
                             const RocksTimeStamp& readts); 
 
   Status AddCommitQueue(const std::shared_ptr<ATN>& core,
@@ -150,6 +152,8 @@ class TOTransactionDBImpl : public TOTransactionDB {
   void CleanCommittedKeys();
 
   bool IsReadOnly() const { return read_only_; }
+
+  DBImpl* getDbImpl() const { return dbimpl_; }
 
   // Committed key, first commit txnid, second commit ts
   typedef std::pair<TransactionID, RocksTimeStamp> KeyModifyHistory;

@@ -573,15 +573,7 @@ class DBConstructor: public Constructor {
 
 enum TestType {
   BLOCK_BASED_TABLE_TEST,
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-  PLAIN_TABLE_SEMI_FIXED_PREFIX,
-  PLAIN_TABLE_FULL_STR_PREFIX,
-  PLAIN_TABLE_TOTAL_ORDER,
-#endif  // !ROCKSDB_LITE
   BLOCK_TEST,
-#if !defined(USE_TIMESTAMPS)
-  MEMTABLE_TEST,
-#endif  // USE_TIMESTAMPS
   DB_TEST
 };
 
@@ -599,15 +591,7 @@ static std::vector<TestArgs> GenerateArgList() {
   std::vector<TestArgs> test_args;
   std::vector<TestType> test_types = {
       BLOCK_BASED_TABLE_TEST,
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-      PLAIN_TABLE_SEMI_FIXED_PREFIX,
-      PLAIN_TABLE_FULL_STR_PREFIX,
-      PLAIN_TABLE_TOTAL_ORDER,
-#endif  // !ROCKSDB_LITE
       BLOCK_TEST,
-#if !defined(USE_TIMESTAMPS)
-      MEMTABLE_TEST,
-#endif  // USE_TIMESTAMPS
       DB_TEST};
 
   std::vector<bool> reverse_compare_types = {false, true};
@@ -644,24 +628,6 @@ static std::vector<TestArgs> GenerateArgList() {
 
   for (auto test_type : test_types) {
     for (auto reverse_compare : reverse_compare_types) {
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-
-      if (test_type == PLAIN_TABLE_SEMI_FIXED_PREFIX ||
-          test_type == PLAIN_TABLE_FULL_STR_PREFIX ||
-          test_type == PLAIN_TABLE_TOTAL_ORDER) {
-        // Plain table doesn't use restart index or compression.
-        TestArgs one_arg;
-        one_arg.type = test_type;
-        one_arg.reverse_compare = reverse_compare;
-        one_arg.restart_interval = restart_intervals[0];
-        one_arg.compression = compression_types[0].first;
-        one_arg.use_mmap = true;
-        test_args.push_back(one_arg);
-        one_arg.use_mmap = false;
-        test_args.push_back(one_arg);
-        continue;
-      }
-#endif  // !ROCKSDB_LITE
 
       for (auto restart_interval : restart_intervals) {
         for (auto compression_type : compression_types) {
@@ -755,63 +721,12 @@ class HarnessTest : public testing::Test {
         break;
 // Plain table is not supported in ROCKSDB_LITE
 
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-
-      case PLAIN_TABLE_SEMI_FIXED_PREFIX:
-        support_prev_ = false;
-        only_support_prefix_seek_ = true;
-        options_.prefix_extractor.reset(new FixedOrLessPrefixTransform(2));
-        options_.table_factory.reset(NewPlainTableFactory());
-        constructor_ = new TableConstructor(
-            options_.comparator, true /* convert_to_internal_key_ */);
-        internal_comparator_.reset(
-            new InternalKeyComparator(options_.comparator));
-        break;
-      case PLAIN_TABLE_FULL_STR_PREFIX:
-        support_prev_ = false;
-        only_support_prefix_seek_ = true;
-        options_.prefix_extractor.reset(NewNoopTransform());
-        options_.table_factory.reset(NewPlainTableFactory());
-        constructor_ = new TableConstructor(
-            options_.comparator, true /* convert_to_internal_key_ */);
-        internal_comparator_.reset(
-            new InternalKeyComparator(options_.comparator));
-        break;
-      case PLAIN_TABLE_TOTAL_ORDER:
-        support_prev_ = false;
-        only_support_prefix_seek_ = false;
-        options_.prefix_extractor = nullptr;
-
-        {
-          PlainTableOptions plain_table_options;
-          plain_table_options.user_key_len = kPlainTableVariableLength;
-          plain_table_options.bloom_bits_per_key = 0;
-          plain_table_options.hash_table_ratio = 0;
-
-          options_.table_factory.reset(
-              NewPlainTableFactory(plain_table_options));
-        }
-        constructor_ = new TableConstructor(
-            options_.comparator, true /* convert_to_internal_key_ */);
-        internal_comparator_.reset(
-            new InternalKeyComparator(options_.comparator));
-        break;
-#endif  // !ROCKSDB_LITE
       case BLOCK_TEST:
         table_options_.block_size = 256;
         options_.table_factory.reset(
             new BlockBasedTableFactory(table_options_));
         constructor_ = new BlockConstructor(options_.comparator);
         break;
-#if !defined(USE_TIMESTAMPS)
-      case MEMTABLE_TEST:
-        table_options_.block_size = 256;
-        options_.table_factory.reset(
-            new BlockBasedTableFactory(table_options_));
-        constructor_ = new MemTableConstructor(options_.comparator,
-                                               &write_buffer_);
-        break;
-#endif  // USE_TIMESTAMPS
       case DB_TEST:
         table_options_.block_size = 256;
         options_.table_factory.reset(
@@ -1152,12 +1067,8 @@ TEST_P(BlockBasedTableTest, BasicBlockBasedTableProperties) {
   c.Add("h8", "val8");
   c.Add("j9", "val9");
   
-#ifdef USE_TIMESTAMPS
 	uint64_t diff_internal_user_bytes =
 		9 * (8 + 8);  // 8 is seq size, 8 is timestamp size, 9 k-v totally
-#else
-	uint64_t diff_internal_user_bytes = 9 * 8;	// 8 is seq size, 9 k-v totally
-#endif  // USE_TIMESTAMPS
 
 
   std::vector<std::string> keys;
@@ -1312,11 +1223,7 @@ TEST_P(BlockBasedTableTest, RangeDelBlock) {
 
 
   for (int i = 0; i < 2; i++) {
-#ifdef USE_TIMESTAMPS
 		RangeTombstone t(keys[i], vals[i], i, i);
-#else
-		RangeTombstone t(keys[i], vals[i], i);
-#endif  // USE_TIMESTAMPS
 
     std::pair<InternalKey, Slice> p = t.Serialize();
     c.Add(p.first.Encode().ToString(), p.second);
@@ -1637,11 +1544,7 @@ TEST_P(BlockBasedTableTest, NoopTransformSeek) {
   // To tickle the PrefixMayMatch bug it is important that the
   // user-key is a single byte so that the index key exactly matches
   // the user-key.
-#ifdef USE_TIMESTAMPS
 	InternalKey key("a", 1, kTypeValue, 1);
-#else
-	InternalKey key("a", 1, kTypeValue);
-#endif  // USE_TIMESTAMPS
 
   c.Add(key.Encode().ToString(), "b");
   std::vector<std::string> keys;
@@ -1679,11 +1582,7 @@ TEST_P(BlockBasedTableTest, SkipPrefixBloomFilter) {
   options.prefix_extractor.reset(NewFixedPrefixTransform(1));
 
   TableConstructor c(options.comparator);
-#ifdef USE_TIMESTAMPS
 	InternalKey key("abcdefghijk", 1, kTypeValue, 1);
-#else
-	InternalKey key("abcdefghijk", 1, kTypeValue);
-#endif  // USE_TIMESTAMPS
 
   c.Add(key.Encode().ToString(), "test");
   std::vector<std::string> keys;
@@ -2538,11 +2437,7 @@ TEST_P(BlockBasedTableTest, BlockCacheLeak) {
   auto table_reader = dynamic_cast<BlockBasedTable*>(c.GetTableReader());
   for (const std::string& key : keys) {
     
-#ifdef USE_TIMESTAMPS
   InternalKey ikey(key, kMaxSequenceNumber, kTypeValue, 0);
-#else
-  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
-#endif  // USE_TIMESTAMPS	
     ASSERT_TRUE(table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
   }
   c.ResetTableReader();
@@ -2556,11 +2451,7 @@ TEST_P(BlockBasedTableTest, BlockCacheLeak) {
   table_reader = dynamic_cast<BlockBasedTable*>(c.GetTableReader());
   for (const std::string& key : keys) {
 
-#ifdef USE_TIMESTAMPS
 	  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue, 0);
-#else
-	  InternalKey ikey(key, kMaxSequenceNumber, kTypeValue);
-#endif  // USE_TIMESTAMPS	
 
   
     ASSERT_TRUE(!table_reader->TEST_KeyInCache(ReadOptions(), ikey.Encode()));
@@ -2706,64 +2597,6 @@ TEST_P(BlockBasedTableTest, NewIndexIteratorLeak) {
 }
 
 // Plain table is not supported in ROCKSDB_LITE
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-
-TEST_F(PlainTableTest, BasicPlainTableProperties) {
-  PlainTableOptions plain_table_options;
-  plain_table_options.user_key_len = 8;
-  plain_table_options.bloom_bits_per_key = 8;
-  plain_table_options.hash_table_ratio = 0;
-
-  PlainTableFactory factory(plain_table_options);
-  test::StringSink sink;
-  std::unique_ptr<WritableFileWriter> file_writer(
-      test::GetWritableFileWriter(new test::StringSink(), "" /* don't care */));
-  Options options;
-  const ImmutableCFOptions ioptions(options);
-  const MutableCFOptions moptions(options);
-  InternalKeyComparator ikc(options.comparator);
-  std::vector<std::unique_ptr<IntTblPropCollectorFactory>>
-      int_tbl_prop_collector_factories;
-  std::string column_family_name;
-  int unknown_level = -1;
-  std::unique_ptr<TableBuilder> builder(factory.NewTableBuilder(
-      TableBuilderOptions(
-          ioptions, moptions, ikc, &int_tbl_prop_collector_factories,
-          kNoCompression, CompressionOptions(), nullptr /* compression_dict */,
-          false /* skip_filters */, column_family_name, unknown_level),
-      TablePropertiesCollectorFactory::Context::kUnknownColumnFamily,
-      file_writer.get()));
-
-  for (char c = 'a'; c <= 'z'; ++c) {
-    std::string key(8, c);
-    key.append("\1       ");  // PlainTable expects internal key structure
-    std::string value(28, c + 42);
-    builder->Add(key, value);
-  }
-  ASSERT_OK(builder->Finish());
-  file_writer->Flush();
-
-  test::StringSink* ss =
-    static_cast<test::StringSink*>(file_writer->writable_file());
-  std::unique_ptr<RandomAccessFileReader> file_reader(
-      test::GetRandomAccessFileReader(
-          new test::StringSource(ss->contents(), 72242, true)));
-
-  TableProperties* props = nullptr;
-  auto s = ReadTableProperties(file_reader.get(), ss->contents().size(),
-                               kPlainTableMagicNumber, ioptions,
-                               &props, true /* compression_type_missing */);
-  std::unique_ptr<TableProperties> props_guard(props);
-  ASSERT_OK(s);
-
-  ASSERT_EQ(0ul, props->index_size);
-  ASSERT_EQ(0ul, props->filter_size);
-  ASSERT_EQ(16ul * 26, props->raw_key_size);
-  ASSERT_EQ(28ul * 26, props->raw_value_size);
-  ASSERT_EQ(26ul, props->num_entries);
-  ASSERT_EQ(1ul, props->num_data_blocks);
-}
-#endif  // !ROCKSDB_LITE
 
 TEST_F(GeneralTableTest, ApproximateOffsetOfPlain) {
   TableConstructor c(BytewiseComparator(), true /* convert_to_internal_key_ */);
@@ -2931,32 +2764,6 @@ TEST_F(HarnessTest, Randomized8) {
   RandomizedHarnessTest(part, total);
 }
 
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-
-TEST_F(HarnessTest, RandomizedLongDB) {
-  Random rnd(test::RandomSeed());
-  TestArgs args = {DB_TEST, false, 16, kNoCompression, 0, false};
-  Init(args);
-  int num_entries = 100000;
-  for (int e = 0; e < num_entries; e++) {
-    std::string v;
-    Add(test::RandomKey(&rnd, rnd.Skewed(4)),
-        test::RandomString(&rnd, rnd.Skewed(5), &v).ToString());
-  }
-  Test(&rnd);
-
-  // We must have created enough data to force merging
-  int files = 0;
-  for (int level = 0; level < db()->NumberLevels(); level++) {
-    std::string value;
-    char name[100];
-    snprintf(name, sizeof(name), "rocksdb.num-files-at-level%d", level);
-    ASSERT_TRUE(db()->GetProperty(name, &value));
-    files += atoi(value.c_str());
-  }
-  ASSERT_GT(files, 0);
-}
-#endif  // ROCKSDB_LITE
 #endif  // ROCKSDB_VALGRIND_RUN
 
 class MemTableTest : public testing::Test {};
@@ -2981,15 +2788,10 @@ TEST_F(MemTableTest, Simple) {
   batch.DeleteRange(std::string("chi"), std::string("xigua"));
   batch.DeleteRange(std::string("begin"), std::string("end"));
   ColumnFamilyMemTablesDefault cf_mems_default(memtable);
- #ifdef USE_TIMESTAMPS
   WriteBatch rewrite_batch;
   WriteBatchInternal::RewriteBatch(&rewrite_batch, &batch, WriteOptions());
   ASSERT_TRUE(
       WriteBatchInternal::InsertInto(&rewrite_batch, &cf_mems_default, nullptr).ok());
-#else
-  ASSERT_TRUE(
-      WriteBatchInternal::InsertInto(&batch, &cf_mems_default, nullptr).ok());
-#endif  // USE_TIMESTAMPS
   for (int i = 0; i < 2; ++i) {
     Arena arena;
     ScopedArenaIterator arena_iter_guard;
@@ -3121,48 +2923,6 @@ TEST_F(HarnessTest, FooterTests) {
     ASSERT_EQ(decoded_footer.version(), 1U);
   }
 // Plain table is not supported in ROCKSDB_LITE
-#if !defined(ROCKSDB_LITE) && !defined(USE_TIMESTAMPS)
-
-  {
-    // upconvert legacy plain table
-    std::string encoded;
-    Footer footer(kLegacyPlainTableMagicNumber, 0);
-    BlockHandle meta_index(10, 5), index(20, 15);
-    footer.set_metaindex_handle(meta_index);
-    footer.set_index_handle(index);
-    footer.EncodeTo(&encoded);
-    Footer decoded_footer;
-    Slice encoded_slice(encoded);
-    decoded_footer.DecodeFrom(&encoded_slice);
-    ASSERT_EQ(decoded_footer.table_magic_number(), kPlainTableMagicNumber);
-    ASSERT_EQ(decoded_footer.checksum(), kCRC32c);
-    ASSERT_EQ(decoded_footer.metaindex_handle().offset(), meta_index.offset());
-    ASSERT_EQ(decoded_footer.metaindex_handle().size(), meta_index.size());
-    ASSERT_EQ(decoded_footer.index_handle().offset(), index.offset());
-    ASSERT_EQ(decoded_footer.index_handle().size(), index.size());
-    ASSERT_EQ(decoded_footer.version(), 0U);
-  }
-  {
-    // xxhash block based
-    std::string encoded;
-    Footer footer(kPlainTableMagicNumber, 1);
-    BlockHandle meta_index(10, 5), index(20, 15);
-    footer.set_metaindex_handle(meta_index);
-    footer.set_index_handle(index);
-    footer.set_checksum(kxxHash);
-    footer.EncodeTo(&encoded);
-    Footer decoded_footer;
-    Slice encoded_slice(encoded);
-    decoded_footer.DecodeFrom(&encoded_slice);
-    ASSERT_EQ(decoded_footer.table_magic_number(), kPlainTableMagicNumber);
-    ASSERT_EQ(decoded_footer.checksum(), kxxHash);
-    ASSERT_EQ(decoded_footer.metaindex_handle().offset(), meta_index.offset());
-    ASSERT_EQ(decoded_footer.metaindex_handle().size(), meta_index.size());
-    ASSERT_EQ(decoded_footer.index_handle().offset(), index.offset());
-    ASSERT_EQ(decoded_footer.index_handle().size(), index.size());
-    ASSERT_EQ(decoded_footer.version(), 1U);
-  }
-#endif  // !ROCKSDB_LITE
   {
     // version == 2
     std::string encoded;
@@ -3475,11 +3235,7 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
   // Verify Seek
   for (char c = 'a'; c <= 'z'; c++) {
     std::string k = std::string(8, c);
-    #ifdef USE_TIMESTAMPS
     InternalKey ik(k, 10, kValueTypeForSeek, 10);
-#else
-    InternalKey ik(k, 10, kValueTypeForSeek);
-#endif  // USE_TIMESTAMPS
     iter->Seek(ik.Encode());
     ASSERT_TRUE(iter->Valid());
 
@@ -3517,11 +3273,7 @@ TEST_P(BlockBasedTableTest, DISABLED_TableWithGlobalSeqno) {
   for (char c = 'a'; c <= 'z'; c++) {
     std::string k = std::string(8, c);
     // seqno=4 is less than 3 so we still should get our key
-#ifdef USE_TIMESTAMPS
     InternalKey ik(k, 4, kValueTypeForSeek, 4);
-#else
-    InternalKey ik(k, 4, kValueTypeForSeek);
-#endif // USE_TIMESTAMPS
     iter->Seek(ik.Encode());
     ASSERT_TRUE(iter->Valid());
 
@@ -3660,12 +3412,8 @@ TEST_P(BlockBasedTableTest, PropertiesBlockRestartPointTest) {
     std::string key = ostr.str();
     std::string value = "val";
 
-	#ifdef USE_TIMESTAMPS
     InternalKey ik(key, 0, kTypeValue, 0);
 
-#else
-    InternalKey ik(key, 0, kTypeValue);
-#endif // USE_TIMESTAMPS
 
     builder->Add(ik.Encode(), value);
   }
@@ -3894,11 +3642,7 @@ TEST_P(BlockBasedTableTest, DataBlockHashIndex) {
     // padding one "0" to mark existent keys.
     std::string random_key(RandomString(&rnd, kKeySize - 1) + "1");
 
-#ifdef USE_TIMESTAMPS
     InternalKey ik(random_key, 10, kTypeValue, 0);
-#else
-	InternalKey ik(random_key, 10, kTypeValue);
-#endif  // USE_TIMESTAMPS
     c.Add(ik.Encode().ToString(), RandomString(&rnd, kValSize));
   }
 
@@ -3953,11 +3697,7 @@ TEST_P(BlockBasedTableTest, DataBlockHashIndex) {
       user_key.back() = '0';  // make it non-existent key
       
       
-#ifdef USE_TIMESTAMPS
 		InternalKey internal_key(user_key, 0, kTypeValue, 0);
-#else
-		InternalKey internal_key(user_key, 0, kTypeValue);
-#endif  // USE_TIMESTAMPS
 
 	  
 	  

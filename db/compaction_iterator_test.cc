@@ -468,7 +468,6 @@ TEST_P(CompactionIteratorTest, CompactionFilterSkipUntil) {
   // the underlying iterator.
   using A = LoggingForwardVectorIterator::Action;
   using T = A::Type;
-#ifdef USE_TIMESTAMPS
   std::vector<A> expected_actions = {
       A(T::SEEK_TO_FIRST),
       A(T::NEXT),
@@ -479,18 +478,6 @@ TEST_P(CompactionIteratorTest, CompactionFilterSkipUntil) {
       A(T::SEEK, test::KeyStr("g+", kMaxSequenceNumber, kMaxTimeStamp, kValueTypeForSeek, false)),
       A(T::NEXT),
       A(T::SEEK, test::KeyStr("z", kMaxSequenceNumber, kMaxTimeStamp, kValueTypeForSeek, false))};
-#else
-  std::vector<A> expected_actions = {
-      A(T::SEEK_TO_FIRST),
-      A(T::NEXT),
-      A(T::NEXT),
-      A(T::SEEK, test::KeyStr("d+", kMaxSequenceNumber, kValueTypeForSeek, false)),
-      A(T::NEXT),
-      A(T::NEXT),
-      A(T::SEEK, test::KeyStr("g+", kMaxSequenceNumber, kValueTypeForSeek, false)),
-      A(T::NEXT),
-      A(T::SEEK, test::KeyStr("z", kMaxSequenceNumber, kValueTypeForSeek, false))};
-#endif  // USE_TIMESTAMPS
   ASSERT_EQ(expected_actions, iter_->log);
 }
 

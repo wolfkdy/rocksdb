@@ -7,6 +7,8 @@
 #include <map>
 #include <string>
 
+#include <iostream>
+
 #include "db/column_family.h"
 #include "db/flush_job.h"
 #include "db/version_set.h"
@@ -20,11 +22,7 @@
 
 namespace rocksdb {
 
-#ifdef USE_TIMESTAMPS
 #define TS_ZERO ,((0))
-#else
-#define TS_ZERO
-#endif  // USE_TIMESTAMPS
 
 // TODO(icanadi) Mock out everything else:
 // 1. VersionSet
@@ -149,27 +147,25 @@ TEST_F(FlushJobTest, NonEmpty) {
   auto inserted_keys = mock::MakeMockFile();
   // Test data:
   //   seqno [    1,    2 ... 8998, 8999, 9000, 9001, 9002 ... 9999 ]
+  //   Ts    [  rnd,  rnd ...                                       ]
   //   key   [ 1001, 1002 ... 9998, 9999,    0,    1,    2 ...  999 ]
   //   range-delete "9995" -> "9999" at seqno 10000
+  std::vector<uint64_t> timestamps;
+  for (int i = 1; i <= 10000; i++) {
+      timestamps.push_back(i);
+  }
+  std::random_shuffle(timestamps.begin(), timestamps.end());
   for (int i = 1; i < 10000; ++i) {
     std::string key(ToString((i + 1000) % 10000));
     std::string value("value" + key);
-    new_mem->Add(SequenceNumber(i), kTypeValue, Userkey2Timestamped(key), value);
+    new_mem->Add(SequenceNumber(i), kTypeValue, Userkey2Timestamped(key, timestamps[i-1]), value);
     if ((i + 1000) % 10000 < 9995) {
-#ifdef USE_TIMESTAMPS
-      InternalKey internal_key(key, SequenceNumber(i), kTypeValue, 0);
-#else
-      InternalKey internal_key(key, SequenceNumber(i), kTypeValue);
-#endif  // USE_TIMESTAMPS
+      InternalKey internal_key(key, SequenceNumber(i), kTypeValue, timestamps[i-1]);
       inserted_keys.insert({internal_key.Encode().ToString(), value});
     }
   }
   new_mem->Add(SequenceNumber(10000), kTypeRangeDeletion, Userkey2Timestamped("9995"), "9999a");
-#ifdef USE_TIMESTAMPS
   InternalKey internal_key("9995", SequenceNumber(10000), kTypeRangeDeletion, 0);
-#else
-  InternalKey internal_key("9995", SequenceNumber(10000), kTypeRangeDeletion);
-#endif  // USE_TIMESTAMPS
   inserted_keys.insert({internal_key.Encode().ToString(), "9999a"});
 
   autovector<MemTable*> to_delete;
@@ -204,6 +200,8 @@ TEST_F(FlushJobTest, NonEmpty) {
       file_meta.largest.user_key().ToString());  // range tombstone end key
   ASSERT_EQ(1, file_meta.fd.smallest_seqno);
   ASSERT_EQ(10000, file_meta.fd.largest_seqno);  // range tombstone seqnum 10000
+  ASSERT_EQ(1, file_meta.fd.min_timestamp);
+  ASSERT_EQ(10000, file_meta.fd.max_timestamp);
   mock_table_factory_->AssertSingleFile(inserted_keys);
   job_context.Clean();
 }
@@ -216,6 +214,11 @@ TEST_F(FlushJobTest, FlushMemTablesSingleColumnFamily) {
   ColumnFamilyData* cfd = versions_->GetColumnFamilySet()->GetDefault();
   std::vector<uint64_t> memtable_ids;
   std::vector<MemTable*> new_mems;
+  std::vector<uint64_t> timestamps;
+  for (uint64_t i = 0; i < num_mems*num_keys_per_table; i++) {
+    timestamps.push_back(i+1);
+  }
+  std::random_shuffle(timestamps.begin(), timestamps.end());
   for (size_t i = 0; i != num_mems; ++i) {
     MemTable* mem = cfd->ConstructNewMemtable(*cfd->GetLatestMutableCFOptions(),
                                               kMaxSequenceNumber);
@@ -227,8 +230,7 @@ TEST_F(FlushJobTest, FlushMemTablesSingleColumnFamily) {
     for (size_t j = 0; j < num_keys_per_table; ++j) {
       std::string key(ToString(j + i * num_keys_per_table));
       std::string value("value" + key);
-      mem->Add(SequenceNumber(j + i * num_keys_per_table), kTypeValue, Userkey2Timestamped(key),
-               value);
+      mem->Add(SequenceNumber(j + i * num_keys_per_table), kTypeValue, Userkey2Timestamped(key, i*num_keys_per_table+j+1), value);
     }
   }
 
@@ -264,6 +266,8 @@ TEST_F(FlushJobTest, FlushMemTablesSingleColumnFamily) {
   ASSERT_EQ(ToString(0), file_meta.smallest.user_key().ToString());
   ASSERT_EQ("99", file_meta.largest.user_key().ToString());
   ASSERT_EQ(0, file_meta.fd.smallest_seqno);
+  ASSERT_EQ(1, file_meta.fd.min_timestamp);
+  ASSERT_EQ(1*num_keys_per_table, file_meta.fd.max_timestamp);
   ASSERT_EQ(SequenceNumber(num_mems_to_flush * num_keys_per_table - 1),
             file_meta.fd.largest_seqno);
 
@@ -286,26 +290,34 @@ TEST_F(FlushJobTest, FlushMemtablesMultipleColumnFamilies) {
   std::vector<uint64_t> memtable_ids;
   std::vector<SequenceNumber> smallest_seqs;
   std::vector<SequenceNumber> largest_seqs;
+  std::vector<uint64_t> min_tss;
+  std::vector<uint64_t> max_tss;
   autovector<MemTable*> to_delete;
   SequenceNumber curr_seqno = 0;
   size_t k = 0;
+  Random rnd(301);
   for (auto cfd : all_cfds) {
     smallest_seqs.push_back(curr_seqno);
+    uint64_t max_ts = 0;
+    uint64_t min_ts = kMaxTimeStamp;
     for (size_t i = 0; i != num_memtables[k]; ++i) {
       MemTable* mem = cfd->ConstructNewMemtable(
           *cfd->GetLatestMutableCFOptions(), kMaxSequenceNumber);
       mem->SetID(i);
       mem->Ref();
-
       for (size_t j = 0; j != num_keys_per_memtable; ++j) {
+        uint64_t ts = rnd.Next();
         std::string key(ToString(j + i * num_keys_per_memtable));
         std::string value("value" + key);
-        mem->Add(curr_seqno++, kTypeValue, Userkey2Timestamped(key), value);
+        mem->Add(curr_seqno++, kTypeValue, Userkey2Timestamped(key, ts), value);
+        max_ts = std::max(max_ts, ts);
+        min_ts = std::min(min_ts, ts);
       }
-
       cfd->imm()->Add(mem, &to_delete);
     }
     largest_seqs.push_back(curr_seqno - 1);
+    min_tss.push_back(min_ts);
+    max_tss.push_back(max_ts);
     memtable_ids.push_back(num_memtables[k++] - 1);
   }
 
@@ -369,6 +381,8 @@ TEST_F(FlushJobTest, FlushMemtablesMultipleColumnFamilies) {
                          .ToString());  // max key by bytewise comparator
     ASSERT_EQ(smallest_seqs[k], file_meta.fd.smallest_seqno);
     ASSERT_EQ(largest_seqs[k], file_meta.fd.largest_seqno);
+    ASSERT_EQ(min_tss[k], file_meta.fd.min_timestamp);
+    ASSERT_EQ(max_tss[k], file_meta.fd.max_timestamp);
     // Verify that imm is empty
     ASSERT_EQ(std::numeric_limits<uint64_t>::max(),
               all_cfds[k]->imm()->GetEarliestMemTableID());
@@ -417,11 +431,7 @@ TEST_F(FlushJobTest, Snapshots) {
       bool visible = (j == insertions - 1) ||
                      (snapshots_set.find(seqno) != snapshots_set.end());
       if (visible) {
-#ifdef USE_TIMESTAMPS
         InternalKey internal_key(key, seqno, kTypeValue, 0);
-#else
-        InternalKey internal_key(key, seqno, kTypeValue);
-#endif  // USE_TIMESTAMPS
         inserted_keys.insert({internal_key.Encode().ToString(), value});
       }
     }
@@ -453,6 +463,89 @@ TEST_F(FlushJobTest, Snapshots) {
   ASSERT_GT(hist.average, 0.0);
   job_context.Clean();
 }
+
+TEST_F(FlushJobTest, SnapshotMixTimestamp) {
+  JobContext job_context(0);
+  auto cfd = versions_->GetColumnFamilySet()->GetDefault();
+  auto new_mem = cfd->ConstructNewMemtable(*cfd->GetLatestMutableCFOptions(),
+                                           kMaxSequenceNumber);
+
+  std::vector<SequenceNumber> snapshots;
+  std::vector<uint64_t> timestamps;
+  std::set<SequenceNumber> snapshots_set;
+  int keys = 10000;
+  int max_inserts_per_keys = 8;
+
+  Random rnd(301);
+  for (int i = 0; i < keys / 2; ++i) {
+    snapshots.push_back(rnd.Uniform(keys * (max_inserts_per_keys / 2)) + 1);
+    snapshots_set.insert(snapshots.back());
+  }
+  for (int i = 0; i < keys*max_inserts_per_keys; i++) {
+    timestamps.push_back(i+1);
+  }
+  std::random_shuffle(timestamps.begin(), timestamps.end());
+  uint64_t oldest_ts = timestamps[0];
+  std::sort(snapshots.begin(), snapshots.end());
+
+  new_mem->Ref();
+  SequenceNumber current_seqno = 0;
+  auto inserted_keys = mock::MakeMockFile();
+  auto it = timestamps.begin();
+  for (int i = 1; i < keys; ++i) {
+    std::string key(ToString(i));
+    int insertions = rnd.Uniform(max_inserts_per_keys);
+    std::vector<uint64_t> tss;
+    tss.push_back(*it++);
+    std::sort(tss.begin(), tss.end());
+    for (int j = 0; j < insertions; ++j) {
+      auto seqno = ++current_seqno;
+      InternalKey internal_key(key, seqno, kTypeValue, tss[j]);
+      // use key's encoding as value to make the mock file more readable
+      std::string value = internal_key.DebugString(true);
+      new_mem->Add(SequenceNumber(seqno), kTypeValue, Userkey2Timestamped(key, tss[j]), value);
+      // a key is visible only if:
+      // 1. it's the last one written (j == insertions - 1)
+      // 2. there's a snapshot pointing at it
+      // 3. ts is gte oldest_ts
+      // 4. ts is the largest one smaller than oldest_ts
+      bool visible = (tss[j] >= oldest_ts ||
+                      (j != insertions - 1 && tss[j] < oldest_ts && tss[j+1] >= oldest_ts) ||
+                      j == insertions - 1) ||
+                     (snapshots_set.find(seqno) != snapshots_set.end());
+      if (visible) {
+        inserted_keys.insert({internal_key.Encode().ToString(), value});
+      }
+    }
+  }
+
+  autovector<MemTable*> to_delete;
+  cfd->imm()->Add(new_mem, &to_delete);
+  for (auto& m : to_delete) {
+    delete m;
+  }
+
+  EventLogger event_logger(db_options_.info_log.get());
+  SnapshotChecker* snapshot_checker = nullptr;  // not relavant
+  FlushJob flush_job(dbname_, versions_->GetColumnFamilySet()->GetDefault(),
+                     db_options_, *cfd->GetLatestMutableCFOptions(),
+                     nullptr /* memtable_id */, env_options_, versions_.get(),
+                     &mutex_, &shutting_down_, snapshots, kMaxSequenceNumber,
+                     snapshot_checker, &job_context, nullptr, nullptr, nullptr,
+                     kNoCompression, db_options_.statistics.get(),
+                     &event_logger, true, true /* sync_output_directory */,
+                     true /* write_manifest */, nullptr, nullptr, oldest_ts);
+  mutex_.Lock();
+  flush_job.PickMemTable();
+  ASSERT_OK(flush_job.Run());
+  mutex_.Unlock();
+  mock_table_factory_->AssertSingleFile(inserted_keys);
+  HistogramData hist;
+  db_options_.statistics->histogramData(FLUSH_TIME, &hist);
+  ASSERT_GT(hist.average, 0.0);
+  job_context.Clean();
+}
+
 
 }  // namespace rocksdb
 
