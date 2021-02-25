@@ -171,7 +171,8 @@ class VersionStorageInfo {
   // Updates the oldest snapshot and related internal state, like the bottommost
   // files marked for compaction.
   // REQUIRES: DB mutex held
-  void UpdateOldestSnapshot(SequenceNumber oldest_snapshot_seqnum);
+  void UpdateOldestSnapshot(Logger* info_log, 
+      SequenceNumber oldest_snapshot_seqnum, uint64_t pin_ts);
 
   int MaxInputLevel() const;
   int MaxOutputLevel(bool allow_ingest_behind) const;
@@ -869,6 +870,22 @@ class VersionSet {
     return last_published_sequence_.load(std::memory_order_seq_cst);
   }
 
+  uint64_t GetOldestTimeStamp() {
+    return oldest_timestamp_.load(std::memory_order_acquire);
+  }
+
+  void SetOldestTimeStamp(uint64_t ts) {
+    oldest_timestamp_.store(ts, std::memory_order_release);
+  }
+
+  void SetStableTimeStamp(uint64_t ts) {
+    stable_timestamp_.store(ts, std::memory_order_release);
+  }
+
+  uint64_t GetStableTimeStamp() {
+    return stable_timestamp_.load(std::memory_order_acquire);
+  }
+
   // Set the last sequence number to s.
   void SetLastSequence(uint64_t s) {
     assert(s >= last_sequence_);
@@ -1015,7 +1032,8 @@ class VersionSet {
       bool* have_log_number, uint64_t* log_number, bool* have_prev_log_number,
       uint64_t* previous_log_number, bool* have_next_file, uint64_t* next_file,
       bool* have_last_sequence, SequenceNumber* last_sequence,
-      uint64_t* min_log_number_to_keep, uint32_t* max_column_family);
+      uint64_t* min_log_number_to_keep, uint32_t* max_column_family,
+      bool* have_stable_ts, uint64_t* stable_ts);
 
   Status ProcessManifestWrites(std::deque<ManifestWriter>& writers,
                                InstrumentedMutex* mu, Directory* db_directory,
@@ -1039,6 +1057,8 @@ class VersionSet {
   // the memtable but when using two write queues it could also indicate the
   // last sequence in the WAL visible to reads.
   std::atomic<uint64_t> last_sequence_;
+  std::atomic<uint64_t> oldest_timestamp_ = {0};
+  std::atomic<uint64_t> stable_timestamp_ = {0};
   // The last seq that is already allocated. It is applicable only when we have
   // two write queues. In that case seq might or might not have appreated in
   // memtable but it is expected to appear in the WAL.

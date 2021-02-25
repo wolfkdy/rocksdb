@@ -197,7 +197,7 @@ TEST_F(DBTest, MockEnvWithTimestampPinTs) {
   DB* db;
 
   ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
-  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(105));
+  reinterpret_cast<DBImpl*>(db)->SetOldestTimeStamp(105);
   {
     const Slice keys[] = {Slice("a"), Slice("b"), Slice("c")};
     const Slice vals[] = {Slice("foo"), Slice("bar"), Slice("baz")};
@@ -232,7 +232,7 @@ TEST_F(DBTest, MockEnvWithZeroTsDel) {
   DB* db;
 
   ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
-  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(2));
+  reinterpret_cast<DBImpl*>(db)->SetOldestTimeStamp(2);
   WriteOptions wo;
   {
     wo.asif_commit_timestamps = {1};
@@ -301,7 +301,7 @@ TEST_F(DBTest, MockEnvWithZeroTsDel1) {
   DB* db;
 
   ASSERT_OK(DB::Open(options, "/dir/dbt", &db));
-  ASSERT_OK(reinterpret_cast<DBImpl*>(db)->AdvancePinTs(5));
+  reinterpret_cast<DBImpl*>(db)->SetOldestTimeStamp(5);
   WriteOptions wo;
   {
     wo.asif_commit_timestamps = {1};

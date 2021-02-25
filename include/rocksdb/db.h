@@ -941,6 +941,12 @@ class DB {
   // updated, false if user attempted to call if with seqnum <= current value.
   virtual bool SetPreserveDeletesSequenceNumber(SequenceNumber seqnum) = 0;
 
+  virtual void SetOldestTimeStamp(uint64_t /* oldest_ts */) {}
+
+  virtual Status SetStableTimeStamp(uint64_t /* stable_ts */) {
+    return Status::NotSupported("Not Impl.");
+  }
+
 #ifndef ROCKSDB_LITE
 
   // Prevent file deletions. Compactions will continue to occur,
@@ -1194,6 +1200,15 @@ class DB {
 
   // Needed for StackableDB
   virtual DB* GetRootDB() { return this; }
+
+
+  virtual Status PauseBackgroundCompaction() {
+    return Status::NotSupported("PauseBackgroundCompaction() is not implemented.");
+  }
+
+  virtual Status ContinueBackgroundCompaction() {
+    return Status::NotSupported("ContinueBackgroundCompaction() is not implemented.");
+  }
 
  private:
   // No copying allowed

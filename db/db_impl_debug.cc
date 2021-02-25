@@ -88,6 +88,7 @@ Status DBImpl::TEST_CompactRange(int level, const Slice* begin,
           ? level
           : level + 1;
   return RunManualCompaction(cfd, level, output_level, 0, 0, begin, end, true,
+                             false /* trim_history */ , false /* ignore_pin_timestamp */, 
                              disallow_trivial_move);
 }
 

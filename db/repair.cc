@@ -228,6 +228,8 @@ class Repairer {
     std::string column_family_name;
     SequenceNumber min_sequence;
     SequenceNumber max_sequence;
+    uint64_t min_timestamp;
+    uint64_t max_timestamp;
   };
 
   std::string const dbname_;
@@ -433,7 +435,8 @@ class Repairer {
           CompressionOptions(), false, nullptr /* internal_stats */,
           TableFileCreationReason::kRecovery, nullptr /* event_logger */,
           0 /* job_id */, Env::IO_HIGH, nullptr /* table_properties */,
-          -1 /* level */, current_time, write_hint);
+          -1 /* level */, current_time, 0, write_hint, 
+          cfd->current()->version_set()->GetOldestTimeStamp());
       ROCKS_LOG_INFO(db_options_.info_log,
                      "Log #%" PRIu64 ": %d ops saved to Table #%" PRIu64 " %s",
                      log, counter, meta.fd.GetNumber(),
@@ -525,6 +528,8 @@ class Repairer {
       ParsedInternalKey parsed;
       t->min_sequence = 0;
       t->max_sequence = 0;
+      t->min_timestamp = 0;
+      t->max_timestamp = 0;
       for (iter->SeekToFirst(); iter->Valid(); iter->Next()) {
         Slice key = iter->key();
         if (!ParseInternalKey(key, &parsed)) {
@@ -539,6 +544,7 @@ class Repairer {
           empty = false;
           t->meta.smallest.DecodeFrom(key);
           t->min_sequence = parsed.sequence;
+          t->min_timestamp = parsed.timestamp;
         }
         t->meta.largest.DecodeFrom(key);
         if (parsed.sequence < t->min_sequence) {
@@ -546,6 +552,12 @@ class Repairer {
         }
         if (parsed.sequence > t->max_sequence) {
           t->max_sequence = parsed.sequence;
+        }
+        if (parsed.timestamp < t->min_timestamp) {
+            t->min_timestamp = parsed.timestamp;
+        }
+        if (parsed.timestamp > t->max_timestamp) {
+            t->max_timestamp = parsed.timestamp;
         }
       }
       if (!iter->status().ok()) {
@@ -587,7 +599,8 @@ class Repairer {
         edit.AddFile(0, table->meta.fd.GetNumber(), table->meta.fd.GetPathId(),
                      table->meta.fd.GetFileSize(), table->meta.smallest,
                      table->meta.largest, table->min_sequence,
-                     table->max_sequence, table->meta.marked_for_compaction);
+                     table->max_sequence, table->min_timestamp,
+                     table->max_timestamp, table->meta.marked_for_compaction);
       }
       assert(next_file_number_ > 0);
       vset_.MarkFileNumberUsed(next_file_number_ - 1);

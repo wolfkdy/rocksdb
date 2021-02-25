@@ -35,7 +35,7 @@ TEST_F(VersionEditTest, EncodeDecode) {
     edit.AddFile(3, kBig + 300 + i, kBig32Bit + 400 + i, 0,
                  InternalKey("foo", kBig + 500 + i, kTypeValue, 0),
                  InternalKey("zoo", kBig + 600 + i, kTypeDeletion, 0),
-                 kBig + 500 + i, kBig + 600 + i, false);
+                 kBig + 500 + i, kBig + 600 + i, kBig + 300 + i, kBig + 400 + i, false);
     edit.DeleteFile(4, kBig + 700 + i);
   }
 
@@ -52,13 +52,13 @@ TEST_F(VersionEditTest, EncodeDecodeNewFile4) {
   VersionEdit edit;
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
-               kBig + 600, true);
+               kBig + 600, kBig + 300, kBig + 400, true);
   edit.AddFile(4, 301, 3, 100, InternalKey("foo", kBig + 501, kTypeValue, 0),
                InternalKey("zoo", kBig + 601, kTypeDeletion, 0), kBig + 501,
-               kBig + 601, false);
+               kBig + 601, kBig + 301, kBig + 401, false);
   edit.AddFile(5, 302, 0, 100, InternalKey("foo", kBig + 502, kTypeValue, 0),
                InternalKey("zoo", kBig + 602, kTypeDeletion, 0), kBig + 502,
-               kBig + 602, true);
+               kBig + 602, kBig + 302, kBig + 402, true);
   edit.DeleteFile(4, 700);
 
   edit.SetComparatorName("foo");
@@ -86,10 +86,10 @@ TEST_F(VersionEditTest, ForwardCompatibleNewFile4) {
   VersionEdit edit;
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
-               kBig + 600, true);
+               kBig + 600, kBig + 300, kBig + 400, true);
   edit.AddFile(4, 301, 3, 100, InternalKey("foo", kBig + 501, kTypeValue, 0),
                InternalKey("zoo", kBig + 601, kTypeDeletion, 0), kBig + 501,
-               kBig + 601, false);
+               kBig + 601, kBig + 301, kBig + 401, false);
   edit.DeleteFile(4, 700);
 
   edit.SetComparatorName("foo");
@@ -135,7 +135,7 @@ TEST_F(VersionEditTest, NewFile4NotSupportedField) {
   VersionEdit edit;
   edit.AddFile(3, 300, 3, 100, InternalKey("foo", kBig + 500, kTypeValue, 0),
                InternalKey("zoo", kBig + 600, kTypeDeletion, 0), kBig + 500,
-               kBig + 600, true);
+               kBig + 600, 0, 0, true);
   edit.SetComparatorName("foo");
   edit.SetLogNumber(kBig + 100);
   edit.SetNextFile(kBig + 200);
@@ -161,7 +161,7 @@ TEST_F(VersionEditTest, NewFile4NotSupportedField) {
 
 TEST_F(VersionEditTest, EncodeEmptyFile) {
   VersionEdit edit;
-  edit.AddFile(0, 0, 0, 0, InternalKey(), InternalKey(), 0, 0, false);
+  edit.AddFile(0, 0, 0, 0, InternalKey(), InternalKey(), 0, 0, 0, 0, false);
   std::string buffer;
   ASSERT_TRUE(!edit.EncodeTo(&buffer));
 }

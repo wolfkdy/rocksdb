@@ -157,6 +157,8 @@ class TOTransactionDBImpl : public TOTransactionDB {
                       bool force) override;
 
   Status QueryTimeStamp(const TimeStampType& ts_type, RocksTimeStamp* timestamp) override;
+  
+  Status RollbackToStable(ColumnFamilyHandle* column_family) override;
 
   Status Stat(TOTransactionStat* stat) override;
 
@@ -197,6 +199,8 @@ class TOTransactionDBImpl : public TOTransactionDB {
   using KeyModifyHistory =
       std::tuple<TransactionID, RocksTimeStamp, RocksTimeStamp>;
   using TSTXN = std::pair<RocksTimeStamp, TransactionID>;
+  DBImpl* getDbImpl() const { return dbimpl_; }
+
 
  protected:
   DBImpl* dbimpl_;
