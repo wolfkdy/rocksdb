@@ -534,7 +534,7 @@ TEST_F(FlushJobTest, SnapshotMixTimestamp) {
                      snapshot_checker, &job_context, nullptr, nullptr, nullptr,
                      kNoCompression, db_options_.statistics.get(),
                      &event_logger, true, true /* sync_output_directory */,
-                     true /* write_manifest */, nullptr, nullptr, oldest_ts);
+                     true /* write_manifest */, oldest_ts);
   mutex_.Lock();
   flush_job.PickMemTable();
   ASSERT_OK(flush_job.Run());
