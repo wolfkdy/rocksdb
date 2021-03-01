@@ -140,7 +140,7 @@ class CompactionJobTest : public testing::Test {
 
     VersionEdit edit;
     edit.AddFile(level, file_number, 0, 10, smallest_key, largest_key,
-        smallest_seqno, largest_seqno, false, min_ts, max_ts, false);
+        smallest_seqno, largest_seqno, min_ts, max_ts, false);
 
     mutex_.Lock();
     versions_->LogAndApply(versions_->GetColumnFamilySet()->GetDefault(),
@@ -265,7 +265,7 @@ class CompactionJobTest : public testing::Test {
         &shutting_down_, preserve_deletes_seqnum_, &log_buffer, nullptr,
         nullptr, nullptr, &mutex_, &error_handler_, snapshots,
         earliest_write_conflict_snapshot, snapshot_checker, table_cache_,
-        &event_logger, false, false, dbname_, &compaction_job_stats_, pin_ts);
+        &event_logger, false, false, dbname_, &compaction_job_stats_, pin_ts, false, false);
     VerifyInitializationOfCompactionJobStats(compaction_job_stats_);
 
     compaction_job.Prepare();

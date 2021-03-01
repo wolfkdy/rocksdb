@@ -1247,7 +1247,7 @@ TEST_F(TOTransactionTest, tsPinBottomLevelCompaction) {
   // every sst file's max ts is >= 1.
   // if want test Bottom compaction working well, 
   // see CompactBottomLevelFilesWithDeletions
-  s = txn_db->SetTimeStamp(kOldest, 1);
+  s = txn_db->SetTimeStamp(kOldest, 1, false);
   ASSERT_OK(s);
   db_imp->ReleaseSnapshot(snapshot);
   rocksdb::SyncPoint::GetInstance()->SetCallBack(
@@ -1309,7 +1309,7 @@ TEST_F(TOTransactionTest, TrimHistoryToStableTs) {
   ASSERT_EQ(std::to_string(kNumLevelFiles), level1FileNum);
   std::vector<LiveFileMetaData> pre_release_metadata, post_release_metadata;
   db_imp->GetLiveFilesMetaData(&pre_release_metadata);
-  s = txn_db->SetTimeStamp(kStable, 1);
+  s = txn_db->SetTimeStamp(kStable, 1, false);
   db_imp->TrimHistoryToStableTs(db_imp->DefaultColumnFamily());
   db_imp->GetProperty("rocksdb.num-files-at-level0", &level1FileNum);
   ASSERT_EQ("1", level1FileNum);
