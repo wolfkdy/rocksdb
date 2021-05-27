@@ -201,7 +201,6 @@ class TOTransactionDBImpl : public TOTransactionDB {
   using TSTXN = std::pair<RocksTimeStamp, TransactionID>;
   DBImpl* getDbImpl() const { return dbimpl_; }
 
-
  protected:
   DBImpl* dbimpl_;
   bool read_only_;
