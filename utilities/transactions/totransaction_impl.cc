@@ -48,6 +48,12 @@ TOTransactionImpl::~TOTransactionImpl() {
   }
 }
 
+Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) {
+    assert(core_->timestamp_round_read_ == false);
+    core_->timestamp_round_read_ = (round == 0 ? false : true);
+    return SetReadTimeStamp(timestamp);
+}
+
 Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp) {
   if (core_->state_ >= kCommitted) {
     return Status::NotSupported("this txn is committed or rollback");

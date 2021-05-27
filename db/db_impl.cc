@@ -3338,7 +3338,7 @@ Status DBImpl::PauseBackgroundCompaction() {
   uint64_t first_time = env_->NowMicros();
   uint64_t start_time = 0;
   uint64_t end_time = 0;
-  while (bg_compaction_paused_ > 0) {
+  while (bg_compaction_scheduled_ > 0) {
     start_time = env_->NowMicros();
     bg_cv_.TimedWait(start_time + 180*1000*1000); // 180s
     end_time = env_->NowMicros();

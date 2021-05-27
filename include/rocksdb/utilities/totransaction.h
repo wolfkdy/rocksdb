@@ -34,8 +34,11 @@ class TOTransaction {
 
   virtual Status SetDurableTimeStamp(const RocksTimeStamp& timestamp) = 0;
 
-  //set read timestamp for transaction, if the application set the commit timestamp twice, an error will be returned
+  // set read timestamp for transaction, if the application set the commit timestamp twice, an error will be returned
   virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp) = 0;
+
+  // @deprecated, param @round is set via TOTransactionDB::BeginTransaction
+  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) = 0;
 
   virtual Status GetReadTimeStamp(RocksTimeStamp* timestamp) const = 0;
 
