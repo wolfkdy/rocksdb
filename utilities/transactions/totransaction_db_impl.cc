@@ -391,9 +391,12 @@ void TOTransactionDBImpl::CleanCommittedKeys() {
   while(clean_job_.IsRunning()) {
     TEST_SYNC_POINT("TOTransactionDBImpl::CleanCommittedKeys::OnRunning");
     if (clean_job_.NeedToClean(&txn, &ts)) {
+      uint64_t totalNum = 0;
+      uint64_t removeKeys = 0;
       for (size_t i = 0; i < num_stripes_; i++) {
         std::unique_lock<std::mutex> lock(*keys_mutex_[i]);
         CommittedLockMapStripe* stripe = committed_keys_.lock_map_stripes_.at(i);
+        totalNum += stripe->committed_keys_map_.size();
         auto map_iter = stripe->committed_keys_map_.begin();
         while (map_iter != stripe->committed_keys_map_.end()) {
           auto history = map_iter->second;
@@ -408,6 +411,7 @@ void TOTransactionDBImpl::CleanCommittedKeys() {
             assert(ccbytes >= 0);
             (void)ccbytes;
             map_iter = stripe->committed_keys_map_.erase(map_iter);
+            removeKeys++;
           } else {
             map_iter++;
           }
@@ -415,8 +419,11 @@ void TOTransactionDBImpl::CleanCommittedKeys() {
       }
       prepare_heap_.Purge(txn, ts);
       clean_job_.FinishClean(txn, ts);
+      if (totalNum < 10000 || removeKeys * 8 < totalNum) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      }
     } else {
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
   } 
   // End run clean thread
