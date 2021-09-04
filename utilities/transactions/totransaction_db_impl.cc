@@ -1004,9 +1004,11 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
     {
       WriteLock wl(&ts_meta_mutex_);
       if ((oldest_ts_ != nullptr && *oldest_ts_ > ts) && !force) {
-        std::stringstream ss;
-        ss << "oldestTs can not travel back. oldest_ts from: " << *oldest_ts_ << " to " << ts;
-        return Status::InvalidArgument(ss.str());
+        ROCKS_LOG_WARN(info_log_,
+                       "oldestTs can not travel back. oldest_ts from %llu to "
+                       "%llu, keep oldest_ts %llu",
+                       *oldest_ts_, ts, *oldest_ts_);
+        return Status::OK();
       }
       original = (oldest_ts_ == nullptr) ? 0 : *oldest_ts_;
       oldest_ts_.reset(new RocksTimeStamp(ts));
@@ -1043,8 +1045,12 @@ Status TOTransactionDBImpl::SetTimeStamp(const TimeStampType& ts_type,
           "kStable ts should not be less than kOldestTs");
     }
     if (dbimpl_->GetStableTimeStamp() > ts && !force) {
-      return Status::InvalidArgument(
-          "kStable ts should not be less than current stable ts");
+      ROCKS_LOG_WARN(info_log_,
+                     "kStable ts can not travel back. kStable ts from %llu to "
+                     "%llu, keep kStable ts %llu",
+                     dbimpl_->GetStableTimeStamp(), ts,
+                     dbimpl_->GetStableTimeStamp());
+      return Status::OK();
     }
     dbimpl_->SetStableTimeStamp(ts);
     ROCKS_LOG_DEBUG(info_log_, "TOTDB set stable ts type(%d) value(%llu)\n", ts_type, ts);
