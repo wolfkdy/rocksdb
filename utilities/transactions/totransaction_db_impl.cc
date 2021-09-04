@@ -234,10 +234,10 @@ Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(
   if (iter != stripe->uncommitted_keys_map_.end()) {
     // Check whether the key is modified by the same txn
     if (iter->second != txn_id) {
-      ROCKS_LOG_WARN(
+      ROCKS_LOG_DEBUG(
           info_log_,
           "TOTDB WriteConflict another txn id(%llu) is modifying key(%s) \n",
-          iter->second, key.second.c_str());
+          iter->second, rocksdb::Slice(key.second).ToString(true).c_str());
       return Status::Busy();
     } else {
       return Status::OK();
