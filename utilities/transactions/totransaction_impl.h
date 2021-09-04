@@ -84,8 +84,6 @@ class TOTransactionImpl : public TOTransaction {
 
   virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp) override;
 
-  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) override;
-
   virtual Status GetReadTimeStamp(RocksTimeStamp* timestamp) const override;
 
   virtual Status Prepare() override;
