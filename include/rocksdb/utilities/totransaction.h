@@ -1,6 +1,7 @@
 #pragma once
 #ifndef ROCKSDB_LITE
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -41,7 +42,7 @@ class TOTransaction {
 
   virtual Status Prepare() = 0;
 
-  virtual Status Commit() = 0;
+  virtual Status Commit(std::function<void()>* hook = nullptr) = 0;
 
   virtual Status Rollback() = 0;
 

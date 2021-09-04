@@ -88,7 +88,7 @@ class TOTransactionImpl : public TOTransaction {
 
   virtual Status Prepare() override;
 
-  virtual Status Commit() override;
+  virtual Status Commit(std::function<void()>* hook = nullptr) override;
 
   virtual Status Rollback() override;
 

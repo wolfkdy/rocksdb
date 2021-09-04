@@ -277,7 +277,7 @@ Status TOTransactionImpl::CheckWriteConflict(const TxnKey& key) {
   return txn_db_impl_->CheckWriteConflict(key, GetID(), core_->read_ts_);
 }
 
-Status TOTransactionImpl::Commit() {
+Status TOTransactionImpl::Commit(std::function<void()>* hook) {
   if (core_->state_ >= kCommitted) {
     return Status::InvalidArgument("txn already committed or rollback.");
   }
@@ -298,6 +298,9 @@ Status TOTransactionImpl::Commit() {
     // PutLogData will not increase Count. So, If in the future
     // PutLogData is added into TOTransactionDB, this shortcut should be redesigned.
     s = db_->Write(write_options_, GetWriteBatch()->GetWriteBatch());
+  }
+  if (hook) {
+    (*hook)();
   }
   if (s.ok()) {
     // Change active txn set,
