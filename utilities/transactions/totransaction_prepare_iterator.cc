@@ -514,12 +514,12 @@ WriteBatchWithIndexInternal::Result PrepareFilterIterator::GetFromBatch(
 
 void PrepareFilterIterator::UpdateCurrent() {
   while (true) {
+    status_ = Status::OK();
     if (!input_->Valid()) {
       valid_ = false;
       return;
     }
     valid_ = true;
-    status_ = Status::OK();
     key_ = input_->key();
     sval_ = input_->value();
     if (!sval_.has_prepare) {
