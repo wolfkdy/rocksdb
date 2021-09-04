@@ -584,9 +584,7 @@ Status TOTransactionDBImpl::PublushTimeStamp(const std::shared_ptr<ATN>& core) {
   }
 
   RocksTimeStamp ts;
-  if (core->durable_ts_set_) {
-    ts = core->durable_ts_;
-  } else if (core->commit_ts_set_) {
+  if (core->commit_ts_set_) {
     /*
      * If we know for a fact that this is a prepared transaction and we only
      * have a commit timestamp, don't add to the durable queue. If we poll
