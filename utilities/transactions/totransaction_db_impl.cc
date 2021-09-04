@@ -682,15 +682,21 @@ Status TOTransactionDBImpl::SetCommitTimeStamp(const std::shared_ptr<ATN>& core,
 Status TOTransactionDBImpl::TxnAssertAfterReads(
     const std::shared_ptr<ATN>& core, const char* op,
     const RocksTimeStamp& timestamp) {
+  uint64_t walk_cnt = 0;
   ReadLock rl(&read_ts_mutex_);
   for (auto it = read_q_.rbegin(); it != read_q_.rend(); it++) {
-    if (it->second->state_.load() != TOTransaction::kStarted) {
+    walk_cnt++;
+    // txns with ignore_prepare_ == true should not be considered
+    if (it->second->state_.load() != TOTransaction::kStarted ||
+        it->second->ignore_prepare_) {
       continue;
     }
     if (it->second->txn_id_ == core->txn_id_) {
       continue;
     }
     assert(it->second->read_ts_set_);
+    read_q_walk_len_sum_.fetch_add(read_q_.size(), std::memory_order_relaxed);
+    read_q_walk_times_.fetch_add(walk_cnt, std::memory_order_relaxed);
     if (it->second->read_ts_ >= timestamp) {
       ROCKS_LOG_WARN(info_log_,
                      "%s timestamp: %llu must be greater than the latest "
