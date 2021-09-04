@@ -311,7 +311,11 @@ Status TOTransactionImpl::Commit(std::function<void()>* hook) {
   } else {
     s = Status::InvalidArgument("Transaction is fail for commit.");
   }
- 
+
+#ifdef NDEBUG
+  // prepareHeap needs writeBatch for sanity check in debug mode.
+  GetWriteBatch()->Clear();
+#endif  // NDEBUG
   ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) committed \n", txn_id_);
   return s;
 }

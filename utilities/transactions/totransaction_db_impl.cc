@@ -53,7 +53,8 @@ PrepareHeap::PrepareHeap() {
 }
 
 std::shared_ptr<ATN> PrepareHeap::Find(
-    const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key) {
+    const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key,
+    TOTransaction::TOTransactionState* state) {
   ReadLock rl(&mutex_);
   const auto it = map_.find(key);
   if (it == map_.end()) {
@@ -61,9 +62,11 @@ std::shared_ptr<ATN> PrepareHeap::Find(
   }
   for (const auto& v : it->second) {
     if (v->txn_id_ == core->txn_id_) {
+      *state = v->state_.load(std::memory_order_relaxed);
       return v;
     }
     if (v->prepare_ts_ <= core->read_ts_) {
+      *state = v->state_.load(std::memory_order_relaxed);
       return v;
     }
   }
@@ -437,9 +440,11 @@ Status TOTransactionDBImpl::GetConsiderPrepare(
   RocksTimeStamp read_ts = core->read_ts_set_
                                ? core->read_ts_
                                : std::numeric_limits<RocksTimeStamp>::max();
+  (void)read_ts;
   const auto lookup_key = std::make_pair(column_family->GetID(),
                                          std::string(key.data(), key.size()));
-  std::shared_ptr<ATN> it = prepare_heap_.Find(core.get(), lookup_key);
+  TOTransaction::TOTransactionState state;
+  std::shared_ptr<ATN> it = prepare_heap_.Find(core.get(), lookup_key, &state);
   // 1) key is not in prepare_heap_, read data from self and db
   if (it == nullptr) {
     return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
@@ -450,17 +455,16 @@ Status TOTransactionDBImpl::GetConsiderPrepare(
   // after prepared
   assert(it->txn_id_ != core->txn_id_);
   assert(it->prepare_ts_set_);
-  const auto state = it->state_.load(std::memory_order_relaxed);
   assert(state != TOTransaction::TOTransactionState::kRollback);
 
   // 3) if the txn in prepare_ts_set_ is actually prepared
   if (state == TOTransaction::TOTransactionState::kPrepared) {
     assert(it->prepare_ts_set_);
-    if (it->prepare_ts_ > read_ts) {
-      return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
-                                                  column_family, key, value);
-    }
+    // when picking node from PrepareHeap, we've already considered ts
+    // relationship.
+    assert(it->prepare_ts_ <= read_ts);
     if (core->ignore_prepare_) {
+      SwapSnapshotGuard guard(&options, nullptr);
       return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
                                                   column_family, key, value);
     }
@@ -468,34 +472,9 @@ Status TOTransactionDBImpl::GetConsiderPrepare(
   }
 
   assert(state == TOTransaction::TOTransactionState::kCommitted);
-  assert(it->commit_ts_set_);
-  if (it->commit_ts_ > read_ts) {
-    return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
-                                                column_family, key, value);
-  }
-
-  // TODO(wolfkdy): by rocksdb5.18.3's Get api, there is no way to get
-  // internalkey, here we
-  // use Iterator to get internalkey, which may be slower
-  options.use_internal_key = true;
-  auto db_iter = std::unique_ptr<Iterator>(NewIterator(options, column_family));
-  assert(db_iter);
-  db_iter->Seek(key);
-  options.use_internal_key = false;
-  if (!db_iter->Valid()) {
-    return it->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
+  SwapSnapshotGuard guard(&options, nullptr);
+  return core->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
                                               column_family, key, value);
-  }
-  ParsedInternalKey internalkey;
-  bool parse_result = ParseInternalKey(db_iter->key(), &internalkey);
-  (void)parse_result;
-  assert(parse_result);
-  if (internalkey.user_key != key || internalkey.timestamp < it->commit_ts_) {
-    return it->write_batch_.GetFromBatchAndDB(GetRootDB(), options,
-                                              column_family, key, value);
-  }
-  *value = std::string(db_iter->value().data(), db_iter->value().size());
-  return Status::OK();
 }
 
 Iterator* TOTransactionDBImpl::NewIteratorConsiderPrepare(

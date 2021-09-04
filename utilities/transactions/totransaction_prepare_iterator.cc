@@ -14,6 +14,34 @@ namespace rocksdb {
 
 namespace {
 using ATN = TOTransactionImpl::ActiveTxnNode;
+
+// If we started after prepared-txn commits, due to SI's nature, we can see
+// it from db. The value from db may be as updated as the one as prepared-txn.
+// Or more updated. If we started before the prepared-txn commits, we cannot
+// see the updated data with our own snapshot, so refetch with the latest
+// snapshot.
+#define MACRO_REFETCH_RETURN_ON_FOUND_ADVANCE_CONTINUE_ON_NOT_FOUND()         \
+  do {                                                                        \
+    if (pmap_val->commit_txn_id_ < core_->txn_id_) {                          \
+      if (!sval_.has_base) {                                                  \
+        AdvanceInputNoFilter();                                               \
+      } else {                                                                \
+        val_ = std::string(sval_.base_value.data(), sval_.base_value.size()); \
+        return;                                                               \
+      }                                                                       \
+    } else {                                                                  \
+      ReadOptions read_opt;                                                   \
+      read_opt.read_timestamp = core_->read_ts_;                              \
+      auto getStatus = core_->write_batch_.GetFromBatchAndDB(                 \
+          db_, read_opt, cf_, key_, &val_);                                   \
+      assert(getStatus.ok() || getStatus.IsNotFound());                       \
+      if (getStatus.ok()) {                                                   \
+        return;                                                               \
+      } else {                                                                \
+        AdvanceInputNoFilter();                                               \
+      }                                                                       \
+    }                                                                         \
+  } while (0)
 }  // namespace
 
 Slice PrepareMapIterator::key() const {
@@ -21,6 +49,17 @@ Slice PrepareMapIterator::key() const {
 }
 
 const std::shared_ptr<ATN>& PrepareMapIterator::value() const { return val_; }
+
+TOTransaction::TOTransactionState PrepareMapIterator::valueState() const {
+  return val_state_;
+}
+
+TOTransaction::TOTransactionState PrepareMapIterator::UpdatePrepareState() {
+  assert(val_state_ == TOTransaction::TOTransactionState::kPrepared);
+  assert(Valid());
+  val_state_ = val_->state_.load(/*seq_cst*/);
+  return val_state_;
+}
 
 void PrepareMapIterator::TryPosValueToCorrectMvccVersionInLock(
     const std::list<std::shared_ptr<ATN>>& prepare_mvccs) {
@@ -39,6 +78,7 @@ void PrepareMapIterator::TryPosValueToCorrectMvccVersionInLock(
     // iterator skip to next
     val_ = prepare_mvccs.back();
   }
+  val_state_ = val_->state_.load(/*seq_cst*/);
 }
 
 void PrepareMapIterator::Next() {
@@ -165,16 +205,24 @@ Slice PrepareMergingIterator::key() const {
 
 ShadowValue PrepareMergingIterator::value() const {
   if (equal_keys_) {
-    return {true /*has_prepare*/, true /*has_base*/,
-            delta_iterator_->value().get(), base_iterator_->value(),
-            base_iterator_->key()};
+    return {true /*has_prepare*/,           true /*has_base*/,
+            delta_iterator_->value().get(), delta_iterator_->valueState(),
+            base_iterator_->value(),        base_iterator_->key()};
   }
   if (current_at_base_) {
-    return {false /*has_prepare*/, true /*has_base*/, nullptr,
-            base_iterator_->value(), base_iterator_->key()};
+    return {false /*has_prepare*/,
+            true /*has_base*/,
+            nullptr,
+            TOTransaction::TOTransactionState::kStarted,
+            base_iterator_->value(),
+            base_iterator_->key()};
   }
-  return {true /*has_prepare*/, false /*has_base*/,
-          delta_iterator_->value().get(), Slice(), Slice()};
+  return {true /*has_prepare*/,
+          false /*has_base*/,
+          delta_iterator_->value().get(),
+          delta_iterator_->valueState(),
+          Slice(),
+          Slice()};
 }
 
 void PrepareMergingIterator::SeekToFirst() {
@@ -286,6 +334,12 @@ Status PrepareMergingIterator::status() const {
     return base_iterator_->status();
   }
   return Status::OK();
+}
+
+TOTransaction::TOTransactionState PrepareMergingIterator::UpdatePrepareState() {
+  assert(delta_iterator_->Valid());
+  assert(equal_keys_ || !current_at_base_);
+  return delta_iterator_->UpdatePrepareState();
 }
 
 void PrepareMergingIterator::AssertInvariants() {
@@ -460,12 +514,27 @@ void PrepareFilterIterator::Next() {
     return;
   }
   if (forward_ && status_.IsPrepareConflict()) {
-    UpdateCurrent();
+    UpdatePrepareState();
     return;
   }
+  // Suppose at t0, base points at b, pmap points at c with c.state == prepared,
+  // the merged cursor points at the base key `b`. At t1, c changes to committed
+  // state. However, the merged cursor can not find that. At t2, the merged
+  // cursor advances to c, with c.state == prepared, not changed. base:
+  // ---[a]---[CURRENT(b)]----[c]---------- pmap:
+  // ---[a]-------------------[c(CURRENT)]-
+  bool next_may_read_staled_prepared =
+      forward_ && sval_.has_base && !sval_.has_prepare;
   forward_ = true;
   AdvanceInputNoFilter();
   UpdateCurrent();
+  // The previous cursor state points at base, and after a next call, we get a
+  // prepare state. This is the only situation we read a staled prepare state.
+  bool read_staled_prepared =
+      next_may_read_staled_prepared && Valid() && status_.IsPrepareConflict();
+  if (read_staled_prepared) {
+    UpdatePrepareState();
+  }
 }
 
 void PrepareFilterIterator::Prev() {
@@ -474,12 +543,39 @@ void PrepareFilterIterator::Prev() {
     return;
   }
   if (!forward_ && status_.IsPrepareConflict()) {
-    UpdateCurrent();
+    UpdatePrepareState();
     return;
   }
+  bool next_may_read_staled_prepared =
+      (!forward_) && sval_.has_base && !sval_.has_prepare;
   forward_ = false;
   AdvanceInputNoFilter();
   UpdateCurrent();
+  bool read_staled_prepared =
+      next_may_read_staled_prepared && Valid() && status_.IsPrepareConflict();
+  if (read_staled_prepared) {
+    UpdatePrepareState();
+  }
+}
+
+void PrepareFilterIterator::UpdatePrepareState() {
+  assert(sval_.prepare_value_state ==
+         TOTransaction::TOTransactionState::kPrepared);
+  assert(sval_.has_prepare);
+  auto new_state = input_->UpdatePrepareState();
+  if (new_state == TOTransaction::TOTransactionState::kPrepared) {
+    return;
+  }
+  if (new_state == TOTransaction::TOTransactionState::kCommitted) {
+    UpdateCurrent();
+    return;
+  }
+  assert(new_state == TOTransaction::TOTransactionState::kRollback);
+  if (forward_) {
+    Seek(key_);
+  } else {
+    SeekForPrev(key_);
+  }
 }
 
 void PrepareFilterIterator::AdvanceInputNoFilter() {
@@ -528,26 +624,20 @@ void PrepareFilterIterator::UpdateCurrent() {
       return;
     } else if (!sval_.has_base) {
       const auto pmap_val = sval_.prepare_value;
-      auto state = pmap_val->state_.load(std::memory_order_relaxed);
+      auto state = sval_.prepare_value_state;
       assert(state != TOTransaction::TOTransactionState::kRollback);
       if (state == TOTransaction::TOTransactionState::kCommitted) {
+#ifndef NDEBUG
         auto res = GetFromBatch(&pmap_val->write_batch_, key_, &val_);
-        if (res == WriteBatchWithIndexInternal::Result::kFound) {
-          // if pmap_val->commit_txn_id_ <= core_->txn_id_, we should also see
-          // it from lsmtree, so sval_.has_base should be true
-          assert(pmap_val->commit_txn_id_ > core_->txn_id_);
-        }
+#endif  // NDEBUG
         assert(res == WriteBatchWithIndexInternal::Result::kFound ||
                res == WriteBatchWithIndexInternal::Result::kDeleted);
-        if (pmap_val->commit_ts_ > core_->read_ts_ ||
-            res == WriteBatchWithIndexInternal::Result::kDeleted) {
-          AdvanceInputNoFilter();
-        } else {
-          return;
-        }
+        MACRO_REFETCH_RETURN_ON_FOUND_ADVANCE_CONTINUE_ON_NOT_FOUND();
       } else {
         assert(state == TOTransaction::TOTransactionState::kPrepared);
-        if (pmap_val->prepare_ts_ > core_->read_ts_ || core_->ignore_prepare_) {
+        if (pmap_val->prepare_ts_ > core_->read_ts_) {
+          AdvanceInputNoFilter();
+        } else if (core_->ignore_prepare_) {
           AdvanceInputNoFilter();
         } else {
           status_ = Status::PrepareConflict(
@@ -558,7 +648,7 @@ void PrepareFilterIterator::UpdateCurrent() {
     } else {
       assert(sval_.has_prepare && sval_.has_base);
       const auto pmap_val = sval_.prepare_value;
-      auto state = pmap_val->state_.load(std::memory_order_relaxed);
+      auto state = sval_.prepare_value_state;
       assert(state != TOTransaction::TOTransactionState::kRollback);
       ParsedInternalKey internalkey;
       bool parse_result =
@@ -569,23 +659,26 @@ void PrepareFilterIterator::UpdateCurrent() {
       // "read-own-writes" rule
       assert(internalkey.timestamp <= core_->read_ts_ ||
              internalkey.timestamp == kMaxTimeStamp);
+#ifndef NDEBUG
+      auto res = GetFromBatch(&pmap_val->write_batch_, key_, &val_);
+#endif  // NDEBUG
+      assert(res == WriteBatchWithIndexInternal::Result::kFound ||
+             res == WriteBatchWithIndexInternal::Result::kDeleted);
       if (state == TOTransaction::TOTransactionState::kCommitted) {
-        auto res = GetFromBatch(&pmap_val->write_batch_, key_, &val_);
-        assert(res == WriteBatchWithIndexInternal::Result::kFound ||
-               res == WriteBatchWithIndexInternal::Result::kDeleted);
-        if (pmap_val->commit_ts_ > core_->read_ts_ ||
-            pmap_val->commit_ts_ < internalkey.timestamp) {
-          val_ = std::string(sval_.base_value.data(), sval_.base_value.size());
-          return;
-        } else if (res == WriteBatchWithIndexInternal::Result::kDeleted) {
-          AdvanceInputNoFilter();
-        } else {
-          return;
-        }
+        MACRO_REFETCH_RETURN_ON_FOUND_ADVANCE_CONTINUE_ON_NOT_FOUND();
       } else {
         assert(state == TOTransaction::TOTransactionState::kPrepared);
-        assert(internalkey.timestamp < pmap_val->prepare_ts_);
-        if (pmap_val->prepare_ts_ > core_->read_ts_ || core_->ignore_prepare_) {
+        // Txn is committed before changing state from kPrepared to kCommitted,
+        // this is not in a critial section. So another interleaved txn may see
+        // both its committed data and its kPrepared state.
+        assert(internalkey.timestamp < pmap_val->prepare_ts_ ||
+               (pmap_val->commit_ts_set_ &&
+                internalkey.timestamp == pmap_val->commit_ts_ &&
+                sval_.base_value == val_));
+        if (pmap_val->prepare_ts_ > core_->read_ts_) {
+          val_ = std::string(sval_.base_value.data(), sval_.base_value.size());
+          return;
+        } else if (core_->ignore_prepare_) {
           val_ = std::string(sval_.base_value.data(), sval_.base_value.size());
           return;
         } else {

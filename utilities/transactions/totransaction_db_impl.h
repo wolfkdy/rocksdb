@@ -32,7 +32,8 @@ class PrepareHeap {
   ~PrepareHeap() = default;
 
   std::shared_ptr<TOTransactionImpl::ActiveTxnNode> Find(
-      const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key);
+      const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key,
+      TOTransaction::TOTransactionState* state);
 
   void Insert(const std::shared_ptr<TOTransactionImpl::ActiveTxnNode>& core);
 
