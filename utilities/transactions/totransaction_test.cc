@@ -32,7 +32,7 @@ class TOTransactionTest : public testing::Test {
   TOTransactionDB* txn_db;
   string dbname;
   Options options;
-  TOTransactionDBOptions txndb_options;
+  TOTransactionDBOptions txndb_options{200};
   TOTransactionOptions txn_options;
 
   TOTransactionTest() {

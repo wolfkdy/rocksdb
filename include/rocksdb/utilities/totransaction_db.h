@@ -44,7 +44,11 @@ struct TOTransactionStat {
 
 struct TOTransactionDBOptions {
   size_t num_stripes = DEFAULT_NUM_STRIPES;
-  size_t max_conflict_check_bytes_size = 200*1024*1024;
+  size_t max_conflict_check_bytes_size = 200 * 1024 * 1024;
+  TOTransactionDBOptions(){};
+  TOTransactionDBOptions(int max_conflict_check_bytes_size_mb)
+      : max_conflict_check_bytes_size(max_conflict_check_bytes_size_mb * 1024 *
+                                      1024) {}
 };
 
 enum TimeStampType {
@@ -86,6 +90,7 @@ class TOTransactionDB : public StackableDB {
                      const std::vector<ColumnFamilyDescriptor>& column_families,
                      std::vector<ColumnFamilyHandle*>* handles,
                      TOTransactionDB** dbptr);
+  virtual void SetMaxConflictBytes(uint64_t bytes) = 0;
 
   // The lifecycle of returned pointer should be managed by the application level
   virtual TOTransaction* BeginTransaction(

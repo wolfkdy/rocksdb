@@ -227,7 +227,7 @@ Status TOTransactionDBImpl::UnCommittedKeys::RemoveKeyInLock(
 
 Status TOTransactionDBImpl::UnCommittedKeys::CheckKeyAndAddInLock(
     const TxnKey& key, const TransactionID& txn_id, const size_t& stripe_num,
-    const size_t& max_mem_usage, std::atomic<int64_t>* mem_usage) {
+    uint64_t max_mem_usage, std::atomic<int64_t>* mem_usage) {
   UnCommittedLockMapStripe* stripe = lock_map_stripes_.at(stripe_num);
 
   auto iter = stripe->uncommitted_keys_map_.find(key);
@@ -373,8 +373,10 @@ Status TOTransactionDBImpl::CheckWriteConflict(const TxnKey& key,
 
   // Check whether the key is in uncommitted keys
   // if not, add the key to uncommitted keys
-  s = uncommitted_keys_.CheckKeyAndAddInLock(key, txn_id, stripe_num,
-                                             max_conflict_bytes_, &current_conflict_bytes_);
+  s = uncommitted_keys_.CheckKeyAndAddInLock(
+      key, txn_id, stripe_num,
+      max_conflict_bytes_.load(std::memory_order_relaxed),
+      &current_conflict_bytes_);
   if (!s.ok()) {
     ROCKS_LOG_DEBUG(info_log_, "TOTDB txn id(%llu) key(%s) conflict uk", txn_id,
                     rocksdb::Slice(key.second).ToString(true).c_str());
@@ -1113,7 +1115,8 @@ Status TOTransactionDBImpl::Stat(TOTransactionStat* stat) {
     return Status::InvalidArgument("can not accept null as input");
   }
   memset(stat, 0, sizeof(TOTransactionStat));
-  stat->max_conflict_bytes = max_conflict_bytes_;
+  stat->max_conflict_bytes =
+      max_conflict_bytes_.load(std::memory_order_relaxed);
   stat->cur_conflict_bytes = current_conflict_bytes_.load(std::memory_order_relaxed);
   {
     std::vector<std::unique_lock<std::mutex>> lks;
