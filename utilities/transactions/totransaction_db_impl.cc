@@ -797,11 +797,11 @@ Status TOTransactionDBImpl::CommitTransaction(
 
     auto iter = active_txns_.find(core->txn_id_);
     assert(iter != active_txns_.end());
-  
-    iter->second->state_.store(TOTransaction::kCommitted);
+
     dbimpl_->ReleaseSnapshot(iter->second->txn_snapshot);
     core->commit_txn_id_ = TOTransactionImpl::GenTxnID();
-	
+    iter->second->state_.store(TOTransaction::kCommitted);
+
     iter = active_txns_.erase(iter);
 
     if (core->commit_txn_id_ > committed_max_txnid_) {
