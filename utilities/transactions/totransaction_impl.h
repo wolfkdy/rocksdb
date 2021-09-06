@@ -23,6 +23,23 @@ struct TOTxnOptions {
 
 class TOTransactionDBImpl;
 
+class SwapSnapshotGuard {
+ public:
+  // No copying allowed
+  SwapSnapshotGuard(const SwapSnapshotGuard&) = delete;
+  SwapSnapshotGuard& operator=(const SwapSnapshotGuard&) = delete;
+  SwapSnapshotGuard(ReadOptions* readOpt, const Snapshot* newSnapshot) {
+    read_opt_ = readOpt;
+    old_snapshot_ = read_opt_->snapshot;
+    read_opt_->snapshot = newSnapshot;
+  }
+  ~SwapSnapshotGuard() { read_opt_->snapshot = old_snapshot_; }
+
+ private:
+  ReadOptions* read_opt_;
+  const Snapshot* old_snapshot_;
+};
+
 class TOTransactionImpl : public TOTransaction {
  public:
   struct ActiveTxnNode {
@@ -49,6 +66,8 @@ class TOTransactionImpl : public TOTransaction {
     WriteBatchWithIndex write_batch_;
 
    public:
+    ActiveTxnNode(const ActiveTxnNode&) = delete;
+    ActiveTxnNode& operator=(const ActiveTxnNode&) = delete;
     ActiveTxnNode()
         : txn_id_(0),
           commit_txn_id_(0),
@@ -84,13 +103,11 @@ class TOTransactionImpl : public TOTransaction {
 
   virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp) override;
 
-  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) override;
-
   virtual Status GetReadTimeStamp(RocksTimeStamp* timestamp) const override;
 
   virtual Status Prepare() override;
 
-  virtual Status Commit() override;
+  virtual Status Commit(std::function<void()>* hook = nullptr) override;
 
   virtual Status Rollback() override;
 

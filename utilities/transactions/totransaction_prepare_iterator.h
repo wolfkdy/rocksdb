@@ -60,6 +60,12 @@ class PrepareMapIterator {
 
   const std::shared_ptr<TOTransactionImpl::ActiveTxnNode>& value() const;
 
+  TOTransaction::TOTransactionState valueState() const;
+
+  TOTransaction::TOTransactionState UpdatePrepareState();
+
+  PrepareHeap* getPrepareHeapMap() const;
+
  private:
   void TryPosValueToCorrectMvccVersionInLock(
       const std::list<std::shared_ptr<TOTransactionImpl::ActiveTxnNode>>&
@@ -78,12 +84,15 @@ class PrepareMapIterator {
   std::string pos_;
 
   std::shared_ptr<TOTransactionImpl::ActiveTxnNode> val_;
+
+  TOTransaction::TOTransactionState val_state_;
 };
 
 struct ShadowValue {
   bool has_prepare;
   bool has_base;
   TOTransactionImpl::ActiveTxnNode* prepare_value;
+  TOTransaction::TOTransactionState prepare_value_state;
   Slice base_value;
   Slice base_internal_key;
 };
@@ -112,6 +121,8 @@ class PrepareMergingIterator {
   void Prev();
 
   Status status() const;
+
+  TOTransaction::TOTransactionState UpdatePrepareState();
 
  private:
   void Advance();
@@ -178,6 +189,8 @@ class PrepareFilterIterator : public Iterator {
   void AdvanceInputNoFilter();
 
   void UpdateCurrent();
+
+  void UpdatePrepareState();
 
   DB* db_;
 

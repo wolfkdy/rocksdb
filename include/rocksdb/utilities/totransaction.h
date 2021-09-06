@@ -1,6 +1,7 @@
 #pragma once
 #ifndef ROCKSDB_LITE
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -37,14 +38,11 @@ class TOTransaction {
   // set read timestamp for transaction, if the application set the commit timestamp twice, an error will be returned
   virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp) = 0;
 
-  // @deprecated, param @round is set via TOTransactionDB::BeginTransaction
-  virtual Status SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) = 0;
-
   virtual Status GetReadTimeStamp(RocksTimeStamp* timestamp) const = 0;
 
   virtual Status Prepare() = 0;
 
-  virtual Status Commit() = 0;
+  virtual Status Commit(std::function<void()>* hook = nullptr) = 0;
 
   virtual Status Rollback() = 0;
 

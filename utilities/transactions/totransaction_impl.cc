@@ -48,12 +48,6 @@ TOTransactionImpl::~TOTransactionImpl() {
   }
 }
 
-Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp, const uint32_t& round) {
-    assert(core_->timestamp_round_read_ == false);
-    core_->timestamp_round_read_ = (round == 0 ? false : true);
-    return SetReadTimeStamp(timestamp);
-}
-
 Status TOTransactionImpl::SetReadTimeStamp(const RocksTimeStamp& timestamp) {
   if (core_->state_ >= kCommitted) {
     return Status::NotSupported("this txn is committed or rollback");
@@ -283,7 +277,7 @@ Status TOTransactionImpl::CheckWriteConflict(const TxnKey& key) {
   return txn_db_impl_->CheckWriteConflict(key, GetID(), core_->read_ts_);
 }
 
-Status TOTransactionImpl::Commit() {
+Status TOTransactionImpl::Commit(std::function<void()>* hook) {
   if (core_->state_ >= kCommitted) {
     return Status::InvalidArgument("txn already committed or rollback.");
   }
@@ -305,6 +299,9 @@ Status TOTransactionImpl::Commit() {
     // PutLogData is added into TOTransactionDB, this shortcut should be redesigned.
     s = db_->Write(write_options_, GetWriteBatch()->GetWriteBatch());
   }
+  if (hook) {
+    (*hook)();
+  }
   if (s.ok()) {
     // Change active txn set,
     // Move uncommitted keys to committed keys,
@@ -314,7 +311,11 @@ Status TOTransactionImpl::Commit() {
   } else {
     s = Status::InvalidArgument("Transaction is fail for commit.");
   }
- 
+
+#ifdef NDEBUG
+  // prepareHeap needs writeBatch for sanity check in debug mode.
+  GetWriteBatch()->Clear();
+#endif  // NDEBUG
   ROCKS_LOG_DEBUG(txn_option_.log_, "TOTDB txn id(%llu) committed \n", txn_id_);
   return s;
 }

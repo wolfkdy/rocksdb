@@ -32,7 +32,8 @@ class PrepareHeap {
   ~PrepareHeap() = default;
 
   std::shared_ptr<TOTransactionImpl::ActiveTxnNode> Find(
-      const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key);
+      const TOTransactionImpl::ActiveTxnNode* core, const TxnKey& key,
+      TOTransaction::TOTransactionState* state);
 
   void Insert(const std::shared_ptr<TOTransactionImpl::ActiveTxnNode>& core);
 
@@ -139,8 +140,8 @@ class TOTransactionDBImpl : public TOTransactionDB {
 
   void StartBackgroundCleanThread();
 
-  void SetMaxConflictBytes(uint64_t bytes) {
-    max_conflict_bytes_ = bytes;
+  void SetMaxConflictBytes(uint64_t bytes) override {
+    max_conflict_bytes_.store(bytes, std::memory_order_relaxed);
   }
 
   virtual TOTransaction* BeginTransaction(const WriteOptions& write_options,
@@ -209,7 +210,7 @@ class TOTransactionDBImpl : public TOTransactionDB {
   size_t num_stripes_;
   TransactionID committed_max_txnid_;
   std::atomic<int64_t> current_conflict_bytes_;
-  int64_t max_conflict_bytes_;
+  std::atomic<uint64_t> max_conflict_bytes_;
   std::atomic<uint64_t> txn_commits_;
   std::atomic<uint64_t> txn_aborts_;
 
@@ -296,7 +297,7 @@ class TOTransactionDBImpl : public TOTransactionDB {
     // Check write conflict and add the key to uncommitted keys
     Status CheckKeyAndAddInLock(const TxnKey& key, const TransactionID& txn_id,
                                 const size_t& stripe_num,
-                                const size_t& max_mem_usage,
+                                uint64_t max_mem_usage,
                                 std::atomic<int64_t>* mem_usage);
 
     size_t CountInLock() const;
