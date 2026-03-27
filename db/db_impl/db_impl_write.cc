@@ -1194,13 +1194,13 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
   if (status.ok() && log_context->need_log_sync) {
     // Wait until the parallel syncs are finished. Any sync process has to sync
     // the front log too so it is enough to check the status of front()
-    // We do a while loop since log_sync_cv_ is signalled when any sync is
+    // We do a while loop since wal_io_cv_ is signalled when any sync is
     // finished
     // Note: there does not seem to be a reason to wait for parallel sync at
     // this early step but it is not important since parallel sync (SyncWAL) and
     // need_log_sync are usually not used together.
     while (logs_.front().IsSyncing()) {
-      log_sync_cv_.Wait();
+      wal_io_cv_.Wait();
     }
     for (auto& log : logs_) {
       // This is just to prevent the logs to be synced by a parallel SyncWAL

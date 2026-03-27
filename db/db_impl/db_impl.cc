@@ -190,7 +190,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       log_dir_synced_(false),
       log_empty_(true),
       persist_stats_cf_handle_(nullptr),
-      log_sync_cv_(&log_write_mutex_),
+      wal_io_cv_(&log_write_mutex_),
       total_log_size_(0),
       is_snapshot_supported_(true),
       write_buffer_manager_(immutable_db_options_.write_buffer_manager.get()),
@@ -1425,11 +1425,42 @@ int DBImpl::FindMinimumEmptyLevelFitting(
 Status DBImpl::FlushWAL(bool sync) {
   if (manual_wal_flush_) {
     IOStatus io_s;
+    log::Writer* cur_log_writer = nullptr;
+    uint64_t cur_log_number = 0;
     {
       // We need to lock log_write_mutex_ since logs_ might change concurrently
       InstrumentedMutexLock wl(&log_write_mutex_);
-      log::Writer* cur_log_writer = logs_.back().writer;
-      io_s = cur_log_writer->WriteBuffer();
+      // If another thread is already flushing the back log, wait for it
+      // to finish. Re-evaluate logs_.back() after waking because
+      // SwitchMemtable may have appended a new log during the wait.
+      while (logs_.back().IsFlushing()) {
+        wal_io_cv_.Wait();
+      }
+      auto& log = logs_.back();
+      log.PrepareForFlush();
+      cur_log_writer = log.writer;
+      cur_log_number = log.number;
+      // Swap the buffer under the lock so AddRecord() can continue
+      // writing to a fresh buffer without blocking.
+      cur_log_writer->file()->SwapBuffer();
+    }
+    // Write the swapped buffer to disk without holding the mutex.
+    io_s = cur_log_writer->file()->FlushSwappedBuffer();
+    {
+      InstrumentedMutexLock wl(&log_write_mutex_);
+      // Find the log we marked, since logs_.back() may have changed
+      // due to a concurrent SwitchMemtable.
+      bool found [[maybe_unused]] = false;
+      for (auto it = logs_.begin(); it != logs_.end(); ++it) {
+        if (it->number == cur_log_number) {
+          assert(it->IsFlushing());
+          it->FinishFlush();
+          found = true;
+          break;
+        }
+      }
+      assert(found);
+      wal_io_cv_.SignalAll();
     }
     if (!io_s.ok()) {
       ROCKS_LOG_ERROR(immutable_db_options_.info_log, "WAL flush error %s",
@@ -1466,10 +1497,46 @@ Status DBImpl::SyncWAL() {
     // This SyncWAL() call only cares about logs up to this number.
     current_log_number = logfile_number_;
 
-    while (logs_.front().number <= current_log_number &&
-           logs_.front().IsSyncing()) {
-      log_sync_cv_.Wait();
+    // Wait until no log in the range is being synced or flushed.
+    // Why check IsSyncing: another SyncWAL/SyncClosedLogs is already syncing
+    //   this log; we must not call PrepareForSync() twice concurrently.
+    // Why check IsFlushing: FlushWAL swapped this log's buffer and is writing
+    //   it to the OS via FlushSwappedBuffer() without holding
+    //   log_write_mutex_.  We must wait for two reasons:
+    //   (1) SyncWithoutFlush() calls writable_file_->Sync() concurrently with
+    //       FlushSwappedBuffer()'s writable_file_->Append() — a data race even
+    //       when IsSyncThreadSafe() is true because Append is not atomic with
+    //       Sync on all platforms.
+    //   (2) Semantic: the fsync must cover all data written by FlushWAL;
+    //       starting fsync before FlushSwappedBuffer() finishes may leave that
+    //       data un-synced even though SyncWAL() returned success.
+    // Once we exit this loop while still holding log_write_mutex_, no new
+    // FlushWAL can mark any of these logs as flushing again — FlushWAL only
+    // marks logs_.back() (number == logfile_number_) which is outside the
+    // range we are about to sync (number <= current_log_number).
+    auto wait_for_logs_ready = [&]() {
+      for (auto it = logs_.begin();
+           it != logs_.end() && it->number <= current_log_number; ++it) {
+        if (it->IsSyncing() || it->IsFlushing()) {
+          return true;  // need to wait
+        }
+      }
+      return false;
+    };
+    while (wait_for_logs_ready()) {
+      wal_io_cv_.Wait();
     }
+#ifndef NDEBUG
+    // Verify the invariant: no log in range is syncing or flushing.
+    // A log cannot become flushing again after this point while we hold
+    // log_write_mutex_, because FlushWAL only marks logs_.back() as flushing
+    // under the mutex, and logs_.back() is outside this range.
+    for (auto it = logs_.begin();
+         it != logs_.end() && it->number <= current_log_number; ++it) {
+      assert(!it->IsSyncing());
+      assert(!it->IsFlushing());
+    }
+#endif
     // First check that logs are safe to sync in background.
     for (auto it = logs_.begin();
          it != logs_.end() && it->number <= current_log_number; ++it) {
@@ -1599,7 +1666,7 @@ void DBImpl::MarkLogsSynced(uint64_t up_to, bool synced_dir,
       ++it;
     }
   }
-  log_sync_cv_.SignalAll();
+  wal_io_cv_.SignalAll();
 }
 
 void DBImpl::MarkLogsNotSynced(uint64_t up_to) {
@@ -1609,7 +1676,7 @@ void DBImpl::MarkLogsNotSynced(uint64_t up_to) {
     auto& wal = *it;
     wal.FinishSync();
   }
-  log_sync_cv_.SignalAll();
+  wal_io_cv_.SignalAll();
 }
 
 SequenceNumber DBImpl::GetLatestSequenceNumber() const {

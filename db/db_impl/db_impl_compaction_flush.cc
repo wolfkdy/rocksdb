@@ -88,10 +88,47 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
   InstrumentedMutexLock l(&log_write_mutex_);
   autovector<log::Writer*, 1> logs_to_sync;
   uint64_t current_log_number = logfile_number_;
-  while (logs_.front().number < current_log_number &&
-         logs_.front().IsSyncing()) {
-    log_sync_cv_.Wait();
+  // Wait until no closed log is being synced or flushed.
+  // Why check IsSyncing: another SyncClosedLogs/SyncWAL is already syncing
+  //   this log; we must not call PrepareForSync() twice concurrently.
+  // Why check IsFlushing: FlushWAL marks logs_.back() (number ==
+  //   logfile_number_) as flushing, then releases log_write_mutex_ to write
+  //   to disk via FlushSwappedBuffer().  A concurrent SwitchMemtable can
+  //   increment logfile_number_ in the meantime, making that log a "closed"
+  //   log that SyncClosedLogs would try to sync.  Sync() calls Flush() first
+  //   (writable_file_->Append on buf_), which would race with the concurrent
+  //   FlushSwappedBuffer() (also writable_file_->Append on flush_buf_) on the
+  //   same underlying file.  Waiting ensures the file is quiescent before we
+  //   start our own Flush()+fsync, and guarantees the fsync covers all data
+  //   written by FlushWAL.
+  // Once we exit this loop while still holding log_write_mutex_, no new
+  // FlushWAL can mark any of these closed logs as flushing again — FlushWAL
+  // only ever marks logs_.back(), which has number == logfile_number_ and is
+  // therefore outside the range [front, current_log_number).
+  auto wait_for_closed_logs_ready = [&]() {
+    for (auto it = logs_.begin();
+         it != logs_.end() && it->number < current_log_number; ++it) {
+      if (it->IsSyncing() || it->IsFlushing()) {
+        return true;
+      }
+    }
+    return false;
+  };
+  while (wait_for_closed_logs_ready()) {
+    wal_io_cv_.Wait();
   }
+#ifndef NDEBUG
+  // Verify the invariant: no closed log is syncing or flushing.
+  // A log cannot become flushing again after this point while we hold
+  // log_write_mutex_, because FlushWAL only marks logs_.back() as flushing
+  // under the mutex, and logs_.back() has number == logfile_number_ which
+  // is outside the closed range [front, current_log_number).
+  for (auto it = logs_.begin();
+       it != logs_.end() && it->number < current_log_number; ++it) {
+    assert(!it->IsSyncing());
+    assert(!it->IsFlushing());
+  }
+#endif
   for (auto it = logs_.begin();
        it != logs_.end() && it->number < current_log_number; ++it) {
     auto& log = *it;

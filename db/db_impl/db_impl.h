@@ -1607,6 +1607,7 @@ class DBImpl : public DB {
     }
 
     bool IsSyncing() { return getting_synced; }
+    bool IsFlushing() { return getting_flushed; }
 
     uint64_t GetPreSyncSize() {
       assert(getting_synced);
@@ -1615,6 +1616,10 @@ class DBImpl : public DB {
 
     void PrepareForSync() {
       assert(!getting_synced);
+      // A log cannot be synced while its buffer is being flushed to disk:
+      // SyncWAL and SyncClosedLogs wait for !IsFlushing() before calling
+      // PrepareForSync(), so getting_flushed must be false here.
+      assert(!getting_flushed);
       // Size is expected to be monotonically increasing.
       assert(writer->file()->GetFlushedSize() >= pre_sync_size);
       getting_synced = true;
@@ -1626,6 +1631,16 @@ class DBImpl : public DB {
       getting_synced = false;
     }
 
+    void PrepareForFlush() {
+      assert(!getting_flushed);
+      getting_flushed = true;
+    }
+
+    void FinishFlush() {
+      assert(getting_flushed);
+      getting_flushed = false;
+    }
+
     uint64_t number;
     // Visual Studio doesn't support deque's member to be noncopyable because
     // of a std::unique_ptr as a member.
@@ -1634,6 +1649,8 @@ class DBImpl : public DB {
    private:
     // true for some prefix of logs_
     bool getting_synced = false;
+    // true when background FlushWAL is flushing this log's buffer to disk
+    bool getting_flushed = false;
     // The size of the file before the sync happens. This amount is guaranteed
     // to be persisted even if appends happen during sync so it can be used for
     // tracking the synced size in MANIFEST.
@@ -2410,7 +2427,7 @@ class DBImpl : public DB {
   std::deque<LogWriterNumber> logs_;
 
   // Signaled when getting_synced becomes false for some of the logs_.
-  InstrumentedCondVar log_sync_cv_;
+  InstrumentedCondVar wal_io_cv_;
   // This is the app-level state that is written to the WAL but will be used
   // only during recovery. Using this feature enables not writing the state to
   // memtable on normal writes and hence improving the throughput. Each new

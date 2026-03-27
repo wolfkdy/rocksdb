@@ -1743,7 +1743,8 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
         std::move(lfile), log_fname, opt_file_options,
         immutable_db_options_.clock, io_tracer_, nullptr /* stats */, listeners,
         nullptr, tmp_set.Contains(FileType::kWalFile),
-        tmp_set.Contains(FileType::kWalFile)));
+        tmp_set.Contains(FileType::kWalFile),
+        immutable_db_options_.manual_wal_flush));
     *new_log = new log::Writer(std::move(file_writer), log_file_num,
                                immutable_db_options_.recycle_log_file_num > 0,
                                immutable_db_options_.manual_wal_flush,
