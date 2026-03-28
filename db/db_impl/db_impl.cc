@@ -56,6 +56,7 @@
 #include "env/unique_id_gen.h"
 #include "file/file_util.h"
 #include "file/filename.h"
+#include "file/manual_flush_writable_file_writer.h"
 #include "file/random_access_file_reader.h"
 #include "file/sst_file_manager_impl.h"
 #include "logging/auto_roll_logger.h"
@@ -1442,10 +1443,14 @@ Status DBImpl::FlushWAL(bool sync) {
       cur_log_number = log.number;
       // Swap the buffer under the lock so AddRecord() can continue
       // writing to a fresh buffer without blocking.
-      cur_log_writer->file()->SwapBuffer();
+      // Safe: CreateWAL() instantiates ManualFlushWritableFileWriter when
+      // manual_wal_flush is true (which is a precondition for this branch).
+      static_cast<ManualFlushWritableFileWriter*>(cur_log_writer->file())->SwapBuffer();
     }
     // Write the swapped buffer to disk without holding the mutex.
-    io_s = cur_log_writer->file()->FlushSwappedBuffer();
+    // Safe: CreateWAL() instantiates ManualFlushWritableFileWriter when
+    // manual_wal_flush is true (which is a precondition for this branch).
+    io_s = static_cast<ManualFlushWritableFileWriter*>(cur_log_writer->file())->FlushSwappedBuffer();
     {
       InstrumentedMutexLock wl(&log_write_mutex_);
       // Find the log we marked, since logs_.back() may have changed

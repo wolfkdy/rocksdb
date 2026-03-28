@@ -16,6 +16,7 @@
 #include "file/filename.h"
 #include "file/read_write_util.h"
 #include "file/sst_file_manager_impl.h"
+#include "file/manual_flush_writable_file_writer.h"
 #include "file/writable_file_writer.h"
 #include "logging/logging.h"
 #include "monitoring/persistent_stats_history.h"
@@ -1739,12 +1740,20 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
 
     const auto& listeners = immutable_db_options_.listeners;
     FileTypeSet tmp_set = immutable_db_options_.checksum_handoff_file_types;
-    std::unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
-        std::move(lfile), log_fname, opt_file_options,
-        immutable_db_options_.clock, io_tracer_, nullptr /* stats */, listeners,
-        nullptr, tmp_set.Contains(FileType::kWalFile),
-        tmp_set.Contains(FileType::kWalFile),
-        immutable_db_options_.manual_wal_flush));
+    std::unique_ptr<WritableFileWriter> file_writer;
+    if (immutable_db_options_.manual_wal_flush) {
+      file_writer.reset(new ManualFlushWritableFileWriter(
+          std::move(lfile), log_fname, opt_file_options,
+          immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
+          listeners, nullptr, tmp_set.Contains(FileType::kWalFile),
+          tmp_set.Contains(FileType::kWalFile)));
+    } else {
+      file_writer.reset(new WritableFileWriter(
+          std::move(lfile), log_fname, opt_file_options,
+          immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
+          listeners, nullptr, tmp_set.Contains(FileType::kWalFile),
+          tmp_set.Contains(FileType::kWalFile)));
+    }
     *new_log = new log::Writer(std::move(file_writer), log_file_num,
                                immutable_db_options_.recycle_log_file_num > 0,
                                immutable_db_options_.manual_wal_flush,

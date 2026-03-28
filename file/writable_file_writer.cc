@@ -71,9 +71,7 @@ IOStatus WritableFileWriter::Append(const Slice& data, uint32_t crc32c_checksum,
 
   // See whether we need to enlarge the buffer to avoid the flush
   if (buf_.Capacity() - buf_.CurrentSize() < left) {
-    // When manual_flush_ is true, allow buffer to grow beyond
-    // max_buffer_size_ to avoid any implicit I/O during Append().
-    size_t limit = manual_flush_ ? size_t(-1) : max_buffer_size_;
+    size_t limit = AppendBufferSizeLimit();
     for (size_t cap = buf_.Capacity();
          cap < limit;  // There is still room to increase
          cap *= 2) {
@@ -87,7 +85,7 @@ IOStatus WritableFileWriter::Append(const Slice& data, uint32_t crc32c_checksum,
   }
 
   // Flush only when buffered I/O
-  if (!use_direct_io() && !manual_flush_ &&
+  if (!use_direct_io() && ShouldImplicitFlushOnAppend() &&
       (buf_.Capacity() - buf_.CurrentSize()) < left) {
     if (buf_.CurrentSize() > 0) {
       s = Flush(op_rate_limiter_priority);
@@ -334,70 +332,12 @@ IOStatus WritableFileWriter::Close() {
   return s;
 }
 
-void WritableFileWriter::SwapBuffer() {
-  assert(manual_flush_);
-  // Double-buffering is only for buffered I/O; direct I/O has its own path.
-  assert(!use_direct_io());
-  assert(flush_buf_.CurrentSize() == 0);
-  // Ping-pong: reuse flush_buf_'s allocation as the new buf_,
-  // and move the full buf_ to flush_buf_ for writing to disk.
-  std::swap(buf_, flush_buf_);
-  // If buf_ has no allocation (first swap or after move), allocate one.
-  if (buf_.Capacity() == 0) {
-    buf_.Alignment(writable_file_->GetRequiredBufferAlignment());
-    buf_.AllocateNewBuffer(std::min((size_t)65536, max_buffer_size_));
-  }
-}
-
-IOStatus WritableFileWriter::FlushSwappedBuffer(
-    Env::IOPriority op_rate_limiter_priority) {
-  if (seen_error()) {
-    return AssertFalseAndGetStatusForPrevError();
-  }
-  assert(manual_flush_);
-  // Double-buffering is only for buffered I/O; direct I/O has its own path.
-  assert(!use_direct_io());
-  IOStatus s;
-
-  if (flush_buf_.CurrentSize() > 0) {
-    // Use WriteToFile() (not WriteBuffered()) to avoid touching buf_.
-    s = WriteToFile(flush_buf_.BufferStart(), flush_buf_.CurrentSize(),
-                    op_rate_limiter_priority);
-    if (!s.ok()) {
-      set_seen_error();
-      flush_buf_.Clear();
-      return s;
-    }
-  }
-  flush_buf_.Clear();
-
-  {
-    IOOptions io_options;
-    io_options.rate_limiter_priority =
-        WritableFileWriter::DecideRateLimiterPriority(
-            writable_file_->GetIOPriority(), op_rate_limiter_priority);
-    s = writable_file_->Flush(io_options, nullptr);
-  }
-
-  if (!s.ok()) {
-    set_seen_error();
-  }
-  return s;
-}
-
 // write out the cached data to the OS cache or storage if direct I/O
 // enabled
 IOStatus WritableFileWriter::Flush(Env::IOPriority op_rate_limiter_priority) {
   if (seen_error()) {
     return AssertFalseAndGetStatusForPrevError();
   }
-  // In manual_flush_ mode flush_buf_ is only non-empty while
-  // FlushSwappedBuffer() is running without the write mutex.  Callers that
-  // subsequently call Flush() (e.g. Sync -> Flush) must wait for
-  // IsFlushing() to clear before proceeding, so flush_buf_ must be empty by
-  // the time we get here.
-  assert(!manual_flush_ || flush_buf_.CurrentSize() == 0);
-
   IOStatus s;
   TEST_KILL_RANDOM_WITH_WEIGHT("WritableFileWriter::Flush:0", REDUCE_ODDS2);
 
@@ -708,31 +648,13 @@ IOStatus WritableFileWriter::WriteBuffered(
   if (seen_error()) {
     return AssertFalseAndGetStatusForPrevError();
   }
-  // In manual_flush_ mode flush_buf_ is only non-empty while
-  // FlushSwappedBuffer() is running concurrently.  WriteBuffered() must not
-  // be called in that window — it would race on the underlying file with
-  // FlushSwappedBuffer()'s WriteToFile().  Callers must wait for IsFlushing()
-  // to clear (via wal_io_cv_) before issuing any Flush/Sync that reaches here.
-  assert(!manual_flush_ || flush_buf_.CurrentSize() == 0);
 
   IOStatus s = WriteToFile(data, size, op_rate_limiter_priority);
-  if (!s.ok()) {
-    // If writable_file_->Append() failed, then the data may or may not
-    // exist in the underlying memory buffer, OS page cache, remote file
-    // system's buffer, etc. If WritableFileWriter keeps the data in
-    // buf_, then a future Close() or write retry may send the data to
-    // the underlying file again. If the data does exist in the
-    // underlying buffer and gets written to the file eventually despite
-    // returning error, the file may end up with two duplicate pieces of
-    // data. Therefore, clear the buf_ at the WritableFileWriter layer
-    // and let caller determine error handling.
-    buf_.Size(0);
-    buffered_data_crc32c_checksum_ = 0;
-    set_seen_error();
-    return s;
-  }
   buf_.Size(0);
   buffered_data_crc32c_checksum_ = 0;
+  if (!s.ok()) {
+    set_seen_error();
+  }
   return s;
 }
 

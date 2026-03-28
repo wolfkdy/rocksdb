@@ -138,11 +138,6 @@ class WritableFileWriter {
   std::string file_name_;
   FSWritableFilePtr writable_file_;
   SystemClock* clock_;
-  AlignedBuffer buf_;
-  // Second buffer used for double-buffering in manual flush mode.
-  // SwapBuffer() moves buf_ here; FlushSwappedBuffer() writes it to disk.
-  AlignedBuffer flush_buf_;
-  size_t max_buffer_size_;
   // Actually written data size can be used for truncate
   // not counting padding data
   std::atomic<uint64_t> filesize_;
@@ -172,7 +167,6 @@ class WritableFileWriter {
   bool perform_data_verification_;
   uint32_t buffered_data_crc32c_checksum_;
   bool buffered_data_with_checksum_;
-  bool manual_flush_;
 #ifndef ROCKSDB_LITE
   Temperature temperature_;
 #endif  // ROCKSDB_LITE
@@ -186,13 +180,10 @@ class WritableFileWriter {
       const std::vector<std::shared_ptr<EventListener>>& listeners = {},
       FileChecksumGenFactory* file_checksum_gen_factory = nullptr,
       bool perform_data_verification = false,
-      bool buffered_data_with_checksum = false,
-      bool manual_flush = false)
+      bool buffered_data_with_checksum = false)
       : file_name_(_file_name),
         writable_file_(std::move(file), io_tracer, _file_name),
         clock_(clock),
-        buf_(),
-        max_buffer_size_(options.writable_file_max_buffer_size),
         filesize_(0),
         flushed_size_(0),
 #ifndef ROCKSDB_LITE
@@ -210,7 +201,8 @@ class WritableFileWriter {
         perform_data_verification_(perform_data_verification),
         buffered_data_crc32c_checksum_(0),
         buffered_data_with_checksum_(buffered_data_with_checksum),
-        manual_flush_(manual_flush) {
+        buf_(),
+        max_buffer_size_(options.writable_file_max_buffer_size) {
 #ifndef ROCKSDB_LITE
     temperature_ = options.temperature;
 #endif  // ROCKSDB_LITE
@@ -246,7 +238,7 @@ class WritableFileWriter {
 
   WritableFileWriter& operator=(const WritableFileWriter&) = delete;
 
-  ~WritableFileWriter() {
+  virtual ~WritableFileWriter() {
     auto s = Close();
     s.PermitUncheckedError();
   }
@@ -262,16 +254,6 @@ class WritableFileWriter {
                Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
   IOStatus Flush(Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
-
-  // Swap the current in-memory buffer to flush_buf_ for manual flush mode.
-  // After this call, buf_ is empty and ready for new Append()s.
-  // Must be called under the write mutex.
-  void SwapBuffer();
-
-  // Write flush_buf_ to disk. Safe to call without any mutex since
-  // it does not touch buf_. Must be called after SwapBuffer().
-  IOStatus FlushSwappedBuffer(
-      Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
   IOStatus Close();
 
@@ -329,22 +311,36 @@ class WritableFileWriter {
     return IOStatus::IOError("Writer has previous error.");
   }
 
- private:
+ protected:
+  AlignedBuffer buf_;
+  size_t max_buffer_size_;
+
+  // Returns the maximum size buf_ is allowed to grow to during Append().
+  // Base returns max_buffer_size_; subclasses may return size_t(-1) to
+  // allow unbounded growth (suppressing implicit I/O).
+  virtual size_t AppendBufferSizeLimit() const { return max_buffer_size_; }
+
+  // Returns true if Append() should implicitly flush buf_ to the OS when
+  // buf_ is full.  Base returns true; manual-flush subclass returns false.
+  virtual bool ShouldImplicitFlushOnAppend() const { return true; }
+
+  // Core write loop: writes data to the underlying file with rate limiting
+  // and verification. Does NOT touch buf_ or buffered_data_crc32c_checksum_.
+  IOStatus WriteToFile(const char* data, size_t size,
+                       Env::IOPriority op_rate_limiter_priority);
+
   // Decide the Rate Limiter priority.
   static Env::IOPriority DecideRateLimiterPriority(
       Env::IOPriority writable_file_io_priority,
       Env::IOPriority op_rate_limiter_priority);
 
+ private:
   // Used when os buffering is OFF and we are writing
   // DMA such as in Direct I/O mode
 #ifndef ROCKSDB_LITE
   IOStatus WriteDirect(Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteDirectWithChecksum(Env::IOPriority op_rate_limiter_priority);
 #endif  // !ROCKSDB_LITE
-  // Core write loop: writes data to the underlying file with rate limiting
-  // and verification. Does NOT touch buf_ or buffered_data_crc32c_checksum_.
-  IOStatus WriteToFile(const char* data, size_t size,
-                       Env::IOPriority op_rate_limiter_priority);
   // Normal write. Calls WriteToFile then clears buf_.
   IOStatus WriteBuffered(const char* data, size_t size,
                          Env::IOPriority op_rate_limiter_priority);
