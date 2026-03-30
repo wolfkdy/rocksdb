@@ -1426,6 +1426,10 @@ int DBImpl::FindMinimumEmptyLevelFitting(
 
 Status DBImpl::FlushWAL(bool sync) {
   if (manual_wal_flush_) {
+    // nonblocking_wal_io requires manual_wal_flush == false, so this
+    // WriteBuffer() path is never taken — buffer draining is done
+    // exclusively by SyncWALNonBlockingIO's SwapBuffer + FlushSwappedBuffer.
+    assert(!nonblocking_wal_io_);
     IOStatus io_s;
     {
       // We need to lock log_write_mutex_ since logs_ might change concurrently
@@ -1593,12 +1597,10 @@ Status DBImpl::SyncWALNonBlockingIO() {
       status = io_s;
       break;
     }
-    if (io_s.ok()) {
-      io_s = log->file()->SyncWithoutFlush(immutable_db_options_.use_fsync);
-      if (!io_s.ok()) {
-        status = io_s;
-        break;
-      }
+    io_s = log->file()->SyncWithoutFlush(immutable_db_options_.use_fsync);
+    if (!io_s.ok()) {
+      status = io_s;
+      break;
     }
   }
 

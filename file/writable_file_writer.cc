@@ -84,6 +84,12 @@ IOStatus WritableFileWriter::Append(const Slice& data, uint32_t crc32c_checksum,
     }
   }
 
+  // When implicit flush is suppressed (e.g. nonblocking_wal_io), the
+  // enlargement loop above must have grown the buffer to fit all the data.
+  // No I/O should happen during Append() in this mode.
+  assert(ShouldImplicitFlushOnAppend() ||
+         (buf_.Capacity() - buf_.CurrentSize()) >= left);
+
   // Flush only when buffered I/O
   if (!use_direct_io() && ShouldImplicitFlushOnAppend() &&
       (buf_.Capacity() - buf_.CurrentSize()) < left) {
@@ -368,6 +374,13 @@ IOStatus WritableFileWriter::Flush(Env::IOPriority op_rate_limiter_priority) {
     }
   }
 
+  s = FlushOSCacheAndMaybeRangeSync(op_rate_limiter_priority);
+  return s;
+}
+
+IOStatus WritableFileWriter::FlushOSCacheAndMaybeRangeSync(
+    Env::IOPriority op_rate_limiter_priority) {
+  IOStatus s;
   {
 #ifndef ROCKSDB_LITE
     FileOperationInfo::StartTimePoint start_ts;

@@ -1298,6 +1298,17 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   if (UNLIKELY(needs_locking)) {
     log_write_mutex_.Unlock();
   }
+  if (nonblocking_wal_io_) {
+    static constexpr size_t kWALBufferWarningSize = 100 << 20;  // 100MB
+    size_t buf_size = log_writer->file()->BufferSize();
+    if (UNLIKELY(buf_size >= kWALBufferWarningSize)) {
+      ROCKS_LOG_WARN(
+          immutable_db_options_.info_log,
+          "WAL buffer for log #%" PRIu64
+          " has grown to %zu bytes. SyncWAL may not be draining fast enough.",
+          log_writer->get_log_number(), buf_size);
+    }
+  }
   if (log_used != nullptr) {
     *log_used = logfile_number_;
   }

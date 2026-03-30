@@ -294,6 +294,12 @@ Status DBImpl::ValidateOptions(const DBOptions& db_options) {
         "two_write_queues == false");
   }
 
+  if (db_options.nonblocking_wal_io &&
+      db_options.use_direct_io_for_flush_and_compaction) {
+    return Status::InvalidArgument(
+        "nonblocking_wal_io is not compatible with direct I/O");
+  }
+
   if (db_options.use_direct_io_for_flush_and_compaction &&
       0 == db_options.writable_file_max_buffer_size) {
     return Status::InvalidArgument(
@@ -1749,6 +1755,11 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
     FileTypeSet tmp_set = immutable_db_options_.checksum_handoff_file_types;
     std::unique_ptr<WritableFileWriter> file_writer;
     if (immutable_db_options_.nonblocking_wal_io) {
+      if (!lfile->IsSyncThreadSafe()) {
+        return IOStatus::NotSupported(
+            "nonblocking_wal_io requires a filesystem whose WritableFile "
+            "supports IsSyncThreadSafe() == true");
+      }
       file_writer.reset(new NonBlockingIOWritableFileWriter(
           std::move(lfile), log_fname, opt_file_options,
           immutable_db_options_.clock, io_tracer_, nullptr /* stats */,

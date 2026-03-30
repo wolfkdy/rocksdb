@@ -288,6 +288,8 @@ class WritableFileWriter {
 
   bool use_direct_io() { return writable_file_->use_direct_io(); }
 
+  size_t BufferSize() const { return buf_.CurrentSize(); }
+
   bool TEST_BufferIsEmpty() { return buf_.CurrentSize() == 0; }
 
   void TEST_SetFileChecksumGenerator(
@@ -329,6 +331,13 @@ class WritableFileWriter {
   // and verification. Does NOT touch buf_ or buffered_data_crc32c_checksum_.
   IOStatus WriteToFile(const char* data, size_t size,
                        Env::IOPriority op_rate_limiter_priority);
+
+  // Issue writable_file_->Flush() to push data to the OS, then perform
+  // periodic RangeSync if bytes_per_sync_ is configured. Shared by
+  // WritableFileWriter::Flush() and NonBlockingIOWritableFileWriter::
+  // FlushSwappedBuffer().
+  IOStatus FlushOSCacheAndMaybeRangeSync(
+      Env::IOPriority op_rate_limiter_priority);
 
   // Decide the Rate Limiter priority.
   static Env::IOPriority DecideRateLimiterPriority(

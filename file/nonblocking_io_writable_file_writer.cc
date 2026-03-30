@@ -34,6 +34,10 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSwappedBuffer(
   IOStatus s;
 
   if (flush_buf_.CurrentSize() > 0) {
+    // filesize_ was already advanced by Append() when the data entered buf_
+    // (before it was swapped into flush_buf_), so we must not update it again.
+    // flushed_size_ is updated inside WriteToFile().
+    assert(GetFlushedSize() + flush_buf_.CurrentSize() <= GetFileSize());
     // Use WriteToFile() rather than WriteBuffered() to avoid touching buf_,
     // which may be receiving new Append()s concurrently.
     s = WriteToFile(flush_buf_.BufferStart(), flush_buf_.CurrentSize(),
@@ -46,16 +50,7 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSwappedBuffer(
   }
   flush_buf_.Clear();
 
-  {
-    IOOptions io_options;
-    io_options.rate_limiter_priority = DecideRateLimiterPriority(
-        writable_file()->GetIOPriority(), op_rate_limiter_priority);
-    s = writable_file()->Flush(io_options, nullptr);
-  }
-
-  if (!s.ok()) {
-    set_seen_error();
-  }
+  s = FlushOSCacheAndMaybeRangeSync(op_rate_limiter_priority);
   return s;
 }
 
