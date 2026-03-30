@@ -1230,6 +1230,14 @@ struct DBOptions {
   // file.
   bool manual_wal_flush = false;
 
+  // If true, WAL writes use a non-blocking I/O path: Append() buffers data
+  // in memory without flushing to the OS, and the buffer is drained (flushed
+  // + fsynced) when SyncWAL() is called.  The application is expected to call
+  // SyncWAL() periodically (e.g. every 100ms).  Data in the user-space buffer
+  // is lost on process crash between SyncWAL() calls.
+  // Requires: manual_wal_flush == false AND two_write_queues == false.
+  bool nonblocking_wal_io = false;
+
   // This feature is WORK IN PROGRESS
   // If enabled WAL records will be compressed before they are written.
   // Only zstd is supported. Compressed WAL records will be read in supported

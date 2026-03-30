@@ -88,6 +88,10 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
   InstrumentedMutexLock l(&log_write_mutex_);
   autovector<log::Writer*, 1> logs_to_sync;
   uint64_t current_log_number = logfile_number_;
+  // TODO(nonblocking_wal_io): When nonblocking_wal_io_ is enabled, a closed
+  // log might still have unflushed data in its active buffer from before it
+  // was closed.  Evaluate whether we need to swap+flush that buffer here, or
+  // whether SwitchMemtable already guarantees the buffer is drained.
   while (logs_.front().number < current_log_number &&
          logs_.front().IsSyncing()) {
     log_sync_cv_.Wait();

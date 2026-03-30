@@ -761,6 +761,7 @@ set(SOURCES
         file/readahead_raf.cc
         file/sequence_file_reader.cc
         file/sst_file_manager_impl.cc
+        file/nonblocking_io_writable_file_writer.cc
         file/writable_file_writer.cc
         logging/auto_roll_logger.cc
         logging/event_logger.cc

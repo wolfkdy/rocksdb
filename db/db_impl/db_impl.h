@@ -2101,6 +2101,10 @@ class DBImpl : public DB {
   ColumnFamilyData* PickCompactionFromQueue(
       std::unique_ptr<TaskLimiterToken>* token, LogBuffer* log_buffer);
 
+  // SyncWAL implementation for nonblocking_wal_io mode: swap buffers under
+  // the lock, then flush + fsync without holding it.
+  Status SyncWALNonBlockingIO();
+
   // helper function to call after some of the logs_ were synced
   void MarkLogsSynced(uint64_t up_to, bool synced_dir, VersionEdit* edit);
   Status ApplyWALToManifest(VersionEdit* edit);
@@ -2621,6 +2625,7 @@ class DBImpl : public DB {
   // In 2PC these are the writes at Prepare phase.
   const bool two_write_queues_;
   const bool manual_wal_flush_;
+  const bool nonblocking_wal_io_;
 
   // LastSequence also indicates last published sequence visibile to the
   // readers. Otherwise LastPublishedSequence should be used.

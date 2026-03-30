@@ -661,6 +661,184 @@ TEST_P(DBWriteTest, ConcurrentlyDisabledWAL) {
     ASSERT_LE(bytes_num, 1024 * 100);
 }
 
+// Tests for NonBlockingIOWritableFileWriter (nonblocking_wal_io mode).
+class DBWriteNonBlockingIOTest : public DBTestBase {
+ public:
+  DBWriteNonBlockingIOTest()
+      : DBTestBase("db_write_nonblocking_io_test", /*env_do_fsync=*/true) {}
+};
+
+// Verify that writes can proceed concurrently while SyncWAL is writing
+// the swapped buffer to disk.
+TEST_F(DBWriteNonBlockingIOTest, ConcurrentWriteDuringSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("key1", "val1"));
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency({
+      {"DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer",
+       "DBWriteNonBlockingIOTest::ConcurrentWriteDuringSyncWAL:DoPut"},
+      {"DBWriteNonBlockingIOTest::ConcurrentWriteDuringSyncWAL:PutDone",
+       "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync"},
+  });
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread sync_thread([&]() { ASSERT_OK(db_->SyncWAL()); });
+
+  TEST_SYNC_POINT(
+      "DBWriteNonBlockingIOTest::ConcurrentWriteDuringSyncWAL:DoPut");
+  ASSERT_OK(Put("key2", "val2"));
+  TEST_SYNC_POINT(
+      "DBWriteNonBlockingIOTest::ConcurrentWriteDuringSyncWAL:PutDone");
+
+  sync_thread.join();
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  // Sync the second Put's data.
+  ASSERT_OK(db_->SyncWAL());
+
+  ASSERT_EQ("val1", Get("key1"));
+  ASSERT_EQ("val2", Get("key2"));
+}
+
+// Verify that SwitchMemtable waits for an in-progress SyncWAL to finish
+// before calling WriteBuffer() on the same log.
+TEST_F(DBWriteNonBlockingIOTest, SwitchMemtableWaitsForSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("key1", "val1"));
+
+  std::atomic<bool> sync_flush_done{false};
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync",
+      [&](void*) { sync_flush_done.store(true); });
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency({
+      {"DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer",
+       "DBWriteNonBlockingIOTest::SwitchMemtableWaitsForSyncWAL:StartSwitch"},
+      {"DBWriteNonBlockingIOTest::SwitchMemtableWaitsForSyncWAL:SwitchStarted",
+       "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync"},
+  });
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread sync_thread([&]() { ASSERT_OK(db_->SyncWAL()); });
+
+  TEST_SYNC_POINT(
+      "DBWriteNonBlockingIOTest::SwitchMemtableWaitsForSyncWAL:StartSwitch");
+
+  port::Thread switch_thread([&]() {
+    ASSERT_OK(dbfull()->TEST_SwitchMemtable());
+    // SwitchMemtable's WriteBuffer() must not proceed until SyncWAL finishes.
+    ASSERT_TRUE(sync_flush_done.load());
+  });
+
+  env_->SleepForMicroseconds(100000);  // 100ms
+
+  TEST_SYNC_POINT(
+      "DBWriteNonBlockingIOTest::SwitchMemtableWaitsForSyncWAL:SwitchStarted");
+
+  sync_thread.join();
+  switch_thread.join();
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_OK(db_->SyncWAL());
+  ASSERT_EQ("val1", Get("key1"));
+}
+
+// Verify data durability: after SyncWAL + Close + reopen, all data is
+// recovered.
+TEST_F(DBWriteNonBlockingIOTest, RecoveryAfterSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  for (int i = 0; i < 100; i++) {
+    ASSERT_OK(Put("key" + std::to_string(i), "val" + std::to_string(i)));
+  }
+
+  ASSERT_OK(db_->SyncWAL());
+  Close();
+  Reopen(options);
+
+  for (int i = 0; i < 100; i++) {
+    ASSERT_EQ("val" + std::to_string(i), Get("key" + std::to_string(i)));
+  }
+}
+
+// Stress test: many threads writing concurrently with periodic SyncWAL.
+TEST_F(DBWriteNonBlockingIOTest, StressWriteWithSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  const int kNumWriters = 4;
+  const int kWritesPerThread = 200;
+  std::atomic<int> errors{0};
+
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      for (int i = 0; i < kWritesPerThread; i++) {
+        auto s = Put("t" + std::to_string(t) + "_k" + std::to_string(i),
+                      "val" + std::to_string(i));
+        if (!s.ok()) errors.fetch_add(1);
+      }
+    });
+  }
+
+  std::atomic<bool> stop_syncer{false};
+  port::Thread syncer([&]() {
+    while (!stop_syncer.load()) {
+      auto s = db_->SyncWAL();
+      if (!s.ok()) errors.fetch_add(1);
+    }
+  });
+
+  for (auto& w : writers) {
+    w.join();
+  }
+  stop_syncer.store(true);
+  syncer.join();
+
+  ASSERT_EQ(0, errors.load());
+
+  ASSERT_OK(db_->SyncWAL());
+
+  for (int t = 0; t < kNumWriters; t++) {
+    for (int i = 0; i < kWritesPerThread; i++) {
+      ASSERT_EQ("val" + std::to_string(i),
+                Get("t" + std::to_string(t) + "_k" + std::to_string(i)));
+    }
+  }
+}
+
+// Verify that nonblocking_wal_io is incompatible with manual_wal_flush.
+TEST_F(DBWriteNonBlockingIOTest, IncompatibleWithManualWalFlush) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  options.manual_wal_flush = true;
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument());
+}
+
+// Verify that nonblocking_wal_io is incompatible with two_write_queues.
+TEST_F(DBWriteNonBlockingIOTest, IncompatibleWithTwoWriteQueues) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  options.two_write_queues = true;
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument());
+}
+
 INSTANTIATE_TEST_CASE_P(DBWriteTestInstance, DBWriteTest,
                         testing::Values(DBTestBase::kDefault,
                                         DBTestBase::kConcurrentWALWrites,

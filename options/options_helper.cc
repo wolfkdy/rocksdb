@@ -167,6 +167,7 @@ DBOptions BuildDBOptions(const ImmutableDBOptions& immutable_db_options,
   options.allow_ingest_behind = immutable_db_options.allow_ingest_behind;
   options.two_write_queues = immutable_db_options.two_write_queues;
   options.manual_wal_flush = immutable_db_options.manual_wal_flush;
+  options.nonblocking_wal_io = immutable_db_options.nonblocking_wal_io;
   options.wal_compression = immutable_db_options.wal_compression;
   options.atomic_flush = immutable_db_options.atomic_flush;
   options.avoid_unnecessary_blocking_io =

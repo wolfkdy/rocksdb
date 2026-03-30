@@ -383,6 +383,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, manual_wal_flush),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"nonblocking_wal_io",
+         {offsetof(struct ImmutableDBOptions, nonblocking_wal_io),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"wal_compression",
          {offsetof(struct ImmutableDBOptions, wal_compression),
           OptionType::kCompressionType, OptionVerificationType::kNormal,
@@ -743,6 +747,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       allow_ingest_behind(options.allow_ingest_behind),
       two_write_queues(options.two_write_queues),
       manual_wal_flush(options.manual_wal_flush),
+      nonblocking_wal_io(options.nonblocking_wal_io),
       wal_compression(options.wal_compression),
       atomic_flush(options.atomic_flush),
       avoid_unnecessary_blocking_io(options.avoid_unnecessary_blocking_io),
@@ -901,6 +906,8 @@ void ImmutableDBOptions::Dump(Logger* log) const {
                    two_write_queues);
   ROCKS_LOG_HEADER(log, "            Options.manual_wal_flush: %d",
                    manual_wal_flush);
+  ROCKS_LOG_HEADER(log, "            Options.nonblocking_wal_io: %d",
+                   nonblocking_wal_io);
   ROCKS_LOG_HEADER(log, "            Options.wal_compression: %d",
                    wal_compression);
   ROCKS_LOG_HEADER(log, "            Options.atomic_flush: %d", atomic_flush);

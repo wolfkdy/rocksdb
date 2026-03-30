@@ -138,8 +138,10 @@ class WritableFileWriter {
   std::string file_name_;
   FSWritableFilePtr writable_file_;
   SystemClock* clock_;
+ protected:
   AlignedBuffer buf_;
   size_t max_buffer_size_;
+ private:
   // Actually written data size can be used for truncate
   // not counting padding data
   std::atomic<uint64_t> filesize_;
@@ -240,7 +242,7 @@ class WritableFileWriter {
 
   WritableFileWriter& operator=(const WritableFileWriter&) = delete;
 
-  ~WritableFileWriter() {
+  virtual ~WritableFileWriter() {
     auto s = Close();
     s.PermitUncheckedError();
   }
@@ -313,19 +315,34 @@ class WritableFileWriter {
     return IOStatus::IOError("Writer has previous error.");
   }
 
- private:
+ protected:
+  // Returns the maximum size buf_ is allowed to grow to during Append().
+  // Base returns max_buffer_size_; subclasses may return size_t(-1) to allow
+  // unbounded growth (suppressing implicit I/O).
+  virtual size_t AppendBufferSizeLimit() const { return max_buffer_size_; }
+
+  // Returns true if Append() should implicitly flush buf_ to the OS when
+  // buf_ is full. Base returns true; non-blocking subclass returns false.
+  virtual bool ShouldImplicitFlushOnAppend() const { return true; }
+
+  // Core write loop: writes data to the underlying file with rate limiting
+  // and verification. Does NOT touch buf_ or buffered_data_crc32c_checksum_.
+  IOStatus WriteToFile(const char* data, size_t size,
+                       Env::IOPriority op_rate_limiter_priority);
+
   // Decide the Rate Limiter priority.
   static Env::IOPriority DecideRateLimiterPriority(
       Env::IOPriority writable_file_io_priority,
       Env::IOPriority op_rate_limiter_priority);
 
+ private:
   // Used when os buffering is OFF and we are writing
   // DMA such as in Direct I/O mode
 #ifndef ROCKSDB_LITE
   IOStatus WriteDirect(Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteDirectWithChecksum(Env::IOPriority op_rate_limiter_priority);
 #endif  // !ROCKSDB_LITE
-  // Normal write.
+  // Normal write. Calls WriteToFile then clears buf_.
   IOStatus WriteBuffered(const char* data, size_t size,
                          Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteBufferedWithChecksum(const char* data, size_t size,

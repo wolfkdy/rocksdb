@@ -71,14 +71,13 @@ IOStatus WritableFileWriter::Append(const Slice& data, uint32_t crc32c_checksum,
 
   // See whether we need to enlarge the buffer to avoid the flush
   if (buf_.Capacity() - buf_.CurrentSize() < left) {
+    size_t limit = AppendBufferSizeLimit();
     for (size_t cap = buf_.Capacity();
-         cap < max_buffer_size_;  // There is still room to increase
+         cap < limit;  // There is still room to increase
          cap *= 2) {
-      // See whether the next available size is large enough.
-      // Buffer will never be increased to more than max_buffer_size_.
-      size_t desired_capacity = std::min(cap * 2, max_buffer_size_);
+      size_t desired_capacity = std::min(cap * 2, limit);
       if (desired_capacity - buf_.CurrentSize() >= left ||
-          (use_direct_io() && desired_capacity == max_buffer_size_)) {
+          (use_direct_io() && desired_capacity == limit)) {
         buf_.AllocateNewBuffer(desired_capacity, true);
         break;
       }
@@ -86,7 +85,8 @@ IOStatus WritableFileWriter::Append(const Slice& data, uint32_t crc32c_checksum,
   }
 
   // Flush only when buffered I/O
-  if (!use_direct_io() && (buf_.Capacity() - buf_.CurrentSize()) < left) {
+  if (!use_direct_io() && ShouldImplicitFlushOnAppend() &&
+      (buf_.Capacity() - buf_.CurrentSize()) < left) {
     if (buf_.CurrentSize() > 0) {
       s = Flush(op_rate_limiter_priority);
       if (!s.ok()) {
@@ -565,14 +565,10 @@ IOStatus WritableFileWriter::RangeSync(uint64_t offset, uint64_t nbytes) {
   return s;
 }
 
-// This method writes to disk the specified data and makes use of the rate
-// limiter if available
-IOStatus WritableFileWriter::WriteBuffered(
+// Core write loop: writes data to the underlying file with rate limiting and
+// data verification. Does NOT touch buf_ or buffered_data_crc32c_checksum_.
+IOStatus WritableFileWriter::WriteToFile(
     const char* data, size_t size, Env::IOPriority op_rate_limiter_priority) {
-  if (seen_error()) {
-    return AssertFalseAndGetStatusForPrevError();
-  }
-
   IOStatus s;
   assert(!use_direct_io());
   const char* src = data;
@@ -618,19 +614,6 @@ IOStatus WritableFileWriter::WriteBuffered(
         } else {
           s = writable_file_->Append(Slice(src, allowed), io_options, nullptr);
         }
-        if (!s.ok()) {
-          // If writable_file_->Append() failed, then the data may or may not
-          // exist in the underlying memory buffer, OS page cache, remote file
-          // system's buffer, etc. If WritableFileWriter keeps the data in
-          // buf_, then a future Close() or write retry may send the data to
-          // the underlying file again. If the data does exist in the
-          // underlying buffer and gets written to the file eventually despite
-          // returning error, the file may end up with two duplicate pieces of
-          // data. Therefore, clear the buf_ at the WritableFileWriter layer
-          // and let caller determine error handling.
-          buf_.Size(0);
-          buffered_data_crc32c_checksum_ = 0;
-        }
         SetPerfLevel(prev_perf_level);
       }
 #ifndef ROCKSDB_LITE
@@ -644,7 +627,6 @@ IOStatus WritableFileWriter::WriteBuffered(
       }
 #endif
       if (!s.ok()) {
-        set_seen_error();
         return s;
       }
     }
@@ -657,11 +639,30 @@ IOStatus WritableFileWriter::WriteBuffered(
     uint64_t cur_size = flushed_size_.load(std::memory_order_acquire);
     flushed_size_.store(cur_size + allowed, std::memory_order_release);
   }
+  return s;
+}
+
+// This method writes to disk the specified data and makes use of the rate
+// limiter if available
+IOStatus WritableFileWriter::WriteBuffered(
+    const char* data, size_t size, Env::IOPriority op_rate_limiter_priority) {
+  if (seen_error()) {
+    return AssertFalseAndGetStatusForPrevError();
+  }
+
+  IOStatus s = WriteToFile(data, size, op_rate_limiter_priority);
+  if (!s.ok()) {
+    // If writable_file_->Append() failed, then the data may or may not
+    // exist in the underlying memory buffer, OS page cache, remote file
+    // system's buffer, etc. Clear the buf_ at the WritableFileWriter layer
+    // and let caller determine error handling.
+    buf_.Size(0);
+    buffered_data_crc32c_checksum_ = 0;
+    set_seen_error();
+    return s;
+  }
   buf_.Size(0);
   buffered_data_crc32c_checksum_ = 0;
-  if (!s.ok()) {
-    set_seen_error();
-  }
   return s;
 }
 

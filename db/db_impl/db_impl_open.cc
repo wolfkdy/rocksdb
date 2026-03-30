@@ -14,6 +14,7 @@
 #include "db/periodic_task_scheduler.h"
 #include "env/composite_env_wrapper.h"
 #include "file/filename.h"
+#include "file/nonblocking_io_writable_file_writer.h"
 #include "file/read_write_util.h"
 #include "file/sst_file_manager_impl.h"
 #include "file/writable_file_writer.h"
@@ -284,6 +285,13 @@ Status DBImpl::ValidateOptions(const DBOptions& db_options) {
   if (db_options.atomic_flush && db_options.best_efforts_recovery) {
     return Status::InvalidArgument(
         "atomic_flush is currently incompatible with best-efforts recovery");
+  }
+
+  if (db_options.nonblocking_wal_io &&
+      (db_options.manual_wal_flush || db_options.two_write_queues)) {
+    return Status::InvalidArgument(
+        "nonblocking_wal_io requires manual_wal_flush == false and "
+        "two_write_queues == false");
   }
 
   if (db_options.use_direct_io_for_flush_and_compaction &&
@@ -1739,11 +1747,20 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
 
     const auto& listeners = immutable_db_options_.listeners;
     FileTypeSet tmp_set = immutable_db_options_.checksum_handoff_file_types;
-    std::unique_ptr<WritableFileWriter> file_writer(new WritableFileWriter(
-        std::move(lfile), log_fname, opt_file_options,
-        immutable_db_options_.clock, io_tracer_, nullptr /* stats */, listeners,
-        nullptr, tmp_set.Contains(FileType::kWalFile),
-        tmp_set.Contains(FileType::kWalFile)));
+    std::unique_ptr<WritableFileWriter> file_writer;
+    if (immutable_db_options_.nonblocking_wal_io) {
+      file_writer.reset(new NonBlockingIOWritableFileWriter(
+          std::move(lfile), log_fname, opt_file_options,
+          immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
+          listeners, nullptr, tmp_set.Contains(FileType::kWalFile),
+          tmp_set.Contains(FileType::kWalFile)));
+    } else {
+      file_writer.reset(new WritableFileWriter(
+          std::move(lfile), log_fname, opt_file_options,
+          immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
+          listeners, nullptr, tmp_set.Contains(FileType::kWalFile),
+          tmp_set.Contains(FileType::kWalFile)));
+    }
     *new_log = new log::Writer(std::move(file_writer), log_file_num,
                                immutable_db_options_.recycle_log_file_num > 0,
                                immutable_db_options_.manual_wal_flush,

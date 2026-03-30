@@ -1286,10 +1286,10 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   // from the two queues anyway and log_write_mutex_ is already held. Otherwise
   // if manual_wal_flush_ is enabled we need to protect log_writer->AddRecord
   // from possible concurrent calls via the FlushWAL by the application.
-  const bool needs_locking = manual_wal_flush_ && !two_write_queues_;
-  // Due to performance cocerns of missed branch prediction penalize the new
-  // manual_wal_flush_ feature (by UNLIKELY) instead of the more common case
-  // when we do not need any locking.
+  // When nonblocking_wal_io_ is enabled, we need to protect AddRecord from
+  // the concurrent buffer swap in SyncWALNonBlockingIO().
+  const bool needs_locking =
+      (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
   if (UNLIKELY(needs_locking)) {
     log_write_mutex_.Lock();
   }
@@ -1360,7 +1360,8 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //   if without locked log_write_mutex_, the log file may get data
     //   corruption
 
-    const bool needs_locking = manual_wal_flush_ && !two_write_queues_;
+    const bool needs_locking =
+        (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
     if (UNLIKELY(needs_locking)) {
       log_write_mutex_.Lock();
     }
@@ -2090,6 +2091,15 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     InstrumentedMutexLock l(&log_write_mutex_);
     assert(new_log != nullptr);
     if (!logs_.empty()) {
+      // When nonblocking_wal_io_ is enabled, SyncWALNonBlockingIO() may be
+      // flushing the back log's swapped buffer (marked IsSyncing) without
+      // holding log_write_mutex_.  Wait for it to finish before calling
+      // WriteBuffer() on the same file.
+      if (nonblocking_wal_io_) {
+        while (logs_.back().IsSyncing()) {
+          log_sync_cv_.Wait();
+        }
+      }
       // Alway flush the buffer of the last log before switching to a new one
       log::Writer* cur_log_writer = logs_.back().writer;
       if (error_handler_.IsRecoveryInProgress()) {
