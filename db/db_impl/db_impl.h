@@ -2101,10 +2101,6 @@ class DBImpl : public DB {
   ColumnFamilyData* PickCompactionFromQueue(
       std::unique_ptr<TaskLimiterToken>* token, LogBuffer* log_buffer);
 
-  // SyncWAL implementation for nonblocking_wal_io mode: swap buffers under
-  // the lock, then flush + fsync without holding it.
-  Status SyncWALNonBlockingIO();
-
   // helper function to call after some of the logs_ were synced
   void MarkLogsSynced(uint64_t up_to, bool synced_dir, VersionEdit* edit);
   Status ApplyWALToManifest(VersionEdit* edit);

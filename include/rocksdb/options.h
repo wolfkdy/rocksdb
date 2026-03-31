@@ -1236,6 +1236,7 @@ struct DBOptions {
   // SyncWAL() periodically (e.g. every 100ms).  Data in the user-space buffer
   // is lost on process crash between SyncWAL() calls.
   // Requires: manual_wal_flush == false AND two_write_queues == false.
+  // WriteOptions::sync=true is not supported; use DB::SyncWAL() instead.
   bool nonblocking_wal_io = false;
 
   // This feature is WORK IN PROGRESS

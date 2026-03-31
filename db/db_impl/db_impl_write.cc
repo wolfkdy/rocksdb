@@ -10,6 +10,7 @@
 
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
+#include "file/nonblocking_io_writable_file_writer.h"
 #include "db/event_helpers.h"
 #include "logging/logging.h"
 #include "monitoring/perf_context_imp.h"
@@ -206,6 +207,16 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
   }
   if (write_options.sync && write_options.disableWAL) {
     return Status::InvalidArgument("Sync writes has to enable WAL.");
+  }
+  if (write_options.sync && nonblocking_wal_io_) {
+    // The write-group leader's inline sync path (in WriteToWAL) and
+    // SyncWAL() would both need to call SwapBuffer on the same flush_buf_,
+    // leading to a deadlock: the write-group leader holds IsSyncing via
+    // PrepareForSync, and SyncWAL waits on !IsSyncing — or vice versa.
+    // Users should call DB::SyncWAL() explicitly for durability.
+    return Status::NotSupported(
+        "WriteOptions::sync is not supported with nonblocking_wal_io. "
+        "Use DB::SyncWAL() instead.");
   }
   if (two_write_queues_ && immutable_db_options_.enable_pipelined_write) {
     return Status::NotSupported(
@@ -1287,12 +1298,17 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   // if manual_wal_flush_ is enabled we need to protect log_writer->AddRecord
   // from possible concurrent calls via the FlushWAL by the application.
   // When nonblocking_wal_io_ is enabled, we need to protect AddRecord from
-  // the concurrent buffer swap in SyncWALNonBlockingIO().
+  // the concurrent buffer swap in SyncWAL().
   const bool needs_locking =
       (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
   if (UNLIKELY(needs_locking)) {
     log_write_mutex_.Lock();
   }
+  // Under log_write_mutex_, no SwapBuffer can be in progress, so flush_buf_
+  // must be empty — Append() and SwapBuffer() never overlap.
+  assert(!nonblocking_wal_io_ ||
+         static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file())
+             ->IsFlushBufEmpty());
   IOStatus io_s = log_writer->AddRecord(log_entry, rate_limiter_priority);
 
   size_t wal_buf_size = log_writer->file()->BufferSize();
@@ -1359,6 +1375,9 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
 
   if (io_s.ok() && need_log_sync) {
     StopWatch sw(immutable_db_options_.clock, stats_, WAL_FILE_SYNC_MICROS);
+    // nonblocking_wal_io rejects WriteOptions::sync=true, so this inline
+    // sync path is never reached.  SyncWAL() is the only sync entry point.
+    assert(!nonblocking_wal_io_);
     // It's safe to access logs_ with unlocked mutex_ here because:
     //  - we've set getting_synced=true for all logs,
     //    so other threads won't pop from logs_ while we're here,
@@ -1372,11 +1391,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //   FlushWAL function will be invoked by another thread.
     //   if without locked log_write_mutex_, the log file may get data
     //   corruption
-
-    // When nonblocking_wal_io_ is enabled, we need to protect AddRecord from
-    // the concurrent buffer swap in SyncWALNonBlockingIO().
-    const bool needs_locking =
-        (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
+    const bool needs_locking = manual_wal_flush_ && !two_write_queues_;
     if (UNLIKELY(needs_locking)) {
       log_write_mutex_.Lock();
     }
@@ -2106,7 +2121,7 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     InstrumentedMutexLock l(&log_write_mutex_);
     assert(new_log != nullptr);
     if (!logs_.empty()) {
-      // When nonblocking_wal_io_ is enabled, SyncWALNonBlockingIO() may be
+      // When nonblocking_wal_io_ is enabled, SyncWAL() may be
       // flushing the back log's swapped buffer (marked IsSyncing) without
       // holding log_write_mutex_.  Wait for it to finish before calling
       // WriteBuffer() on the same file.
@@ -2114,6 +2129,11 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
         while (logs_.back().IsSyncing()) {
           log_sync_cv_.Wait();
         }
+        // After IsSyncing clears, SyncWAL has finished FlushSwappedBuffer,
+        // so flush_buf_ must be empty.
+        assert(static_cast<NonBlockingIOWritableFileWriter*>(
+                   logs_.back().writer->file())
+                   ->IsFlushBufEmpty());
       }
       // Alway flush the buffer of the last log before switching to a new one
       log::Writer* cur_log_writer = logs_.back().writer;

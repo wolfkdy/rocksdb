@@ -53,6 +53,10 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   IOStatus FlushSwappedBuffer(
       Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
+  // Returns true when flush_buf_ is empty, i.e. no SwapBuffer() is pending
+  // flush.  Useful for invariant checks by callers holding log_write_mutex_.
+  bool IsFlushBufEmpty() const { return flush_buf_.CurrentSize() == 0; }
+
  protected:
 #ifndef NDEBUG
   // WriteBuffered is called by Flush() (via WriteBuffer) to drain buf_ to

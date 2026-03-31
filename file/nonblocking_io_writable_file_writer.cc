@@ -12,6 +12,8 @@ namespace ROCKSDB_NAMESPACE {
 void NonBlockingIOWritableFileWriter::SwapBuffer() {
   // Double-buffering is only for buffered I/O; direct I/O has its own path.
   assert(!use_direct_io());
+  // Don't swap into a broken writer — the previous flush failed.
+  assert(!seen_error());
   assert(flush_buf_.CurrentSize() == 0);
   // Ping-pong: move buf_ -> flush_buf_ for writing; reuse flush_buf_'s old
   // allocation (now empty) as the new buf_ for incoming Append()s.

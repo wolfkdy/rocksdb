@@ -1428,7 +1428,7 @@ Status DBImpl::FlushWAL(bool sync) {
   if (manual_wal_flush_) {
     // nonblocking_wal_io requires manual_wal_flush == false, so this
     // WriteBuffer() path is never taken — buffer draining is done
-    // exclusively by SyncWALNonBlockingIO's SwapBuffer + FlushSwappedBuffer.
+    // exclusively by SyncWAL's SwapBuffer + FlushSwappedBuffer.
     assert(!nonblocking_wal_io_);
     IOStatus io_s;
     {
@@ -1461,10 +1461,6 @@ Status DBImpl::FlushWAL(bool sync) {
 
 Status DBImpl::SyncWAL() {
   TEST_SYNC_POINT("DBImpl::SyncWAL:Begin");
-
-  if (nonblocking_wal_io_) {
-    return SyncWALNonBlockingIO();
-  }
 
   autovector<log::Writer*, 1> logs_to_sync;
   bool need_log_dir_sync;
@@ -1499,20 +1495,44 @@ Status DBImpl::SyncWAL() {
       logs_to_sync.push_back(log.writer);
     }
 
+    // When nonblocking_wal_io_ is enabled, swap each log's write buffer into
+    // flush_buf_ under the lock so new Append() calls write to a fresh buffer
+    // and we can flush + fsync the swapped data without holding the lock.
+    if (nonblocking_wal_io_) {
+      for (log::Writer* log : logs_to_sync) {
+        static_cast<NonBlockingIOWritableFileWriter*>(log->file())
+            ->SwapBuffer();
+      }
+    }
+
     need_log_dir_sync = !log_dir_synced_;
   }
 
   TEST_SYNC_POINT("DBWALTest::SyncWALNotWaitWrite:1");
+  TEST_SYNC_POINT("DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer");
   RecordTick(stats_, WAL_FILE_SYNCED);
   Status status;
   IOStatus io_s;
   for (log::Writer* log : logs_to_sync) {
+    // When nonblocking_wal_io_, flush the swapped buffer to the OS first,
+    // then fsync.  In normal mode, buf_ was already flushed during write.
+    if (nonblocking_wal_io_) {
+      io_s = static_cast<NonBlockingIOWritableFileWriter*>(log->file())
+                 ->FlushSwappedBuffer();
+      if (!io_s.ok()) {
+        status = io_s;
+        break;
+      }
+    }
     io_s = log->file()->SyncWithoutFlush(immutable_db_options_.use_fsync);
     if (!io_s.ok()) {
       status = io_s;
       break;
     }
   }
+
+  TEST_SYNC_POINT("DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync");
+
   if (!io_s.ok()) {
     ROCKS_LOG_ERROR(immutable_db_options_.info_log, "WAL Sync error %s",
                     io_s.ToString().c_str());
@@ -1547,93 +1567,6 @@ Status DBImpl::SyncWAL() {
   return status;
 }
 
-Status DBImpl::SyncWALNonBlockingIO() {
-  assert(nonblocking_wal_io_);
-
-  autovector<log::Writer*, 1> logs_to_sync;
-  bool need_log_dir_sync;
-  uint64_t current_log_number;
-
-  {
-    InstrumentedMutexLock l(&log_write_mutex_);
-    assert(!logs_.empty());
-
-    current_log_number = logfile_number_;
-
-    // Wait until no log in the range is being synced (which includes flushing
-    // the swapped buffer in nonblocking_wal_io mode).
-    while (logs_.front().number <= current_log_number &&
-           logs_.front().IsSyncing()) {
-      log_sync_cv_.Wait();
-    }
-
-    for (auto it = logs_.begin();
-         it != logs_.end() && it->number <= current_log_number; ++it) {
-      auto& log = *it;
-      log.PrepareForSync();
-      logs_to_sync.push_back(log.writer);
-    }
-
-    // Swap the buffer on each log under the lock. After this, new Append()
-    // calls write to a fresh buffer and we can flush the swapped data without
-    // holding the lock.
-    for (log::Writer* log : logs_to_sync) {
-      static_cast<NonBlockingIOWritableFileWriter*>(log->file())->SwapBuffer();
-    }
-
-    need_log_dir_sync = !log_dir_synced_;
-  }
-
-  TEST_SYNC_POINT("DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer");
-
-  // Flush swapped buffers to OS + fsync, all without holding log_write_mutex_.
-  RecordTick(stats_, WAL_FILE_SYNCED);
-  Status status;
-  IOStatus io_s;
-  for (log::Writer* log : logs_to_sync) {
-    io_s = static_cast<NonBlockingIOWritableFileWriter*>(log->file())
-               ->FlushSwappedBuffer();
-    if (!io_s.ok()) {
-      status = io_s;
-      break;
-    }
-    io_s = log->file()->SyncWithoutFlush(immutable_db_options_.use_fsync);
-    if (!io_s.ok()) {
-      status = io_s;
-      break;
-    }
-  }
-
-  TEST_SYNC_POINT("DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync");
-
-  if (!io_s.ok()) {
-    ROCKS_LOG_ERROR(immutable_db_options_.info_log, "WAL Sync error %s",
-                    io_s.ToString().c_str());
-    IOStatusCheck(io_s);
-  }
-  if (status.ok() && need_log_dir_sync) {
-    status = directories_.GetWalDir()->FsyncWithDirOptions(
-        IOOptions(), nullptr,
-        DirFsyncOptions(DirFsyncOptions::FsyncReason::kNewFileSynced));
-  }
-
-  VersionEdit synced_wals;
-  {
-    InstrumentedMutexLock l(&log_write_mutex_);
-    if (status.ok()) {
-      MarkLogsSynced(current_log_number, need_log_dir_sync, &synced_wals);
-    } else {
-      MarkLogsNotSynced(current_log_number);
-    }
-  }
-  if (status.ok() && synced_wals.IsWalAddition()) {
-    InstrumentedMutexLock l(&mutex_);
-    status = ApplyWALToManifest(&synced_wals);
-  }
-
-  return status;
-}
-
 Status DBImpl::ApplyWALToManifest(VersionEdit* synced_wals) {
   // not empty, write to MANIFEST.
   mutex_.AssertHeld();
@@ -1648,7 +1581,7 @@ Status DBImpl::ApplyWALToManifest(VersionEdit* synced_wals) {
 
 Status DBImpl::LockWAL() {
   log_write_mutex_.Lock();
-  // When nonblocking_wal_io_ is enabled, SyncWALNonBlockingIO() may be
+  // When nonblocking_wal_io_ is enabled, SyncWAL() may be
   // flushing the back log's swapped buffer (marked IsSyncing) without holding
   // log_write_mutex_.  We must wait for it to finish before calling
   // WriteBuffer() on the same file, to avoid concurrent writable_file_->
@@ -1657,6 +1590,11 @@ Status DBImpl::LockWAL() {
     while (logs_.back().IsSyncing()) {
       log_sync_cv_.Wait();
     }
+    // After IsSyncing clears, SyncWAL has finished FlushSwappedBuffer,
+    // so flush_buf_ must be empty.
+    assert(static_cast<NonBlockingIOWritableFileWriter*>(
+               logs_.back().writer->file())
+               ->IsFlushBufEmpty());
   }
   auto cur_log_writer = logs_.back().writer;
   auto status = cur_log_writer->WriteBuffer();

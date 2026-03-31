@@ -839,6 +839,23 @@ TEST_F(DBWriteNonBlockingIOTest, IncompatibleWithTwoWriteQueues) {
   ASSERT_TRUE(s.IsInvalidArgument());
 }
 
+// Verify that WriteOptions::sync=true is rejected with nonblocking_wal_io.
+TEST_F(DBWriteNonBlockingIOTest, SyncWriteNotSupported) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  WriteOptions wo;
+  wo.sync = true;
+  Status s = db_->Put(wo, "key", "val");
+  ASSERT_TRUE(s.IsNotSupported());
+
+  // Normal writes and explicit SyncWAL should still work.
+  ASSERT_OK(Put("key", "val"));
+  ASSERT_OK(db_->SyncWAL());
+  ASSERT_EQ("val", Get("key"));
+}
+
 // Race: SyncWAL #1 is in the flush phase (IsSyncing=true, no lock), a second
 // SyncWAL arrives and must wait.  Meanwhile a writer appends into the fresh
 // buf_.  When SyncWAL #1 finishes, SyncWAL #2 proceeds and picks up the
