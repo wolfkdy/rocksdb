@@ -54,6 +54,18 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
       Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
  protected:
+#ifndef NDEBUG
+  // WriteBuffered is called by Flush() (via WriteBuffer) to drain buf_ to
+  // the OS.  Assert that flush_buf_ has already been drained — otherwise
+  // we'd have two concurrent writes to the same underlying file.
+  IOStatus WriteBuffered(const char* data, size_t size,
+                         Env::IOPriority op_rate_limiter_priority) override {
+    assert(flush_buf_.CurrentSize() == 0);
+    return WritableFileWriter::WriteBuffered(data, size,
+                                            op_rate_limiter_priority);
+  }
+#endif
+
   // Allow buf_ to grow without bound so that Append() never triggers
   // implicit I/O. SyncWAL() is responsible for draining the buffer.
   size_t AppendBufferSizeLimit() const override { return size_t(-1); }

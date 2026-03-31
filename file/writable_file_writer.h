@@ -344,6 +344,16 @@ class WritableFileWriter {
       Env::IOPriority writable_file_io_priority,
       Env::IOPriority op_rate_limiter_priority);
 
+ protected:
+  // Normal write. Calls WriteToFile then clears buf_.
+  // Virtual in debug mode so NonBlockingIOWritableFileWriter can override
+  // with an assert; non-virtual in release to avoid vtable overhead.
+#ifndef NDEBUG
+  virtual
+#endif
+  IOStatus WriteBuffered(const char* data, size_t size,
+                         Env::IOPriority op_rate_limiter_priority);
+
  private:
   // Used when os buffering is OFF and we are writing
   // DMA such as in Direct I/O mode
@@ -351,9 +361,6 @@ class WritableFileWriter {
   IOStatus WriteDirect(Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteDirectWithChecksum(Env::IOPriority op_rate_limiter_priority);
 #endif  // !ROCKSDB_LITE
-  // Normal write. Calls WriteToFile then clears buf_.
-  IOStatus WriteBuffered(const char* data, size_t size,
-                         Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteBufferedWithChecksum(const char* data, size_t size,
                                      Env::IOPriority op_rate_limiter_priority);
   IOStatus RangeSync(uint64_t offset, uint64_t nbytes);

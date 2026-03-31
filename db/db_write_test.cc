@@ -839,6 +839,488 @@ TEST_F(DBWriteNonBlockingIOTest, IncompatibleWithTwoWriteQueues) {
   ASSERT_TRUE(s.IsInvalidArgument());
 }
 
+// Race: SyncWAL #1 is in the flush phase (IsSyncing=true, no lock), a second
+// SyncWAL arrives and must wait.  Meanwhile a writer appends into the fresh
+// buf_.  When SyncWAL #1 finishes, SyncWAL #2 proceeds and picks up the
+// writer's new data.
+TEST_F(DBWriteNonBlockingIOTest, ConcurrentSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("key1", "val1"));
+
+  // Force this interleaving:
+  //   SyncWAL-1: SwapBuffer -> [pause] -> FlushAndSync -> done
+  //   SyncWAL-2:                enter -> wait(IsSyncing) -> SwapBuffer -> ...
+  //   Writer:                   Put("key2") during SyncWAL-1 flush phase
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency({
+      // SyncWAL-1 swapped, now let writer and SyncWAL-2 start.
+      {"DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer",
+       "ConcurrentSyncWAL:StartWriterAndSync2"},
+      // Hold SyncWAL-1's flush until writer and SyncWAL-2 are in flight.
+      {"ConcurrentSyncWAL:WriterAndSync2Started",
+       "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync"},
+  });
+
+  std::atomic<bool> sync2_entered{false};
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->EnableProcessing();
+
+  // SyncWAL-1: will pause after SwapBuffer.
+  port::Thread sync1([&]() { ASSERT_OK(db_->SyncWAL()); });
+
+  TEST_SYNC_POINT("ConcurrentSyncWAL:StartWriterAndSync2");
+
+  // Writer: appends into the fresh buf_ while SyncWAL-1 flushes flush_buf_.
+  ASSERT_OK(Put("key2", "val2"));
+
+  // SyncWAL-2: enters and must wait on IsSyncing set by SyncWAL-1.
+  port::Thread sync2([&]() {
+    sync2_entered.store(true);
+    ASSERT_OK(db_->SyncWAL());
+  });
+
+  // Give sync2 a moment to actually enter and block on IsSyncing.
+  while (!sync2_entered.load()) {
+    env_->SleepForMicroseconds(1000);
+  }
+  env_->SleepForMicroseconds(10000);
+
+  TEST_SYNC_POINT("ConcurrentSyncWAL:WriterAndSync2Started");
+
+  sync1.join();
+  sync2.join();
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_EQ("val1", Get("key1"));
+  ASSERT_EQ("val2", Get("key2"));
+
+  // key2 was synced by SyncWAL-2, verify durability.
+  Close();
+  Reopen(options);
+  ASSERT_EQ("val1", Get("key1"));
+  ASSERT_EQ("val2", Get("key2"));
+}
+
+// Race: LockWAL arrives while SyncWAL is in the flush phase.
+// LockWAL must wait for !IsSyncing before calling WriteBuffer().
+// Verify no concurrent writable_file_->Append() calls.
+TEST_F(DBWriteNonBlockingIOTest, LockWALWaitsForSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("key1", "val1"));
+
+  std::atomic<bool> sync_flush_done{false};
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync",
+      [&](void*) { sync_flush_done.store(true); });
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency({
+      // SyncWAL swapped, let LockWAL proceed (it should block on IsSyncing).
+      {"DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer",
+       "LockWALWaitsForSyncWAL:StartLock"},
+      // Hold SyncWAL's flush until LockWAL has had time to reach the wait.
+      {"LockWALWaitsForSyncWAL:LockStarted",
+       "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync"},
+  });
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread sync_thread([&]() { ASSERT_OK(db_->SyncWAL()); });
+
+  TEST_SYNC_POINT("LockWALWaitsForSyncWAL:StartLock");
+
+  port::Thread lock_thread([&]() {
+    ASSERT_OK(db_->LockWAL());
+    // When LockWAL returns, SyncWAL's flush phase must have completed.
+    ASSERT_TRUE(sync_flush_done.load());
+    ASSERT_OK(db_->UnlockWAL());
+  });
+
+  env_->SleepForMicroseconds(50000);  // Let LockWAL block on IsSyncing.
+  TEST_SYNC_POINT("LockWALWaitsForSyncWAL:LockStarted");
+
+  sync_thread.join();
+  lock_thread.join();
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_EQ("val1", Get("key1"));
+}
+
+// Race: SwitchMemtable (via Flush) arrives while SyncWAL is in the flush
+// phase.  Forces the exact interleaving where SwitchMemtable must wait for
+// !IsSyncing before calling WriteBuffer() on the outgoing log.
+TEST_F(DBWriteNonBlockingIOTest, FlushWaitsForSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("key1", "val1"));
+
+  std::atomic<bool> sync_flush_done{false};
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync",
+      [&](void*) { sync_flush_done.store(true); });
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->LoadDependency({
+      {"DBImpl::SyncWALNonBlockingIO:AfterSwapBuffer",
+       "FlushWaitsForSyncWAL:StartFlush"},
+      {"FlushWaitsForSyncWAL:FlushStarted",
+       "DBImpl::SyncWALNonBlockingIO:AfterFlushAndSync"},
+  });
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread sync_thread([&]() { ASSERT_OK(db_->SyncWAL()); });
+
+  TEST_SYNC_POINT("FlushWaitsForSyncWAL:StartFlush");
+
+  port::Thread flush_thread([&]() {
+    ASSERT_OK(dbfull()->TEST_SwitchMemtable());
+    // SwitchMemtable's WriteBuffer must not run until SyncWAL finishes flush.
+    ASSERT_TRUE(sync_flush_done.load());
+  });
+
+  env_->SleepForMicroseconds(50000);  // Let SwitchMemtable block on IsSyncing.
+  TEST_SYNC_POINT("FlushWaitsForSyncWAL:FlushStarted");
+
+  sync_thread.join();
+  flush_thread.join();
+
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->DisableProcessing();
+  ROCKSDB_NAMESPACE::SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_OK(db_->SyncWAL());
+  ASSERT_EQ("val1", Get("key1"));
+}
+
+// Stress: writers + SyncWAL + Flush hammer the system for many rounds.
+// Small write_buffer_size forces frequent SwitchMemtable, exercising
+// SyncClosedLogs vs SyncWALNonBlockingIO on overlapping log ranges.
+// Verify recovery after reopen.
+TEST_F(DBWriteNonBlockingIOTest, StressWriteSyncFlushRecovery) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  options.write_buffer_size = 4096;
+  DestroyAndReopen(options);
+
+  const int kNumWriters = 4;
+  const int kWritesPerThread = 500;
+  std::atomic<int> errors{0};
+  std::atomic<bool> stop{false};
+
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      for (int i = 0; i < kWritesPerThread; i++) {
+        auto s = Put("t" + std::to_string(t) + "_" + std::to_string(i),
+                      "v" + std::to_string(i));
+        if (!s.ok()) errors.fetch_add(1);
+      }
+    });
+  }
+
+  port::Thread syncer([&]() {
+    while (!stop.load()) {
+      auto s = db_->SyncWAL();
+      if (!s.ok()) errors.fetch_add(1);
+    }
+  });
+
+  port::Thread flusher([&]() {
+    while (!stop.load()) {
+      db_->Flush(FlushOptions());
+    }
+  });
+
+  port::Thread locker([&]() {
+    while (!stop.load()) {
+      auto s = db_->LockWAL();
+      if (s.ok()) {
+        db_->UnlockWAL();
+      }
+    }
+  });
+
+  for (auto& w : writers) {
+    w.join();
+  }
+  stop.store(true);
+  syncer.join();
+  flusher.join();
+  locker.join();
+
+  ASSERT_EQ(0, errors.load());
+  ASSERT_OK(db_->SyncWAL());
+
+  // Verify all data before reopen.
+  for (int t = 0; t < kNumWriters; t++) {
+    for (int i = 0; i < kWritesPerThread; i++) {
+      ASSERT_EQ("v" + std::to_string(i),
+                Get("t" + std::to_string(t) + "_" + std::to_string(i)));
+    }
+  }
+
+  // Verify WAL recovery.
+  Close();
+  Reopen(options);
+  for (int t = 0; t < kNumWriters; t++) {
+    for (int i = 0; i < kWritesPerThread; i++) {
+      ASSERT_EQ("v" + std::to_string(i),
+                Get("t" + std::to_string(t) + "_" + std::to_string(i)));
+    }
+  }
+}
+
+// Fuzz test: writers + multiple SyncWAL threads hammer the system for 10s.
+// No sync points — relies on real scheduling to expose races.
+// TSAN/ASAN builds are the primary target.
+TEST_F(DBWriteNonBlockingIOTest, FuzzWriteAndSyncWAL) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  const int kDurationSec = 20;
+  std::atomic<bool> stop{false};
+  std::atomic<int> errors{0};
+  std::atomic<uint64_t> write_count{0};
+
+  // 4 writer threads, continuous Put with varying value sizes.
+  const int kNumWriters = 4;
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      int i = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        // Vary value size to exercise buffer growth.
+        std::string val(100 + (i % 500), 'a' + (t % 26));
+        auto s = Put("fw" + std::to_string(t) + "_" + std::to_string(i), val);
+        if (!s.ok()) errors.fetch_add(1);
+        write_count.fetch_add(1, std::memory_order_relaxed);
+        i++;
+      }
+    });
+  }
+
+  // 2 SyncWAL threads racing with each other.
+  const int kNumSyncers = 2;
+  std::vector<port::Thread> syncers;
+  for (int t = 0; t < kNumSyncers; t++) {
+    syncers.emplace_back([&]() {
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto s = db_->SyncWAL();
+        if (!s.ok()) errors.fetch_add(1);
+      }
+    });
+  }
+
+  env_->SleepForMicroseconds(kDurationSec * 1000000);
+  stop.store(true);
+
+  for (auto& w : writers) w.join();
+  for (auto& s : syncers) s.join();
+
+  ASSERT_EQ(0, errors.load());
+  fprintf(stderr, "FuzzWriteAndSyncWAL: %" PRIu64 " writes in %ds\n",
+          write_count.load(), kDurationSec);
+}
+
+// Fuzz test: writers + SyncWAL + LockWAL/UnlockWAL race for 10s.
+// Corresponds to LockWALWaitsForSyncWAL sync point test.
+TEST_F(DBWriteNonBlockingIOTest, FuzzWriteSyncLock) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+
+  const int kDurationSec = 20;
+  std::atomic<bool> stop{false};
+  std::atomic<int> errors{0};
+  std::atomic<uint64_t> write_count{0};
+
+  const int kNumWriters = 4;
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      int i = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto s = Put("wl" + std::to_string(t) + "_" + std::to_string(i),
+                      std::string(100, 'y'));
+        if (!s.ok()) errors.fetch_add(1);
+        write_count.fetch_add(1, std::memory_order_relaxed);
+        i++;
+      }
+    });
+  }
+
+  port::Thread syncer([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      auto s = db_->SyncWAL();
+      if (!s.ok()) errors.fetch_add(1);
+    }
+  });
+
+  port::Thread locker([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      auto s = db_->LockWAL();
+      if (s.ok()) {
+        db_->UnlockWAL();
+      }
+    }
+  });
+
+  env_->SleepForMicroseconds(kDurationSec * 1000000);
+  stop.store(true);
+
+  for (auto& w : writers) w.join();
+  syncer.join();
+  locker.join();
+
+  ASSERT_EQ(0, errors.load());
+  fprintf(stderr, "FuzzWriteSyncLock: %" PRIu64 " writes in %ds\n",
+          write_count.load(), kDurationSec);
+}
+
+// Fuzz test: writers + SyncWAL + Flush race for 10s.
+// Small write_buffer_size forces frequent SwitchMemtable.
+// Corresponds to FlushWaitsForSyncWAL sync point test.
+TEST_F(DBWriteNonBlockingIOTest, FuzzWriteSyncFlush) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  options.write_buffer_size = 4096;
+  DestroyAndReopen(options);
+
+  const int kDurationSec = 20;
+  std::atomic<bool> stop{false};
+  std::atomic<int> errors{0};
+  std::atomic<uint64_t> write_count{0};
+
+  const int kNumWriters = 4;
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      int i = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto s = Put("wf" + std::to_string(t) + "_" + std::to_string(i),
+                      std::string(100, 'z'));
+        if (!s.ok()) errors.fetch_add(1);
+        write_count.fetch_add(1, std::memory_order_relaxed);
+        i++;
+      }
+    });
+  }
+
+  port::Thread syncer([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      auto s = db_->SyncWAL();
+      if (!s.ok()) errors.fetch_add(1);
+    }
+  });
+
+  port::Thread flusher([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      db_->Flush(FlushOptions());
+    }
+  });
+
+  env_->SleepForMicroseconds(kDurationSec * 1000000);
+  stop.store(true);
+
+  for (auto& w : writers) w.join();
+  syncer.join();
+  flusher.join();
+
+  ASSERT_EQ(0, errors.load());
+  fprintf(stderr, "FuzzWriteSyncFlush: %" PRIu64 " writes in %ds\n",
+          write_count.load(), kDurationSec);
+}
+
+// Fuzz test: writers + SyncWAL + Flush + LockWAL all race for 10s.
+// Small write_buffer_size forces frequent SwitchMemtable and SyncClosedLogs.
+TEST_F(DBWriteNonBlockingIOTest, FuzzWriteSyncFlushLock) {
+  Options options = CurrentOptions();
+  options.nonblocking_wal_io = true;
+  options.write_buffer_size = 4096;
+  DestroyAndReopen(options);
+
+  const int kDurationSec = 20;
+  std::atomic<bool> stop{false};
+  std::atomic<int> errors{0};
+  std::atomic<uint64_t> write_count{0};
+
+  // 4 writer threads.
+  const int kNumWriters = 4;
+  std::vector<port::Thread> writers;
+  for (int t = 0; t < kNumWriters; t++) {
+    writers.emplace_back([&, t]() {
+      int i = 0;
+      while (!stop.load(std::memory_order_relaxed)) {
+        auto s = Put("fl" + std::to_string(t) + "_" + std::to_string(i),
+                      std::string(100, 'x'));
+        if (!s.ok()) errors.fetch_add(1);
+        write_count.fetch_add(1, std::memory_order_relaxed);
+        i++;
+      }
+    });
+  }
+
+  // SyncWAL thread.
+  port::Thread syncer([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      auto s = db_->SyncWAL();
+      if (!s.ok()) errors.fetch_add(1);
+    }
+  });
+
+  // Flush thread — forces SwitchMemtable + SyncClosedLogs.
+  port::Thread flusher([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      db_->Flush(FlushOptions());
+    }
+  });
+
+  // LockWAL/UnlockWAL thread.
+  port::Thread locker([&]() {
+    while (!stop.load(std::memory_order_relaxed)) {
+      auto s = db_->LockWAL();
+      if (s.ok()) {
+        db_->UnlockWAL();
+      }
+    }
+  });
+
+  env_->SleepForMicroseconds(kDurationSec * 1000000);
+  stop.store(true);
+
+  for (auto& w : writers) w.join();
+  syncer.join();
+  flusher.join();
+  locker.join();
+
+  ASSERT_EQ(0, errors.load());
+  fprintf(stderr, "FuzzWriteSyncFlushLock: %" PRIu64 " writes in %ds\n",
+          write_count.load(), kDurationSec);
+
+  // Final SyncWAL + reopen to verify WAL consistency.
+  ASSERT_OK(db_->SyncWAL());
+  Close();
+  Reopen(options);
+  // Spot-check: all keys from writer 0 must be readable.
+  for (int i = 0;; i++) {
+    auto val = Get("fl0_" + std::to_string(i));
+    if (val == "NOT_FOUND") break;
+    ASSERT_EQ(std::string(100, 'x'), val);
+  }
+}
+
 INSTANTIATE_TEST_CASE_P(DBWriteTestInstance, DBWriteTest,
                         testing::Values(DBTestBase::kDefault,
                                         DBTestBase::kConcurrentWALWrites,

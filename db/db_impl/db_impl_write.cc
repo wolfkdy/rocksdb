@@ -1295,12 +1295,14 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   }
   IOStatus io_s = log_writer->AddRecord(log_entry, rate_limiter_priority);
 
+  size_t wal_buf_size = log_writer->file()->BufferSize();
+
   if (UNLIKELY(needs_locking)) {
     log_write_mutex_.Unlock();
   }
   if (nonblocking_wal_io_) {
     static constexpr size_t kWALBufferWarningSize = 100 << 20;  // 100MB
-    size_t buf_size = log_writer->file()->BufferSize();
+    size_t buf_size = wal_buf_size;
     if (UNLIKELY(buf_size >= kWALBufferWarningSize)) {
       ROCKS_LOG_WARN(
           immutable_db_options_.info_log,
@@ -1371,6 +1373,8 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //   if without locked log_write_mutex_, the log file may get data
     //   corruption
 
+    // When nonblocking_wal_io_ is enabled, we need to protect AddRecord from
+    // the concurrent buffer swap in SyncWALNonBlockingIO().
     const bool needs_locking =
         (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
     if (UNLIKELY(needs_locking)) {
