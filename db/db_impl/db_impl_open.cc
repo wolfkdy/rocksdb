@@ -300,6 +300,13 @@ Status DBImpl::ValidateOptions(const DBOptions& db_options) {
         "nonblocking_wal_io is not compatible with direct I/O");
   }
 
+  FileTypeSet tmp_checksum_set = db_options.checksum_handoff_file_types;
+  if (db_options.nonblocking_wal_io &&
+      tmp_checksum_set.Contains(FileType::kWalFile)) {
+    return Status::InvalidArgument(
+        "nonblocking_wal_io is not compatible with WAL checksum handoff");
+  }
+
   if (db_options.use_direct_io_for_flush_and_compaction &&
       0 == db_options.writable_file_max_buffer_size) {
     return Status::InvalidArgument(
@@ -1763,8 +1770,7 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
       file_writer.reset(new NonBlockingIOWritableFileWriter(
           std::move(lfile), log_fname, opt_file_options,
           immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
-          listeners, nullptr, tmp_set.Contains(FileType::kWalFile),
-          tmp_set.Contains(FileType::kWalFile)));
+          listeners));
     } else {
       file_writer.reset(new WritableFileWriter(
           std::move(lfile), log_fname, opt_file_options,

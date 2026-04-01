@@ -26,6 +26,9 @@ namespace ROCKSDB_NAMESPACE {
 // Append() to serialize with the buffer swap in SyncWAL().
 class NonBlockingIOWritableFileWriter : public WritableFileWriter {
  public:
+  // checksum handoff (perform_data_verification / buffered_data_with_checksum)
+  // is rejected at DB open when nonblocking_wal_io is enabled, so those
+  // parameters are omitted here.
   NonBlockingIOWritableFileWriter(
       std::unique_ptr<FSWritableFile>&& file,
       const std::string& file_name,
@@ -33,15 +36,18 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
       SystemClock* clock = nullptr,
       const std::shared_ptr<IOTracer>& io_tracer = nullptr,
       Statistics* stats = nullptr,
-      const std::vector<std::shared_ptr<EventListener>>& listeners = {},
-      FileChecksumGenFactory* file_checksum_gen_factory = nullptr,
-      bool perform_data_verification = false,
-      bool buffered_data_with_checksum = false)
+      const std::vector<std::shared_ptr<EventListener>>& listeners = {})
       : WritableFileWriter(std::move(file), file_name, options, clock,
                            io_tracer, stats, listeners,
-                           file_checksum_gen_factory,
-                           perform_data_verification,
-                           buffered_data_with_checksum) {}
+                           /*file_checksum_gen_factory=*/nullptr,
+                           /*perform_data_verification=*/false,
+                           /*buffered_data_with_checksum=*/false) {
+    // Pre-allocate flush_buf_ so that after the first SwapBuffer() the
+    // swapped-in buf_ already has a usable allocation.
+    flush_buf_.Alignment(writable_file()->GetRequiredBufferAlignment());
+    flush_buf_.AllocateNewBuffer(
+        std::min((size_t)65536, max_buffer_size_));
+  }
 
   // Swap buf_ into flush_buf_ so that FlushSwappedBuffer() can write it to
   // disk without holding the mutex while Append()s continue into the fresh
@@ -67,6 +73,16 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
     assert(flush_buf_.CurrentSize() == 0);
     return WritableFileWriter::WriteBuffered(data, size,
                                             op_rate_limiter_priority);
+  }
+
+  // WAL checksum handoff is incompatible with nonblocking_wal_io (rejected
+  // at DB open).  Assert this path is never reached.
+  IOStatus WriteBufferedWithChecksum(
+      const char* /*data*/, size_t /*size*/,
+      Env::IOPriority /*op_rate_limiter_priority*/) override {
+    assert(false);
+    return IOStatus::NotSupported(
+        "WriteBufferedWithChecksum not supported with nonblocking_wal_io");
   }
 #endif
 

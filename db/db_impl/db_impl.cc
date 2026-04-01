@@ -1591,10 +1591,13 @@ Status DBImpl::LockWAL() {
       log_sync_cv_.Wait();
     }
     // After IsSyncing clears, SyncWAL has finished FlushSwappedBuffer,
-    // so flush_buf_ must be empty.
-    assert(static_cast<NonBlockingIOWritableFileWriter*>(
-               logs_.back().writer->file())
-               ->IsFlushBufEmpty());
+    // so flush_buf_ must be empty — otherwise WriteBuffer() below would
+    // race with FlushSwappedBuffer() on the same file.
+    if (!static_cast<NonBlockingIOWritableFileWriter*>(
+             logs_.back().writer->file())
+             ->IsFlushBufEmpty()) {
+      abort();
+    }
   }
   auto cur_log_writer = logs_.back().writer;
   auto status = cur_log_writer->WriteBuffer();

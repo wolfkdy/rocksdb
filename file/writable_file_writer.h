@@ -170,7 +170,9 @@ class WritableFileWriter {
   bool checksum_finalized_;
   bool perform_data_verification_;
   uint32_t buffered_data_crc32c_checksum_;
+ protected:
   bool buffered_data_with_checksum_;
+ private:
 #ifndef ROCKSDB_LITE
   Temperature temperature_;
 #endif  // ROCKSDB_LITE
@@ -354,6 +356,14 @@ class WritableFileWriter {
   IOStatus WriteBuffered(const char* data, size_t size,
                          Env::IOPriority op_rate_limiter_priority);
 
+  // Checksum-handoff variant of WriteBuffered. Virtual in debug mode so
+  // NonBlockingIOWritableFileWriter can override with an assert.
+#ifndef NDEBUG
+  virtual
+#endif
+  IOStatus WriteBufferedWithChecksum(const char* data, size_t size,
+                                     Env::IOPriority op_rate_limiter_priority);
+
  private:
   // Used when os buffering is OFF and we are writing
   // DMA such as in Direct I/O mode
@@ -361,8 +371,6 @@ class WritableFileWriter {
   IOStatus WriteDirect(Env::IOPriority op_rate_limiter_priority);
   IOStatus WriteDirectWithChecksum(Env::IOPriority op_rate_limiter_priority);
 #endif  // !ROCKSDB_LITE
-  IOStatus WriteBufferedWithChecksum(const char* data, size_t size,
-                                     Env::IOPriority op_rate_limiter_priority);
   IOStatus RangeSync(uint64_t offset, uint64_t nbytes);
   IOStatus SyncInternal(bool use_fsync);
 };

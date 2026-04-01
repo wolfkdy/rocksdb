@@ -1022,7 +1022,7 @@ TEST_F(DBWriteNonBlockingIOTest, FlushWaitsForSyncWAL) {
 
 // Stress: writers + SyncWAL + Flush hammer the system for many rounds.
 // Small write_buffer_size forces frequent SwitchMemtable, exercising
-// SyncClosedLogs vs SyncWALNonBlockingIO on overlapping log ranges.
+// SyncClosedLogs vs SyncWAL on overlapping log ranges.
 // Verify recovery after reopen.
 TEST_F(DBWriteNonBlockingIOTest, StressWriteSyncFlushRecovery) {
   Options options = CurrentOptions();

@@ -1301,19 +1301,23 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   // the concurrent buffer swap in SyncWAL().
   const bool needs_locking =
       (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
-  if (UNLIKELY(needs_locking)) {
+  if (needs_locking) {
     log_write_mutex_.Lock();
   }
   // Under log_write_mutex_, no SwapBuffer can be in progress, so flush_buf_
   // must be empty — Append() and SwapBuffer() never overlap.
-  assert(!nonblocking_wal_io_ ||
-         static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file())
-             ->IsFlushBufEmpty());
+  // flush_buf_ must be empty under log_write_mutex_ — otherwise we'd have
+  // concurrent writes to the same underlying file, risking WAL corruption.
+  if (nonblocking_wal_io_ &&
+      !static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file())
+           ->IsFlushBufEmpty()) {
+    abort();
+  }
   IOStatus io_s = log_writer->AddRecord(log_entry, rate_limiter_priority);
 
   size_t wal_buf_size = log_writer->file()->BufferSize();
 
-  if (UNLIKELY(needs_locking)) {
+  if (needs_locking) {
     log_write_mutex_.Unlock();
   }
   if (nonblocking_wal_io_) {
@@ -1392,7 +1396,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //   if without locked log_write_mutex_, the log file may get data
     //   corruption
     const bool needs_locking = manual_wal_flush_ && !two_write_queues_;
-    if (UNLIKELY(needs_locking)) {
+    if (needs_locking) {
       log_write_mutex_.Lock();
     }
 
@@ -1403,7 +1407,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
       }
     }
 
-    if (UNLIKELY(needs_locking)) {
+    if (needs_locking) {
       log_write_mutex_.Unlock();
     }
 
@@ -2130,10 +2134,13 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
           log_sync_cv_.Wait();
         }
         // After IsSyncing clears, SyncWAL has finished FlushSwappedBuffer,
-        // so flush_buf_ must be empty.
-        assert(static_cast<NonBlockingIOWritableFileWriter*>(
-                   logs_.back().writer->file())
-                   ->IsFlushBufEmpty());
+        // so flush_buf_ must be empty — otherwise WriteBuffer() below would
+        // race with FlushSwappedBuffer() on the same file.
+        if (!static_cast<NonBlockingIOWritableFileWriter*>(
+                 logs_.back().writer->file())
+                 ->IsFlushBufEmpty()) {
+          abort();
+        }
       }
       // Alway flush the buffer of the last log before switching to a new one
       log::Writer* cur_log_writer = logs_.back().writer;

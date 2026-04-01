@@ -12,18 +12,20 @@ namespace ROCKSDB_NAMESPACE {
 void NonBlockingIOWritableFileWriter::SwapBuffer() {
   // Double-buffering is only for buffered I/O; direct I/O has its own path.
   assert(!use_direct_io());
+  // WAL checksum handoff is rejected at DB open with nonblocking_wal_io.
+  assert(!buffered_data_with_checksum_);
   // Don't swap into a broken writer — the previous flush failed.
   assert(!seen_error());
-  assert(flush_buf_.CurrentSize() == 0);
+  // Swapping into a non-empty flush_buf_ would lose unflushed WAL data.
+  if (flush_buf_.CurrentSize() != 0) {
+    abort();
+  }
   // Ping-pong: move buf_ -> flush_buf_ for writing; reuse flush_buf_'s old
   // allocation (now empty) as the new buf_ for incoming Append()s.
   std::swap(buf_, flush_buf_);
-  // Ensure buf_ has an allocation (first swap, or after flush_buf_ was
-  // freshly constructed).
-  if (buf_.Capacity() == 0) {
-    buf_.Alignment(writable_file()->GetRequiredBufferAlignment());
-    buf_.AllocateNewBuffer(std::min((size_t)65536, max_buffer_size_));
-  }
+  // After swap, buf_ holds flush_buf_'s old (now-cleared) allocation, which
+  // was initialized either in the constructor or by a previous swap cycle.
+  assert(buf_.Capacity() > 0);
 }
 
 IOStatus NonBlockingIOWritableFileWriter::FlushSwappedBuffer(
@@ -33,6 +35,8 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSwappedBuffer(
   }
   // Double-buffering is only for buffered I/O; direct I/O has its own path.
   assert(!use_direct_io());
+  // WAL checksum handoff is rejected at DB open with nonblocking_wal_io.
+  assert(!buffered_data_with_checksum_);
   IOStatus s;
 
   if (flush_buf_.CurrentSize() > 0) {
