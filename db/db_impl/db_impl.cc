@@ -1520,8 +1520,14 @@ Status DBImpl::SyncWAL() {
       io_s = static_cast<NonBlockingIOWritableFileWriter*>(log->file())
                  ->FlushSwappedBuffer();
       if (!io_s.ok()) {
-        status = io_s;
-        break;
+        // After SwapBuffer() moved data into flush_buf_, new Append()s may
+        // have gone into buf_ concurrently.  The flushed data is lost and
+        // the two buffers are in an irrecoverable state — abort.
+        ROCKS_LOG_FATAL(immutable_db_options_.info_log,
+                        "FlushSwappedBuffer failed: %s. "
+                        "WAL double-buffer state is irrecoverable, aborting.",
+                        io_s.ToString().c_str());
+        abort();
       }
     }
     io_s = log->file()->SyncWithoutFlush(immutable_db_options_.use_fsync);
