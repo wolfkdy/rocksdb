@@ -35,6 +35,7 @@
 #include "db/periodic_task_scheduler.h"
 #include "db/post_memtable_callback.h"
 #include "db/pre_release_callback.h"
+#include "db/preprocess_write_lockless.h"
 #include "db/range_del_aggregator.h"
 #include "db/read_callback.h"
 #include "db/seqno_to_time_mapping.h"
@@ -1543,6 +1544,11 @@ class DBImpl : public DB {
   friend class WriteUnpreparedTxnDB;
   friend class WriteUnpreparedTxn;
 
+  friend PrewriteResult PreprocessWriteLockless(DBImpl* db,
+                                                const WriteOptions&,
+                                                const WriteBatch*,
+                                                uint64_t, bool);
+
 #ifndef ROCKSDB_LITE
   friend class ForwardIterator;
 #endif
@@ -2622,6 +2628,7 @@ class DBImpl : public DB {
   const bool two_write_queues_;
   const bool manual_wal_flush_;
   const bool nonblocking_wal_io_;
+  const bool use_group_commit_;
 
   // LastSequence also indicates last published sequence visibile to the
   // readers. Otherwise LastPublishedSequence should be used.

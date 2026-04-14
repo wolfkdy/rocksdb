@@ -218,6 +218,15 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
         "WriteOptions::sync is not supported with nonblocking_wal_io. "
         "Use DB::SyncWAL() instead.");
   }
+  if (!use_group_commit_ && write_options.disableWAL) {
+    // The leaderless path assumes every write advances a WAL buffer; the
+    // buffer-switch / Link_buf watermarks do not have a "skip the WAL"
+    // shortcut.  Callers that need to bypass the WAL must use the legacy
+    // group-commit path.
+    return Status::NotSupported(
+        "WriteOptions::disableWAL is not supported when "
+        "use_group_commit=false.");
+  }
   if (two_write_queues_ && immutable_db_options_.enable_pipelined_write) {
     return Status::NotSupported(
         "pipelined_writes is not compatible with concurrent prepares");

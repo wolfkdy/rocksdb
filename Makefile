@@ -1682,6 +1682,12 @@ partitioned_filter_block_test: $(OBJ_DIR)/table/block_based/partitioned_filter_b
 log_test: $(OBJ_DIR)/db/log_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
+log_record_serializer_test: $(OBJ_DIR)/db/log_record_serializer_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+nonblocking_io_writable_file_writer_test: $(OBJ_DIR)/file/nonblocking_io_writable_file_writer_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
 cleanable_test: $(OBJ_DIR)/table/cleanable_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
@@ -1833,6 +1839,15 @@ write_callback_test: $(OBJ_DIR)/db/write_callback_test.o $(TEST_LIBRARY) $(LIBRA
 	$(AM_LINK)
 
 heap_test: $(OBJ_DIR)/util/heap_test.o $(GTEST)
+	$(AM_LINK)
+
+link_buf_test: $(OBJ_DIR)/util/link_buf_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+lsn_offset_allocator_test: $(OBJ_DIR)/util/lsn_offset_allocator_test.o $(TEST_LIBRARY) $(LIBRARY)
+	$(AM_LINK)
+
+preprocess_write_lockless_test: $(OBJ_DIR)/db/preprocess_write_lockless_test.o $(TEST_LIBRARY) $(LIBRARY)
 	$(AM_LINK)
 
 point_lock_manager_test: utilities/transactions/lock/point/point_lock_manager_test.o $(TEST_LIBRARY) $(LIBRARY)

@@ -746,19 +746,9 @@ If the application stops calling SyncWAL (bug, deadlock, slow consumer), the act
 
 **Status:** v1 stance confirmed; v2 mechanism not specified.
 
-### 4.10 Components to add / modify (high-level only, not yet broken down)
+### 4.10 Components to add / modify — see companion doc
 
-- New code path in `DBImpl::WriteImpl` (or a new entry function) gated by §2.
-- New per-thread prewrite function: `PreprocessWrite` minus locks, plus batch validation (`VerifyChecksum` + format check; see §4.5).
-- New paired (`next_lsn`, `A.next_wal_offset`) allocator with `lsn_offset_spinlock` (§3.2).
-- New per-buffer packed header `{state, in_flight_count}` and `active_buffer_ptr` (§3.5), added **in place** to `NonBlockingIOWritableFileWriter` (§4.4 Case 4). The existing `buf_` / `flush_buf_` pair becomes the A/B pair; the default mode (not eliminate-group-commit) must continue to behave identically.
-- New `close_drain_open` switcher primitive (§3.5.4) shared by SyncWAL and structural switches.
-- New Link_buf circular ring for `min_non_hole_lsn` tracking (§3.6).
-- New slow-path serializer split: structural switch path (§3.9.1, uses `close_drain_open` + `mutex_` + `PrepareForSync/FinishSync` on the old log) and stall path (§3.9.2, plain `mutex_` + cv, no drain).
-- Modifications to `SyncWAL` to use `close_drain_open` + the existing `IsSyncing` / `log_sync_cv_` vocabulary (§3.4); no new `durable_lsn` primitive is introduced.
-- Modifications to `GetSnapshot` / iterator construction to use `min_non_hole_lsn`.
-- Per-writer WAL serializer that produces wire-format-identical bytes to `log::Writer::AddRecord` (header + CRC + 32KB block fragmentation), using absolute file offset `file_offset_at_A_start + A_offset_for_this_writer` for block-boundary splits (§4.4 Case 2).
-- Unit tests per §4.8 (stall path — six scenarios under TSAN).
+The implementation ordering, component breakdown, and PR sequencing live in `eliminate_group_commit_impl_plan.md` (Round 1 independent building blocks, Round 2 integration with the core write path). That doc cross-references each section of this design.
 
 ---
 

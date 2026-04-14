@@ -1239,6 +1239,27 @@ struct DBOptions {
   // WriteOptions::sync=true is not supported; use DB::SyncWAL() instead.
   bool nonblocking_wal_io = false;
 
+  // Controls whether writes go through the legacy WriteThread leader/follower
+  // group-commit path (default, true) or a new leaderless path that avoids
+  // the group-commit serialization point.  When false, the leaderless path
+  // is used.
+  //
+  // The leaderless path REQUIRES:
+  //   nonblocking_wal_io == true
+  //   two_write_queues == false
+  //   unordered_write == false
+  //   enable_pipelined_write == false
+  //
+  // Under the leaderless path, WriteOptions::sync=true and
+  // WriteOptions::disableWAL=true are both rejected — callers must use
+  // DB::SyncWAL() for durability and cannot skip the WAL.
+  //
+  // WORK IN PROGRESS: the leaderless path (use_group_commit=false) is
+  // under active development and should not be used in production.
+  //
+  // DEFAULT: true (legacy group-commit path).
+  bool use_group_commit = true;
+
   // This feature is WORK IN PROGRESS
   // If enabled WAL records will be compressed before they are written.
   // Only zstd is supported. Compressed WAL records will be read in supported

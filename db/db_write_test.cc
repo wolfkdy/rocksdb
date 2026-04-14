@@ -1343,6 +1343,106 @@ INSTANTIATE_TEST_CASE_P(DBWriteTestInstance, DBWriteTest,
                                         DBTestBase::kConcurrentWALWrites,
                                         DBTestBase::kPipelinedWrite));
 
+// Feature-flag gate for the leaderless (eliminate_group_commit) write path.
+// At this stage the flag is plumbed through Open-time validation and per-
+// write rejection only — no write-path behavior change yet.
+class DBUseGroupCommitFlagTest : public DBTestBase {
+ public:
+  DBUseGroupCommitFlagTest()
+      : DBTestBase("db_use_group_commit_flag_test", /*env_do_fsync=*/false) {}
+};
+
+TEST_F(DBUseGroupCommitFlagTest, DefaultIsTrueAndOpensFine) {
+  Options options = CurrentOptions();
+  DestroyAndReopen(options);
+  ASSERT_TRUE(options.use_group_commit);
+  ASSERT_OK(Put("k", "v"));
+  WriteOptions wo;
+  wo.disableWAL = true;
+  ASSERT_OK(db_->Put(wo, "k2", "v2"));
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRequiresNonblockingWalIo) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  Destroy(options);
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  ASSERT_NE(std::string::npos, s.ToString().find("nonblocking_wal_io"))
+      << s.ToString();
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRejectsTwoWriteQueues) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  options.two_write_queues = true;
+  Destroy(options);
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  ASSERT_NE(std::string::npos, s.ToString().find("two_write_queues"))
+      << s.ToString();
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRejectsUnorderedWrite) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  options.unordered_write = true;
+  Destroy(options);
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  ASSERT_NE(std::string::npos, s.ToString().find("unordered_write"))
+      << s.ToString();
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRejectsPipelinedWrite) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  options.enable_pipelined_write = true;
+  Destroy(options);
+  Status s = TryReopen(options);
+  ASSERT_TRUE(s.IsInvalidArgument()) << s.ToString();
+  ASSERT_NE(std::string::npos, s.ToString().find("enable_pipelined_write"))
+      << s.ToString();
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseWithRequiredSettingsOpens) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+  ASSERT_OK(Put("k", "v"));
+  ASSERT_OK(db_->SyncWAL());
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRejectsDisableWAL) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+  WriteOptions wo;
+  wo.disableWAL = true;
+  Status s = db_->Put(wo, "k", "v");
+  ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+  ASSERT_NE(std::string::npos, s.ToString().find("disableWAL"))
+      << s.ToString();
+}
+
+TEST_F(DBUseGroupCommitFlagTest, FalseRejectsSyncWrite) {
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  DestroyAndReopen(options);
+  WriteOptions wo;
+  wo.sync = true;
+  // Already rejected by the nonblocking_wal_io guard; kept here so the
+  // contract in options.h is covered by an explicit test.
+  Status s = db_->Put(wo, "k", "v");
+  ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+}
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

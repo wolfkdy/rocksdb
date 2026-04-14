@@ -713,6 +713,7 @@ set(SOURCES
         db/internal_stats.cc
         db/logs_with_prep_tracker.cc
         db/log_reader.cc
+        db/log_record_serializer.cc
         db/log_writer.cc
         db/malloc_stats.cc
         db/memtable.cc
@@ -721,6 +722,7 @@ set(SOURCES
         db/merge_operator.cc
         db/output_validator.cc
         db/periodic_task_scheduler.cc
+        db/preprocess_write_lockless.cc
         db/range_del_aggregator.cc
         db/range_tombstone_fragmenter.cc
         db/repair.cc
@@ -874,6 +876,8 @@ set(SOURCES
         util/crc32c.cc
         util/dynamic_bloom.cc
         util/hash.cc
+        util/link_buf.cc
+        util/lsn_offset_allocator.cc
         util/murmurhash.cc
         util/random.cc
         util/rate_limiter.cc
@@ -1333,6 +1337,7 @@ if(WITH_TESTS)
         db/db_with_timestamp_compaction_test.cc
         db/db_write_buffer_manager_test.cc
         db/db_write_test.cc
+        db/preprocess_write_lockless_test.cc
         db/dbformat_test.cc
         db/deletefile_test.cc
         db/error_handler_fs_test.cc
@@ -1345,6 +1350,7 @@ if(WITH_TESTS)
         db/flush_job_test.cc
         db/import_column_family_test.cc
         db/listener_test.cc
+        db/log_record_serializer_test.cc
         db/log_test.cc
         db/manual_compaction_test.cc
         db/memtable_list_test.cc
@@ -1374,6 +1380,7 @@ if(WITH_TESTS)
         env/io_posix_test.cc
         env/mock_env_test.cc
         file/delete_scheduler_test.cc
+        file/nonblocking_io_writable_file_writer_test.cc
         file/prefetch_test.cc
         file/random_access_file_reader_test.cc
         logging/auto_roll_logger_test.cc
@@ -1423,6 +1430,8 @@ if(WITH_TESTS)
         util/filelock_test.cc
         util/hash_test.cc
         util/heap_test.cc
+        util/link_buf_test.cc
+        util/lsn_offset_allocator_test.cc
         util/random_test.cc
         util/rate_limiter_test.cc
         util/repeatable_thread_test.cc

@@ -307,6 +307,25 @@ Status DBImpl::ValidateOptions(const DBOptions& db_options) {
         "nonblocking_wal_io is not compatible with WAL checksum handoff");
   }
 
+  if (!db_options.use_group_commit) {
+    if (!db_options.nonblocking_wal_io) {
+      return Status::InvalidArgument(
+          "use_group_commit=false requires nonblocking_wal_io=true");
+    }
+    if (db_options.two_write_queues) {
+      return Status::InvalidArgument(
+          "use_group_commit=false requires two_write_queues=false");
+    }
+    if (db_options.unordered_write) {
+      return Status::InvalidArgument(
+          "use_group_commit=false requires unordered_write=false");
+    }
+    if (db_options.enable_pipelined_write) {
+      return Status::InvalidArgument(
+          "use_group_commit=false requires enable_pipelined_write=false");
+    }
+  }
+
   if (db_options.use_direct_io_for_flush_and_compaction &&
       0 == db_options.writable_file_max_buffer_size) {
     return Status::InvalidArgument(
