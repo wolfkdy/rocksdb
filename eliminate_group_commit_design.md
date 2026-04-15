@@ -36,6 +36,8 @@ This new path is for `manual_wal_flush=false` (nonblocking_wal_io's domain). `ma
 
 ### 3.1 Independent writer pipeline
 
+*Implementation note (2026-04-15):* live in `db/db_impl/db_impl_write_no_group.cc :: DBImpl::WriteImplNoGroup`. Dispatched from `WriteImpl()` when `use_group_commit=false`. Reader visibility is published via `VersionSet::SetLastSequenceAtLeast(Link_buf::AdvanceWatermark() - 1)` — a CAS-max loop driven by the monotonic watermark return (§3.6), not by `SetLastSequence` (which asserts monotone input that out-of-order writer completion would violate).
+
 Each writer thread executes the following sequence with no leader and no group:
 
 ```
@@ -124,6 +126,8 @@ Therefore: at the moment `B` first accepts a writer's CAS, every advance of `nex
 - v2 will add a soft-cap-driven proactive swap (see §4.3 and §4.9).
 
 ### 3.4 SyncWAL protocol
+
+*Implementation note (2026-04-15):* live in `db/db_impl/db_impl_sync_wal_no_group.cc :: DBImpl::SyncWALNoGroup`. Dispatched from `SyncWAL()` when `use_group_commit=false`. The on-disk flush uses `NonBlockingIOWritableFileWriter::FlushSlotBytes(A)` — `A.bytes` is the AlignedBuffer aliased as `slot_bytes_[0]` or `slot_bytes_[1]` (§4.4 Case 4). IO failure on the switcher path aborts the process per §3.11 (Phase 3 has already published `B`, so returning an error would leave `A`'s on-disk state undefined).
 
 SyncWAL is a *switcher* in the sense of §3.5.4 — it uses the same `close_drain_open` primitive as the structural switch path. The difference from a structural switch (§3.9.1) is that SyncWAL does **not** run `SwitchWAL` / `SwitchMemtable` / `TrimMemtableHistory` / `ScheduleFlushes`. It only flushes `A.bytes[]` synchronously, durably syncs the underlying WAL file, and wakes any concurrent SyncWAL waiters.
 
@@ -680,7 +684,7 @@ With Case 4 resolved (modify `NonBlockingIOWritableFileWriter` in place), the lo
 
 **Residual spec work.** §3.4 still carries a sketched `durable_lsn` atomic and a custom wait primitive; with Case 4 resolved those should be removed in favor of `log_sync_cv_` + `IsSyncing()`. Left as a spec-polish task for the implementation pass — it does not change correctness, only the vocabulary the doc uses.
 
-**Status:** resolved 2026-04-14.
+**Status:** resolved 2026-04-14. Implementation note (2026-04-15): `DBImpl::SyncWALNoGroup` matches the Case-4 vocabulary — loser waits on `log_sync_cv_` until `IsSyncing()` clears on the log `A` was attached to; no `durable_lsn` is introduced. The log-iteration requirement from the bullet above is deferred to 2.3: the Round-2 scope guard `assert(logs_.size() == 1)` holds until the structural-switch path lands.
 
 ### 4.5 WriteBatch validation timing — RESOLVED
 

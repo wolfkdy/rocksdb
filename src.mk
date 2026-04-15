@@ -52,6 +52,8 @@ LIB_SOURCES =                                                   \
   db/db_impl/db_impl_readonly.cc                                \
   db/db_impl/db_impl_secondary.cc                               \
   db/db_impl/db_impl_write.cc                                   \
+  db/db_impl/db_impl_write_no_group.cc                          \
+  db/db_impl/db_impl_sync_wal_no_group.cc                       \
   db/db_info_dumper.cc                                          \
   db/db_iter.cc                                                 \
   db/dbformat.cc                                                \

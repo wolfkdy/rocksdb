@@ -45,16 +45,25 @@ namespace ROCKSDB_NAMESPACE {
 // path, gated by the eliminate_group_commit feature flag.
 class NonBlockingIOWritableFileWriter : public WritableFileWriter {
  public:
-  // Per-buffer slot carrying the §3.5.1 packed header and the
-  // per-buffer next_wal_offset.
+  // Per-buffer slot carrying the §3.5.1 packed header, the per-buffer
+  // next_wal_offset, and the absolute WAL file offset at which the slot's
+  // bytes start.
   //
   // Header layout (bits 0..63 of header_):
   //   bits  0..47  in_flight_count
   //   bits 48..49  state (see BufferState)
   //   bits 50..63  reserved (zero)
+  //
+  // file_offset_start is the absolute offset in the WAL file that corresponds
+  // to byte 0 of this slot's scratch region.  It is set by the switcher in
+  // CloseDrainOpen() Phase 3 before the slot is published, and is stable for
+  // the lifetime of the slot's ACTIVE+PENDING cycle.  SerializeRecord needs
+  // this because log-record block padding depends on `(abs_file_offset %
+  // kBlockSize)`.  See design §3.2 / §3.10.
   struct BufferSlot {
     std::atomic<uint64_t> header;
     uint64_t next_wal_offset;
+    uint64_t file_offset_start;
   };
 
   enum BufferState : uint64_t {
@@ -90,9 +99,17 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   // checksum handoff (perform_data_verification / buffered_data_with_checksum)
   // is rejected at DB open when nonblocking_wal_io is enabled, so those
   // parameters are omitted here.
+  // `use_group_commit` is the DB-level flag.  When false (leaderless write
+  // path enabled), the ctor pre-grows buf_ and flush_buf_ to
+  // kSlotBytesCapacity and aliases them as the two slot scratch regions
+  // (slots_[0] ↔ buf_, slots_[1] ↔ flush_buf_).  In this mode the legacy
+  // SwapBuffer/FlushSwappedBuffer path is never exercised.  When true,
+  // the legacy ping-pong pre-allocation is used and the slot machinery is
+  // dormant.  Caller must pass this explicitly — see design §4.4 Case 4.
   NonBlockingIOWritableFileWriter(
       std::unique_ptr<FSWritableFile>&& file, const std::string& file_name,
-      const FileOptions& options, SystemClock* clock = nullptr,
+      const FileOptions& options, bool use_group_commit,
+      SystemClock* clock = nullptr,
       const std::shared_ptr<IOTracer>& io_tracer = nullptr,
       Statistics* stats = nullptr,
       const std::vector<std::shared_ptr<EventListener>>& listeners = {})
@@ -100,21 +117,37 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
                            io_tracer, stats, listeners,
                            /*file_checksum_gen_factory=*/nullptr,
                            /*perform_data_verification=*/false,
-                           /*buffered_data_with_checksum=*/false) {
-    // Pre-allocate flush_buf_ so that after the first SwapBuffer() the
-    // swapped-in buf_ already has a usable allocation.
-    flush_buf_.Alignment(writable_file()->GetRequiredBufferAlignment());
-    flush_buf_.AllocateNewBuffer(
-        std::min((size_t)65536, max_buffer_size_));
+                           /*buffered_data_with_checksum=*/false),
+        use_group_commit_(use_group_commit) {
+    if (use_group_commit_) {
+      // Legacy ping-pong: small pre-alloc for flush_buf_; buf_ grows via
+      // Append().  Slot machinery is dormant in this mode.
+      flush_buf_.Alignment(writable_file()->GetRequiredBufferAlignment());
+      flush_buf_.AllocateNewBuffer(
+          std::min((size_t)65536, max_buffer_size_));
+    } else {
+      // Leaderless write path: alias buf_ ↔ slots_[0], flush_buf_ ↔
+      // slots_[1], each pre-grown to kSlotBytesCapacity (hard cap — app
+      // must call SyncWAL() regularly, §4.9).  Alignment matches the
+      // underlying file so writes can go direct-to-OS without staging.
+      const size_t align = std::max<size_t>(
+          kSlotBytesAlignment, writable_file()->GetRequiredBufferAlignment());
+      buf_.Alignment(align);
+      buf_.AllocateNewBuffer(kSlotBytesCapacity);
+      flush_buf_.Alignment(align);
+      flush_buf_.AllocateNewBuffer(kSlotBytesCapacity);
+    }
 
     // Initialize the slot machinery: slots_[0] is ACTIVE on construction,
     // slots_[1] is FREE.  active_buffer_ptr_ names the current ACTIVE slot.
     slots_[0].header.store(MakeHeader(kBufferActive, 0),
                            std::memory_order_relaxed);
     slots_[0].next_wal_offset = 0;
+    slots_[0].file_offset_start = 0;
     slots_[1].header.store(MakeHeader(kBufferFree, 0),
                            std::memory_order_relaxed);
     slots_[1].next_wal_offset = 0;
+    slots_[1].file_offset_start = 0;
     active_buffer_ptr_.store(&slots_[0], std::memory_order_relaxed);
   }
 
@@ -149,6 +182,23 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   }
   BufferSlot* Slot(size_t i) { return &slots_[i]; }
 
+  // ---- Per-slot byte scratch regions (eliminate_group_commit path) ----
+  //
+  // Each slot serializes WAL records into a contiguous scratch region at
+  // the writer's reserved offset.  Per §4.4 Case 4: slots_[0] aliases
+  // buf_, slots_[1] aliases flush_buf_ — the same AlignedBuffers the
+  // legacy path uses, just never swapped in this mode.  Capacity is a
+  // hard cap; the app contract is to call SyncWAL() regularly (§4.9).
+  static constexpr size_t kSlotBytesAlignment = 4096;
+  static constexpr size_t kSlotBytesCapacity = size_t{64} * 1024 * 1024;
+
+  char* SlotBytesStart(BufferSlot* slot) {
+    assert(!use_group_commit_);
+    assert(slot == &slots_[0] || slot == &slots_[1]);
+    return (slot == &slots_[0]) ? buf_.BufferStart() : flush_buf_.BufferStart();
+  }
+  size_t SlotBytesCapacity() const { return kSlotBytesCapacity; }
+
   // §3.5.2 Writer claim protocol.  Increments the in-flight count on the
   // active slot via a single CAS that simultaneously verifies state ==
   // ACTIVE.  Spins via cpu_relax while a switch is in progress.  Returns
@@ -159,6 +209,19 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   // §3.5.3 Writer release protocol.  Decrements the in-flight count;
   // state bits are unaffected.
   void ReleaseSlot(BufferSlot* slot);
+
+  // AdvanceFileSize(size_t n) is inherited from WritableFileWriter
+  // (protected → exposed to the leaderless write path via `using` below).
+
+  // Flush `slot_bytes_[slot][0 .. slot->next_wal_offset]` to the OS.  The
+  // caller must be the switcher that won Phase 1 of CloseDrainOpen() on
+  // this slot, so `slot->next_wal_offset` is frozen for the duration of
+  // this call.  Does not update filesize_ (writers already advanced it via
+  // AdvanceFileSize()); flushed_size_ is updated inside WriteToFile().
+  // Safe to call without log_write_mutex_ — mirrors FlushSwappedBuffer().
+  IOStatus FlushSlotBytes(
+      BufferSlot* slot,
+      Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
   // §3.5.4 Close-drain-open primitive.  A is the slot we want to close;
   // B is the other slot (must be FREE when Phase 3 runs).
@@ -178,6 +241,10 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   // called by the switcher that previously got kSwitcher from
   // CloseDrainOpen() on this slot.
   void MarkBufferFree(BufferSlot* slot);
+
+  // Expose the base-class protected helper so the leaderless write path
+  // (WriteImplNoGroup) can advance filesize_ without going through Append.
+  using WritableFileWriter::AdvanceFileSize;
 
  protected:
 #ifndef NDEBUG
@@ -221,6 +288,11 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   // and slots_[1] is FREE.
   BufferSlot slots_[2];
   std::atomic<BufferSlot*> active_buffer_ptr_;
+
+  // DB-level flag captured at construction.  When true (default), legacy
+  // SwapBuffer/FlushSwappedBuffer path is used; when false, the
+  // leaderless write path uses buf_/flush_buf_ as slot scratch regions.
+  const bool use_group_commit_;
 };
 
 }  // namespace ROCKSDB_NAMESPACE

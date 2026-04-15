@@ -36,6 +36,8 @@
 #include "db/post_memtable_callback.h"
 #include "db/pre_release_callback.h"
 #include "db/preprocess_write_lockless.h"
+#include "util/link_buf.h"
+#include "util/lsn_offset_allocator.h"
 #include "db/range_del_aggregator.h"
 #include "db/read_callback.h"
 #include "db/seqno_to_time_mapping.h"
@@ -1053,6 +1055,18 @@ class DBImpl : public DB {
 
   Status TEST_SwitchWAL();
 
+  // Test-only thin wrapper exposing WriteImpl for exercising non-default
+  // parameters (log_used, seq_used, disable_memtable) without touching
+  // production headers.
+  Status TEST_WriteImpl(const WriteOptions& options, WriteBatch* updates,
+                        WriteCallback* callback = nullptr,
+                        uint64_t* log_used = nullptr, uint64_t log_ref = 0,
+                        bool disable_memtable = false,
+                        uint64_t* seq_used = nullptr) {
+    return WriteImpl(options, updates, callback, log_used, log_ref,
+                     disable_memtable, seq_used);
+  }
+
   bool TEST_UnableToReleaseOldestLog() { return unable_to_release_oldest_log_; }
 
   bool TEST_IsLogGettingFlushed() {
@@ -1432,6 +1446,24 @@ class DBImpl : public DB {
                             uint64_t* log_used = nullptr, uint64_t log_ref = 0,
                             bool disable_memtable = false,
                             uint64_t* seq_used = nullptr);
+
+  // Leaderless write path used when use_group_commit_ = false.  See
+  // eliminate_group_commit_design.md §3.1 and §3.8.  Each writer
+  // proceeds independently — no write group, no leader, no WriteThread
+  // enlistment.  Path: lockless prewrite → ClaimSlot → paired LSN/offset
+  // advance → memtable insert → serialize into slot bytes → Link_buf
+  // store/advance → ReleaseSlot.  This Round-2 implementation is not
+  // yet wired into WriteImpl(); call sites land in a later round.
+  Status WriteImplNoGroup(const WriteOptions& write_options,
+                          WriteBatch* my_batch,
+                          WriteCallback* callback = nullptr,
+                          uint64_t* log_used = nullptr,
+                          uint64_t* seq_used = nullptr);
+
+  // SyncWAL variant for use_group_commit=false (design §3.4).  Uses the
+  // CloseDrainOpen primitive to race concurrent SyncWAL callers; loser
+  // waits on log_sync_cv_ until the winner's FinishSync fires.
+  Status SyncWALNoGroup();
 
   // Write only to memtables without joining any write queue
   Status UnorderedWriteMemtable(const WriteOptions& write_options,
@@ -2629,6 +2661,14 @@ class DBImpl : public DB {
   const bool manual_wal_flush_;
   const bool nonblocking_wal_io_;
   const bool use_group_commit_;
+
+  // Lock-free WAL ordering primitives used by the leaderless write path
+  // (use_group_commit_=false).  Allocated at Recover() once
+  // versions_->LastSequence() is known.  Nullptr when
+  // use_group_commit_=true; WriteImplNoGroup will CHECK-fail if the
+  // flag-routing accidentally reaches it without these constructed.
+  std::unique_ptr<LinkBuf> link_buf_;
+  std::unique_ptr<LsnOffsetAllocator> lsn_offset_allocator_;
 
   // LastSequence also indicates last published sequence visibile to the
   // readers. Otherwise LastPublishedSequence should be used.

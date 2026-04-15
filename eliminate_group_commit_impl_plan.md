@@ -37,7 +37,7 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - State-transition invariants: no writer sees `state != ACTIVE` with a successful claim.
 - Stress under TSAN.
 
-**Status:** not started.
+**Status:** done. Implementation in `file/nonblocking_io_writable_file_writer.{h,cc}`; tests in `file/nonblocking_io_writable_file_writer_test.cc`. Per §4.4 Case 4, `slots_[0]` aliases `buf_` and `slots_[1]` aliases `flush_buf_` when `use_group_commit=false` — no separate scratch allocation. `BufferSlot` also carries `file_offset_start` (see §3.10).
 **PR:** —
 
 ---
@@ -60,7 +60,7 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - Oversize batch returns `Status::Busy`.
 - Ring-full triggers abort (death test).
 
-**Status:** not started.
+**Status:** done. Implementation in `util/link_buf.{h,cc}`; `AdvanceWatermark()` returns the new watermark so callers can drive `VersionSet::SetLastSequenceAtLeast` (see §3.6 visibility-publish note below).
 **PR:** —
 
 ---
@@ -79,7 +79,7 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - Torn-tail: truncate output at various points and verify `log::Reader` stops cleanly.
 - Byte-for-byte comparison against `log::Writer::AddRecord` output for the same batch.
 
-**Status:** not started.
+**Status:** done. Exposed as `log::SerializeRecord` + `log::ComputeSerializedRecordSize` (see `db/log_record_serializer.{h,cc}`). The paired allocator (1.4) calls `ComputeSerializedRecordSize` inside the spinlock so `byte_count` is derived from the same `abs_file_offset` that `SerializeRecord` later uses.
 **PR:** —
 
 ---
@@ -98,7 +98,7 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - N-writer contention: partial-order invariant (§3.2.3) holds — ordering of `start_lsn` matches ordering of `start_offset` for any pair of writers.
 - No torn writes: reading `(next_lsn, next_wal_offset)` mid-advance never observes an inconsistent pair.
 
-**Status:** not started.
+**Status:** done. `util/lsn_offset_allocator.{h,cc}`. Public API is `AdvanceForSerialize(lsn_count, payload_size, slot_file_offset_start, recycle_log_files, next_wal_offset)` → `{start_lsn, start_offset, byte_count}`; byte_count is computed under the spinlock to keep the paired advance torn-write-free.
 **PR:** —
 
 ---
@@ -118,27 +118,26 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - No condition set → returns `ok`.
 - Corrupt batch → returns validation failure.
 
-**Status:** not started.
+**Status:** done. `db/preprocess_write_lockless.{h,cc}`. Slow-path reasons (§3.9.1 / §3.9.2) are enumerated in `PrewriteReason`; `WriteImplNoGroup` currently maps every non-ok reason to `Status::NotSupported` pending the 2.3/2.5 wiring.
 **PR:** —
 
 ---
 
-### 1.6 Feature flag `eliminate_group_commit`
+### 1.6 Feature flag `use_group_commit`
 
 **Design ref:** §2.
 
 **Scope:**
-- Add `DBOptions::eliminate_group_commit` (default `false`).
-- Add OpenDB-time validation that all §2 conditions hold when the flag is on (`nonblocking_wal_io=true`, `!two_write_queues`, `!unordered_write`, `!enable_pipelined_write`).
-- Add per-write rejection for `WriteOptions::disableWAL=true` and `WriteOptions::sync=true` when the flag is on.
-- No behavior change — the flag is not yet read by the write path.
+- Add `DBOptions::use_group_commit` (default `true` — i.e., leaderless path is opt-in via `use_group_commit=false`; this is the opposite polarity of the original sketch but reads better as "the traditional mode is the default").
+- Add OpenDB-time validation that all §2 conditions hold when the flag is set to `false` (`nonblocking_wal_io=true`, `!two_write_queues`, `!unordered_write`, `!enable_pipelined_write`). `ColumnFamilyOptions::CheckConcurrentWritesSupported` is also required.
+- Add per-write rejection for `WriteOptions::disableWAL=true`, `WriteOptions::sync=true`, and `WriteBatch::HasMerge()` when the flag is off.
 
 **Tests:**
 - Option parsing / persistence.
-- OpenDB acceptance matrix: flag on + all conditions met → accept; flag on + any condition violated → reject with a clear error.
+- OpenDB acceptance matrix.
 - Per-write rejection matrix.
 
-**Status:** not started.
+**Status:** done. Rejection matrix lives inside `WriteImplNoGroup` and the dispatch prologue at the top of `WriteImpl`.
 **PR:** —
 
 ---
@@ -153,7 +152,13 @@ Starts only after every Round 1 piece is merged. Pieces in this round are NOT in
 
 **Scope:** new function gated by §1.6's flag. Calls §1.5 prewrite, §1.1 claim, §1.4 advance, memtable insert, §1.3 serializer + memcpy, §1.2 Link_buf store + advance, §1.1 release. Error on IO failure per §3.11.
 
-**Status:** not started.
+**Status:** done. `db/db_impl/db_impl_write_no_group.cc`; dispatched from `DBImpl::WriteImpl` when `use_group_commit=false`. Tests in `db/db_write_test.cc :: DBWriteNoGroupCommitTest`.
+
+Key implementation decisions beyond the design doc:
+- Visibility is published via `VersionSet::SetLastSequenceAtLeast(new_watermark - 1)` — a CAS-max loop driven by `Link_buf::AdvanceWatermark()`'s return value. `SetLastSequence` would regress last_sequence_ under out-of-order writer completion.
+- The log-writer snapshot at the top of the function holds `log_write_mutex_` and asserts `logs_.size() == 1` (Round-2 scope guard; piece 2.3's drain protocol obviates the mutex).
+- Any post-claim failure (memtable insert, serialize size mismatch, slot-bytes overflow) aborts the process per §3.11 — the LSN space has advanced, and returning an error would leave a hole.
+- `NonBlockingIOWritableFileWriter::AdvanceFileSize()` is called after every successful serialize so `GetFileSize()` stays honest for downstream observers (§3.9.1 WAL-too-big check, `FlushSwappedBuffer` invariant).
 **PR:** —
 
 ---
@@ -166,8 +171,14 @@ Starts only after every Round 1 piece is merged. Pieces in this round are NOT in
 
 **Tests:** concurrent-SyncWAL collapse, SyncWAL + writes interleaving, SyncWAL + structural-switch race.
 
-**Status:** not started.
+**Status:** done (structural-switch-race test deferred until 2.3).
 **PR:** —
+
+Notes:
+- Aliased `slot_bytes_[0/1]` onto `buf_`/`flush_buf_` per §4.4 Case 4 — one 128 MB/WAL allocation serves both roles; legacy mode (default) keeps the old small pre-alloc.
+- Ctor now takes `use_group_commit` explicitly; DB-open threads `immutable_db_options_.use_group_commit` through.
+- SyncWAL IO failure aborts the process (§3.11): Phase-3 has already published B, so returning an error would leave A's on-disk state undefined.
+- Round-2 scope guard: `assert(logs_.size() == 1)` in both the snapshot and the not-switcher wait — lifted in 2.3.
 
 ---
 
@@ -233,15 +244,15 @@ Starts only after every Round 1 piece is merged. Pieces in this round are NOT in
 
 | Piece | Round | Status | PR |
 |---|---|---|---|
-| 1.1 Packed header + slot primitives | 1 | not started | — |
-| 1.2 Link_buf ring | 1 | not started | — |
-| 1.3 WAL serializer helper | 1 | not started | — |
-| 1.4 Paired LSN-offset allocator | 1 | not started | — |
-| 1.5 Lockless prewrite helper | 1 | not started | — |
-| 1.6 Feature flag | 1 | not started | — |
-| 2.1 WriteImplNoGroup | 2 | blocked on R1 | — |
-| 2.2 SyncWAL variant | 2 | blocked on 2.1 | — |
-| 2.3 Structural switch path | 2 | blocked on 2.2 | — |
-| 2.4 GetSnapshot / iterator wait | 2 | blocked on 2.1 | — |
-| 2.5 Stall path + tests | 2 | blocked on 2.1 | — |
+| 1.1 Packed header + slot primitives | 1 | done | — |
+| 1.2 Link_buf ring | 1 | done | — |
+| 1.3 WAL serializer helper | 1 | done | — |
+| 1.4 Paired LSN-offset allocator | 1 | done | — |
+| 1.5 Lockless prewrite helper | 1 | done | — |
+| 1.6 Feature flag (`use_group_commit`, default `true`) | 1 | done | — |
+| 2.1 WriteImplNoGroup | 2 | done | — |
+| 2.2 SyncWAL variant | 2 | done (structural-switch race test deferred to 2.3) | — |
+| 2.3 Structural switch path | 2 | not started | — |
+| 2.4 GetSnapshot / iterator wait | 2 | not started | — |
+| 2.5 Stall path + tests | 2 | not started | — |
 | 2.6 End-to-end + stress | 2 | blocked on 2.3, 2.4, 2.5 | — |

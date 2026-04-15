@@ -109,6 +109,7 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
     if (nonblocking_wal_io_) {
       for (log::Writer* log : logs_to_sync) {
         assert(log->TEST_BufferIsEmpty());
+        (void)log;
       }
     }
 

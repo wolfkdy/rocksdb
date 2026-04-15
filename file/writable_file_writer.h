@@ -141,6 +141,11 @@ class WritableFileWriter {
  protected:
   AlignedBuffer buf_;
   size_t max_buffer_size_;
+  // Concurrent-safe file-size advance for subclasses whose writers bypass
+  // Append() (see NonBlockingIOWritableFileWriter leaderless path).
+  void AdvanceFileSize(size_t n) {
+    filesize_.fetch_add(static_cast<uint64_t>(n), std::memory_order_release);
+  }
  private:
   // Actually written data size can be used for truncate
   // not counting padding data

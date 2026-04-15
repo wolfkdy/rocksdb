@@ -26,7 +26,8 @@ class NonBlockingSlotTest : public testing::Test {
   NonBlockingSlotTest() {
     std::unique_ptr<FSWritableFile> sink_holder(new test::StringSink());
     writer_.reset(new NonBlockingIOWritableFileWriter(
-        std::move(sink_holder), "" /* file name */, FileOptions()));
+        std::move(sink_holder), "" /* file name */, FileOptions(),
+        /*use_group_commit=*/false));
   }
 
   std::unique_ptr<NonBlockingIOWritableFileWriter> writer_;

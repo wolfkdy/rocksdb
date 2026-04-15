@@ -1377,7 +1377,12 @@ Status ColumnFamilyData::ValidateOptions(
     const DBOptions& db_options, const ColumnFamilyOptions& cf_options) {
   Status s;
   s = CheckCompressionSupported(cf_options);
-  if (s.ok() && db_options.allow_concurrent_memtable_write) {
+  if (s.ok() && (db_options.allow_concurrent_memtable_write ||
+                 !db_options.use_group_commit)) {
+    // use_group_commit=false runs the leaderless path, which always
+    // performs concurrent memtable inserts regardless of the legacy
+    // allow_concurrent_memtable_write flag.  See
+    // eliminate_group_commit_design.md §3.7.
     s = CheckConcurrentWritesSupported(cf_options);
   }
   if (s.ok() && db_options.unordered_write &&

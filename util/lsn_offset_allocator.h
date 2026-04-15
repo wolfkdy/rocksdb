@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 #include "util/mutexlock.h"
@@ -41,6 +42,16 @@ class LsnOffsetAllocator {
     uint64_t start_offset;
   };
 
+  // Return value for AdvanceForSerialize: the reserved (lsn, offset)
+  // pair plus the exact byte_count used to advance `*next_wal_offset`.
+  // The caller uses `byte_count` to bound its memcpy region and to
+  // verify against SerializeRecord()'s actual return.
+  struct AdvanceResult {
+    uint64_t start_lsn;
+    uint64_t start_offset;
+    uint64_t byte_count;
+  };
+
   // Constructs an allocator with `next_lsn_` initialized to `initial_lsn`.
   explicit LsnOffsetAllocator(uint64_t initial_lsn = 0)
       : next_lsn_(initial_lsn) {}
@@ -55,6 +66,22 @@ class LsnOffsetAllocator {
   // PeekPair in that case).
   Pair Advance(uint64_t lsn_count, uint64_t byte_count,
                uint64_t* next_wal_offset);
+
+  // Paired advance that computes `byte_count` inside the spinlock using
+  // the log-record serializer's size formula.  The serializer's output
+  // size depends on `(abs_file_offset % kBlockSize)`, where
+  // `abs_file_offset = slot_file_offset_start + *next_wal_offset` at the
+  // moment the writer sees it — this must match the offset the writer
+  // then hands to SerializeRecord().  Folding the size computation into
+  // the critical section is what guarantees that match; a caller doing
+  // Advance(ComputeSize(peek_offset), ...) would race.
+  //
+  // Returns {start_lsn, start_offset, byte_count}, all values observed
+  // immediately before the advance.
+  AdvanceResult AdvanceForSerialize(uint64_t lsn_count, size_t payload_size,
+                                    uint64_t slot_file_offset_start,
+                                    bool recycle_log_files,
+                                    uint64_t* next_wal_offset);
 
   // Reads both values atomically without advancing either.  Included for
   // tests and for assertions in the write path; production code should

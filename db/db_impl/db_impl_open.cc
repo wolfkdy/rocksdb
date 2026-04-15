@@ -739,6 +739,16 @@ Status DBImpl::Recover(
       versions_->options_file_size_ = options_file_size;
     }
   }
+  if (s.ok() && !immutable_db_options_.use_group_commit) {
+    // Initialize leaderless-path primitives once versions_->LastSequence()
+    // is final.  link_buf_ watermark is seeded at next-LSN so that
+    // AdvanceWatermark cannot be tricked by a Store() whose start_lsn
+    // equals the initial watermark.  See design §3.6.
+    const uint64_t next_lsn = versions_->LastSequence() + 1;
+    link_buf_ = std::make_unique<LinkBuf>();
+    link_buf_->Reset(next_lsn);
+    lsn_offset_allocator_ = std::make_unique<LsnOffsetAllocator>(next_lsn);
+  }
   return s;
 }
 
@@ -1788,6 +1798,7 @@ IOStatus DBImpl::CreateWAL(uint64_t log_file_num, uint64_t recycle_log_number,
       }
       file_writer.reset(new NonBlockingIOWritableFileWriter(
           std::move(lfile), log_fname, opt_file_options,
+          immutable_db_options_.use_group_commit,
           immutable_db_options_.clock, io_tracer_, nullptr /* stats */,
           listeners));
     } else {

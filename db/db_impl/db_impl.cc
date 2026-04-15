@@ -1461,6 +1461,9 @@ Status DBImpl::FlushWAL(bool sync) {
 }
 
 Status DBImpl::SyncWAL() {
+  if (!immutable_db_options_.use_group_commit) {
+    return SyncWALNoGroup();
+  }
   TEST_SYNC_POINT("DBImpl::SyncWAL:Begin");
 
   autovector<log::Writer*, 1> logs_to_sync;

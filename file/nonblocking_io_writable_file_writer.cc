@@ -61,6 +61,37 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSwappedBuffer(
   return s;
 }
 
+IOStatus NonBlockingIOWritableFileWriter::FlushSlotBytes(
+    BufferSlot* slot, Env::IOPriority op_rate_limiter_priority) {
+  assert(slot != nullptr);
+  assert(!use_group_commit_);
+  if (seen_error()) {
+    return AssertFalseAndGetStatusForPrevError();
+  }
+  assert(!use_direct_io());
+  assert(!buffered_data_with_checksum_);
+
+  // Caller must be the switcher post-Phase-2, so next_wal_offset is stable.
+  const uint64_t nbytes = slot->next_wal_offset;
+  IOStatus s;
+  if (nbytes > 0) {
+    // Writers have already advanced filesize_ via AdvanceFileSize() for
+    // every byte we're about to write, so flushed_size_ + nbytes must be
+    // within filesize_.
+    assert(GetFlushedSize() + nbytes <= GetFileSize());
+    const char* src = (slot == &slots_[0]) ? buf_.BufferStart()
+                                            : flush_buf_.BufferStart();
+    s = WriteToFile(src, static_cast<size_t>(nbytes),
+                    op_rate_limiter_priority);
+    if (!s.ok()) {
+      set_seen_error();
+      return s;
+    }
+  }
+  s = FlushOSCacheAndMaybeRangeSync(op_rate_limiter_priority);
+  return s;
+}
+
 NonBlockingIOWritableFileWriter::BufferSlot*
 NonBlockingIOWritableFileWriter::ClaimSlot() {
   // §3.5.2: loop until the single atomic CAS that simultaneously verifies
@@ -139,7 +170,13 @@ NonBlockingIOWritableFileWriter::CloseDrainOpen(BufferSlot* A, BufferSlot* B) {
   assert(HeaderState(b_h) == kBufferFree);
   assert(HeaderCount(b_h) == 0);
   (void)b_h;
+  // B's scratch region starts at the absolute file offset immediately
+  // after A's highest reserved byte.  A->next_wal_offset was frozen by
+  // Phase 2's drain — no writer may advance it after count reached 0.
+  // SerializeRecord uses (B->file_offset_start + writer_offset) to
+  // compute log-record block padding (§3.10).
   B->next_wal_offset = 0;
+  B->file_offset_start = A->file_offset_start + A->next_wal_offset;
   B->header.store(MakeHeader(kBufferActive, 0), std::memory_order_release);
   active_buffer_ptr_.store(B, std::memory_order_release);
   return SwitchResult::kSwitcher;

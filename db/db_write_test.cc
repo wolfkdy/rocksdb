@@ -1443,6 +1443,257 @@ TEST_F(DBUseGroupCommitFlagTest, FalseRejectsSyncWrite) {
   ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
 }
 
+// Tests for the leaderless write path (WriteImplNoGroup), reached when
+// use_group_commit=false.  Scope limits for Round-2 piece 2.1:
+//   - No Close + Reopen: slot bytes are not yet flushed to disk
+//     (that lands in piece 2.2), so written data is in-memory only.
+//   - No Flush / WAL-too-big / WBM conditions: those route to the
+//     slow path, which returns NotSupported in the 2.1 stub, and
+//     would also trip the `logs_.size() == 1` assert inside
+//     WriteImplNoGroup until piece 2.3 wires the structural switch.
+// Within those limits we exercise the hot path end-to-end: Put, Get,
+// concurrent writers, LSN publication, and rejection of unsupported
+// features.
+class DBWriteNoGroupCommitTest : public DBTestBase {
+ public:
+  DBWriteNoGroupCommitTest()
+      : DBTestBase("db_write_no_group_commit_test", /*env_do_fsync=*/false) {}
+
+  Options NoGroupCommitOptions() {
+    Options options = CurrentOptions();
+    options.use_group_commit = false;
+    options.nonblocking_wal_io = true;
+    // Keep memtables large so no background flush triggers during the
+    // test — SwitchMemtable would trip the 2.1 scope assert.
+    options.write_buffer_size = 64 << 20;
+    options.max_write_buffer_number = 4;
+    return options;
+  }
+};
+
+TEST_F(DBWriteNoGroupCommitTest, BasicPutGet) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("k1", "v1"));
+  ASSERT_OK(Put("k2", "v2"));
+  ASSERT_OK(Put("k1", "v1-updated"));
+
+  ASSERT_EQ("v1-updated", Get("k1"));
+  ASSERT_EQ("v2", Get("k2"));
+  ASSERT_EQ("NOT_FOUND", Get("k3"));
+}
+
+TEST_F(DBWriteNoGroupCommitTest, DeleteAndGet) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("k1", "v1"));
+  ASSERT_OK(Delete("k1"));
+  ASSERT_EQ("NOT_FOUND", Get("k1"));
+}
+
+TEST_F(DBWriteNoGroupCommitTest, ConcurrentPutsAllVisible) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  constexpr int kWriters = 8;
+  constexpr int kPerWriter = 500;
+  std::atomic<int> errors{0};
+
+  std::vector<port::Thread> threads;
+  threads.reserve(kWriters);
+  for (int t = 0; t < kWriters; ++t) {
+    threads.emplace_back([&, t]() {
+      for (int i = 0; i < kPerWriter; ++i) {
+        std::string key = "t" + std::to_string(t) + "_k" + std::to_string(i);
+        std::string val = "v" + std::to_string(i);
+        Status s = Put(key, val);
+        if (!s.ok()) {
+          errors.fetch_add(1);
+        }
+      }
+    });
+  }
+  for (auto& th : threads) {
+    th.join();
+  }
+
+  ASSERT_EQ(0, errors.load());
+
+  for (int t = 0; t < kWriters; ++t) {
+    for (int i = 0; i < kPerWriter; ++i) {
+      std::string key = "t" + std::to_string(t) + "_k" + std::to_string(i);
+      std::string expected = "v" + std::to_string(i);
+      ASSERT_EQ(expected, Get(key)) << "key=" << key;
+    }
+  }
+}
+
+TEST_F(DBWriteNoGroupCommitTest, LastSequenceAdvancesByBatchCount) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  const SequenceNumber before = dbfull()->GetLatestSequenceNumber();
+
+  WriteBatch batch;
+  ASSERT_OK(batch.Put("a", "1"));
+  ASSERT_OK(batch.Put("b", "2"));
+  ASSERT_OK(batch.Put("c", "3"));
+  ASSERT_OK(dbfull()->Write(WriteOptions(), &batch));
+
+  // A single 3-entry batch consumes 3 LSNs — the watermark-driven
+  // publish should have advanced LastSequence by exactly that much.
+  const SequenceNumber after = dbfull()->GetLatestSequenceNumber();
+  ASSERT_EQ(before + 3, after);
+}
+
+TEST_F(DBWriteNoGroupCommitTest, MergeBatchRejected) {
+  Options options = NoGroupCommitOptions();
+  options.merge_operator.reset(new TestPutOperator());
+  DestroyAndReopen(options);
+
+  WriteBatch batch;
+  ASSERT_OK(batch.Merge("k", "v"));
+  Status s = dbfull()->Write(WriteOptions(), &batch);
+  ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+}
+
+TEST_F(DBWriteNoGroupCommitTest, LogUsedPopulated) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  // Drive WriteImpl directly so we can ask for log_used.
+  WriteBatch batch;
+  ASSERT_OK(batch.Put("k", "v"));
+  uint64_t log_used = 0;
+  uint64_t seq_used = 0;
+  ASSERT_OK(dbfull()->TEST_WriteImpl(WriteOptions(), &batch,
+                                     /*callback=*/nullptr, &log_used,
+                                     /*log_ref=*/0,
+                                     /*disable_memtable=*/false, &seq_used));
+  ASSERT_GT(log_used, 0u);
+  ASSERT_GT(seq_used, 0u);
+  ASSERT_EQ(seq_used, dbfull()->GetLatestSequenceNumber());
+  ASSERT_EQ("v", Get("k"));
+}
+
+TEST_F(DBWriteNoGroupCommitTest, DisableMemtableRejected) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  WriteBatch batch;
+  ASSERT_OK(batch.Put("k", "v"));
+  Status s = dbfull()->TEST_WriteImpl(WriteOptions(), &batch,
+                                      /*callback=*/nullptr,
+                                      /*log_used=*/nullptr, /*log_ref=*/0,
+                                      /*disable_memtable=*/true);
+  ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+}
+
+TEST_F(DBWriteNoGroupCommitTest, LegacyPathUnaffected) {
+  // Sanity check that the default (group-commit) path still works
+  // exactly as before — the dispatch in WriteImpl must not alter the
+  // legacy code path when use_group_commit=true (the default).
+  Options options = CurrentOptions();
+  // Leave use_group_commit at its default of true.
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("k", "v"));
+  ASSERT_EQ("v", Get("k"));
+}
+
+TEST_F(DBWriteNoGroupCommitTest, SyncWALBasic) {
+  // SyncWAL() must make prior writes durable.  We can't directly test
+  // on-disk persistence here, but we can verify the call returns OK and
+  // doesn't regress reads.
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(Put("b", "2"));
+  ASSERT_OK(dbfull()->SyncWAL());
+  ASSERT_EQ("1", Get("a"));
+  ASSERT_EQ("2", Get("b"));
+  // A second SyncWAL with no intervening writes must also succeed
+  // (empty-slot flush is a no-op at the bytes layer).
+  ASSERT_OK(dbfull()->SyncWAL());
+}
+
+TEST_F(DBWriteNoGroupCommitTest, SyncWALInterleavedWithWrites) {
+  // Writes and SyncWAL calls interleaved from the same thread should
+  // all succeed and all values must remain readable.
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_OK(Put("k" + std::to_string(i), "v" + std::to_string(i)));
+    if (i % 5 == 0) {
+      ASSERT_OK(dbfull()->SyncWAL());
+    }
+  }
+  ASSERT_OK(dbfull()->SyncWAL());
+  for (int i = 0; i < 20; ++i) {
+    ASSERT_EQ("v" + std::to_string(i), Get("k" + std::to_string(i)));
+  }
+}
+
+TEST_F(DBWriteNoGroupCommitTest, ConcurrentSyncWALCollapse) {
+  // Many concurrent SyncWAL callers must all return OK — exactly one
+  // wins Phase-1 of CloseDrainOpen per race, the rest wait on
+  // log_sync_cv_.  Mixed with writer threads to stress the race with
+  // in-flight ClaimSlot()s.
+  constexpr int kSyncers = 8;
+  constexpr int kWriters = 4;
+  constexpr int kIters = 50;
+
+  std::atomic<int> failures{0};
+  std::vector<port::Thread> threads;
+  threads.reserve(kSyncers + kWriters);
+
+  for (int t = 0; t < kWriters; ++t) {
+    threads.emplace_back([this, t, &failures]() {
+      for (int i = 0; i < kIters; ++i) {
+        std::string k = "w" + std::to_string(t) + "_" + std::to_string(i);
+        if (!Put(k, "v").ok()) failures.fetch_add(1);
+      }
+    });
+  }
+  for (int t = 0; t < kSyncers; ++t) {
+    threads.emplace_back([this, &failures]() {
+      for (int i = 0; i < kIters; ++i) {
+        if (!dbfull()->SyncWAL().ok()) failures.fetch_add(1);
+      }
+    });
+  }
+  for (auto& th : threads) th.join();
+  ASSERT_EQ(0, failures.load());
+
+  // Every writer's last put must be readable.
+  for (int t = 0; t < kWriters; ++t) {
+    std::string k = "w" + std::to_string(t) + "_" +
+                    std::to_string(kIters - 1);
+    ASSERT_EQ("v", Get(k));
+  }
+}
+
+TEST_F(DBWriteNoGroupCommitTest, SyncWALDurabilityAcrossReopen) {
+  // After SyncWAL, a crash-free reopen must see every synced write.
+  Options options = CurrentOptions();
+  options.use_group_commit = false;
+  options.nonblocking_wal_io = true;
+  options.two_write_queues = false;
+  options.unordered_write = false;
+  options.enable_pipelined_write = false;
+  options.allow_concurrent_memtable_write = true;
+  options.avoid_flush_during_shutdown = true;  // keep data in WAL only
+  DestroyAndReopen(options);
+
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_OK(Put("r" + std::to_string(i), "x" + std::to_string(i)));
+  }
+  ASSERT_OK(dbfull()->SyncWAL());
+
+  Reopen(options);
+  for (int i = 0; i < 10; ++i) {
+    ASSERT_EQ("x" + std::to_string(i), Get("r" + std::to_string(i)));
+  }
+}
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

@@ -193,6 +193,25 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
     return Status::InvalidArgument(
         "`WriteOptions::protection_bytes_per_key` must be zero or eight");
   }
+
+  // use_group_commit=false routes to the leaderless write path.  The
+  // parameters supported by WriteImplNoGroup are a strict subset of
+  // WriteImpl's: disable_memtable, log_ref, batch_cnt, pre-release and
+  // post-memtable callbacks are 2PC / seq_per_batch features that the
+  // leaderless design does not yet cover.  Reject them up front rather
+  // than silently ignoring.  See eliminate_group_commit_design.md §3.1.
+  if (!immutable_db_options_.use_group_commit) {
+    if (disable_memtable || log_ref != 0 || batch_cnt != 0 ||
+        pre_release_callback != nullptr ||
+        post_memtable_callback != nullptr) {
+      return Status::NotSupported(
+          "use_group_commit=false does not support 2PC / seq_per_batch "
+          "write paths (disable_memtable, log_ref, batch_cnt, "
+          "pre_release_callback, post_memtable_callback)");
+    }
+    return WriteImplNoGroup(write_options, my_batch, callback, log_used,
+                            seq_used);
+  }
   // TODO: this use of operator bool on `tracer_` can avoid unnecessary lock
   // grabs but does not seem thread-safe.
   if (tracer_) {

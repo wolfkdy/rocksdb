@@ -1269,6 +1269,22 @@ class VersionSet {
     last_sequence_.store(s, std::memory_order_release);
   }
 
+  // Monotonic max-publish of last_sequence_.  Used by the leaderless
+  // write path (use_group_commit=false): writers complete out of order,
+  // so each writer publishes the current Link_buf watermark (which is
+  // monotonic by construction) rather than its own per-batch end LSN.
+  // A raw SetLastSequence() from a lagging writer would regress the
+  // counter and trip its `s >= last_sequence_` assert — this CAS-max
+  // loop is the correct shape.
+  void SetLastSequenceAtLeast(uint64_t s) {
+    uint64_t cur = last_sequence_.load(std::memory_order_relaxed);
+    while (cur < s &&
+           !last_sequence_.compare_exchange_weak(cur, s,
+                                                 std::memory_order_release,
+                                                 std::memory_order_relaxed)) {
+    }
+  }
+
   // Note: memory_order_release must be sufficient
   void SetLastPublishedSequence(uint64_t s) {
     assert(s >= last_published_sequence_);
