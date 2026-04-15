@@ -2,7 +2,7 @@
 
 **Companion to:** `eliminate_group_commit_design.md`. This doc tracks the "how and in what order"; the design doc tracks the "what and why". Each piece below cross-references the specific design section it implements.
 
-**Last updated:** 2026-04-14.
+**Last updated:** 2026-04-15.
 
 ---
 
@@ -21,23 +21,23 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 
 ## 2. Round 1 — Independent building blocks
 
-### 1.1 Packed header + slot primitives on `NonBlockingIOWritableFileWriter`
+### 1.1 Slot primitives on `NonBlockingIOWritableFileWriter`
 
-**Design ref:** §3.5 (layout, claim, release, close-drain-open).
+**Design ref:** §3.5 (slot layout, ClaimSlot/ReleaseSlot, SwitchActive/WaitDrain/ResetDrainedSlot).
 
 **Scope:**
-- Add `std::atomic<uint64_t> header_` per buffer, bits 0..47 = `in_flight_count`, bits 48..49 = `state`, bits 50..63 reserved. See §3.5.1.
-- Add `next_wal_offset_` per buffer.
-- Add methods: `ClaimSlot() -> Buffer*`, `ReleaseSlot(Buffer*)`, `CloseDrainOpen(Buffer* A, Buffer* B) -> {SWITCHER, NOT_SWITCHER}`.
-- Default-mode preservation: `header_` initialized to `{state=ACTIVE, count=0}`; existing `SwapBuffer()` / `FlushSwappedBuffer()` code paths must not read or write the new fields. This piece is invisible to any caller that doesn't invoke the new methods.
+- Add `BufferSlot { atomic<uint64_t> in_flight_count; uint64_t next_wal_offset; uint64_t file_offset_start; }` (no state bits — claim/switch are mutex-serialized at the DB layer; see §3.5.1).
+- Two slots per writer plus `atomic<BufferSlot*> active_buffer_ptr_`.
+- Methods: `ClaimSlot()` (under `wal_write_mutex_`), `ReleaseSlot()` (lockless release-decrement), `SwitchActive(A, B)` (under `wal_write_mutex_`), `WaitDrain(slot)` (acquire-load spin, no mutex), `ResetDrainedSlot(slot)`.
+- Default-mode preservation: in `use_group_commit=true` mode, slot fields stay at their benign zero values and the legacy `SwapBuffer()` / `FlushSwappedBuffer()` path is unchanged. The constructor's `use_group_commit` parameter selects between the legacy small-flush_buf preallocation and the slot-aliased pre-grown buffers (kSlotBytesCapacity each).
 
 **Tests:**
-- CAS race: N claimers vs. one closer. Correct final state (`PENDING` → drained → `FREE`).
-- Drain correctness: switcher's phase-2 wait does not complete until every `ReleaseSlot` fires.
-- State-transition invariants: no writer sees `state != ACTIVE` with a successful claim.
-- Stress under TSAN.
+- Single-thread sanity: initial active is slot 0; ClaimSlot/ReleaseSlot bump and drop in_flight_count.
+- SwitchActive publishes B and carries file_offset_start = A->file_offset_start + A->next_wal_offset.
+- WaitDrain blocks until in_flight_count returns to zero (verified with a parked-claim thread + 20ms sleep).
+- ResetDrainedSlot zeroes next_wal_offset.
 
-**Status:** done. Implementation in `file/nonblocking_io_writable_file_writer.{h,cc}`; tests in `file/nonblocking_io_writable_file_writer_test.cc`. Per §4.4 Case 4, `slots_[0]` aliases `buf_` and `slots_[1]` aliases `flush_buf_` when `use_group_commit=false` — no separate scratch allocation. `BufferSlot` also carries `file_offset_start` (see §3.10).
+**Status:** done. Implementation in `file/nonblocking_io_writable_file_writer.{h,cc}`; tests in `file/nonblocking_io_writable_file_writer_test.cc`. Per §4.4 Case 4, `slots_[0]` aliases `buf_` and `slots_[1]` aliases `flush_buf_` when `use_group_commit=false` — no separate scratch allocation.
 **PR:** —
 
 ---
@@ -79,26 +79,18 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 - Torn-tail: truncate output at various points and verify `log::Reader` stops cleanly.
 - Byte-for-byte comparison against `log::Writer::AddRecord` output for the same batch.
 
-**Status:** done. Exposed as `log::SerializeRecord` + `log::ComputeSerializedRecordSize` (see `db/log_record_serializer.{h,cc}`). The paired allocator (1.4) calls `ComputeSerializedRecordSize` inside the spinlock so `byte_count` is derived from the same `abs_file_offset` that `SerializeRecord` later uses.
+**Status:** done. Exposed as `log::SerializeRecord` + `log::ComputeSerializedRecordSize` (see `db/log_record_serializer.{h,cc}`). `WriteImplNoGroup` calls `ComputeSerializedRecordSize` inside the `wal_write_mutex_` CS so `byte_count` is derived from the same `abs_file_offset` that `SerializeRecord` later uses.
 **PR:** —
 
 ---
 
-### 1.4 Paired LSN-offset allocator
+### 1.4 Paired LSN-offset advance under `wal_write_mutex_`
 
-**Design ref:** §3.2 (paired advance under spinlock).
+**Design ref:** §3.2 (paired advance under the adaptive mutex).
 
-**Scope:**
-- Small class wrapping a spinlock plus references to `next_lsn` and one buffer's `next_wal_offset`.
-- API: `Advance(lsn_count, byte_count) -> {start_lsn, start_offset}`.
-- Spinlock body is four plain stores and two plain loads — no branches (§3.2.2).
+**Scope:** the paired advance is inlined into `WriteImplNoGroup`'s single CS — no separate class. `next_lsn_` is a plain `uint64_t` member on `DBImpl`; the pair-advance is `start_lsn = next_lsn_; start_offset = slot->next_wal_offset; next_lsn_ += batch_lsn_count; slot->next_wal_offset += byte_count;`, all under `wal_write_mutex_`.
 
-**Tests:**
-- Single-thread monotonicity.
-- N-writer contention: partial-order invariant (§3.2.3) holds — ordering of `start_lsn` matches ordering of `start_offset` for any pair of writers.
-- No torn writes: reading `(next_lsn, next_wal_offset)` mid-advance never observes an inconsistent pair.
-
-**Status:** done. `util/lsn_offset_allocator.{h,cc}`. Public API is `AdvanceForSerialize(lsn_count, payload_size, slot_file_offset_start, recycle_log_files, next_wal_offset)` → `{start_lsn, start_offset, byte_count}`; byte_count is computed under the spinlock to keep the paired advance torn-write-free.
+**Status:** done. Coverage rolls up under `db_write_test`'s leaderless cases.
 **PR:** —
 
 ---
@@ -156,7 +148,7 @@ Starts only after every Round 1 piece is merged. Pieces in this round are NOT in
 
 Key implementation decisions beyond the design doc:
 - Visibility is published via `VersionSet::SetLastSequenceAtLeast(new_watermark - 1)` — a CAS-max loop driven by `Link_buf::AdvanceWatermark()`'s return value. `SetLastSequence` would regress last_sequence_ under out-of-order writer completion.
-- The log-writer snapshot at the top of the function holds `log_write_mutex_` and asserts `logs_.size() == 1` (Round-2 scope guard; piece 2.3's drain protocol obviates the mutex).
+- The single CS at the top of the function holds `wal_write_mutex_` (adaptive `InstrumentedMutex`) and covers: snapshot of `logs_.back()`, `ClaimSlot`, paired `(next_lsn_, slot->next_wal_offset)` advance via `log::ComputeSerializedRecordSize`. Round-2 scope guard `assert(logs_.size() == 1)`.
 - Any post-claim failure (memtable insert, serialize size mismatch, slot-bytes overflow) aborts the process per §3.11 — the LSN space has advanced, and returning an error would leave a hole.
 - `NonBlockingIOWritableFileWriter::AdvanceFileSize()` is called after every successful serialize so `GetFileSize()` stays honest for downstream observers (§3.9.1 WAL-too-big check, `FlushSwappedBuffer` invariant).
 **PR:** —
@@ -167,7 +159,7 @@ Key implementation decisions beyond the design doc:
 
 **Design ref:** §3.4.
 
-**Scope:** branches on the flag; new variant uses `CloseDrainOpen` + `PrepareForSync` / `FinishSync` / `log_sync_cv_` per §3.4.
+**Scope:** branches on the flag; new variant uses `SwitchActive` + `WaitDrain` + `PrepareForSync` / `FinishSync` / `log_sync_cv_` per §3.4. Concurrent SyncWAL serialization is via the entry-time `IsSyncing()` wait inside `wal_write_mutex_`.
 
 **Tests:** concurrent-SyncWAL collapse, SyncWAL + writes interleaving, SyncWAL + structural-switch race.
 
@@ -178,7 +170,7 @@ Notes:
 - Aliased `slot_bytes_[0/1]` onto `buf_`/`flush_buf_` per §4.4 Case 4 — one 128 MB/WAL allocation serves both roles; legacy mode (default) keeps the old small pre-alloc.
 - Ctor now takes `use_group_commit` explicitly; DB-open threads `immutable_db_options_.use_group_commit` through.
 - SyncWAL IO failure aborts the process (§3.11): Phase-3 has already published B, so returning an error would leave A's on-disk state undefined.
-- Round-2 scope guard: `assert(logs_.size() == 1)` in both the snapshot and the not-switcher wait — lifted in 2.3.
+- Round-2 scope guard: `assert(logs_.size() == 1)` — lifted in 2.3 once the structural switch path can grow `logs_`.
 
 ---
 
@@ -186,7 +178,7 @@ Notes:
 
 **Design ref:** §3.9.1.
 
-**Scope:** implements the full §3.9.1 sequence: `CloseDrainOpen` → `mutex_` → `SwitchWAL` / `SwitchMemtable` / `TrimMemtableHistory` / `ScheduleFlushes` → publish B → schedule async flush of A via `PrepareForSync → ... → FinishSync + SignalAll`.
+**Scope:** implements the full §3.9.1 sequence under `wal_write_mutex_`: entry-time `IsSyncing()` wait → `mutex_` for `SwitchWAL` / `SwitchMemtable` / `TrimMemtableHistory` / `ScheduleFlushes` → `SwitchActive(A,B)` → `PrepareForSync` on A's log → release the mutex → schedule async flush of A (`WaitDrain` → `FlushSlotBytes` → `SyncWithoutFlush` → `MarkLogsSynced` + cv signal → `ResetDrainedSlot`).
 
 **Tests:** each triggering condition, coalescing of multiple conditions, async-flush-of-A vs. concurrent SwitchMemtable race (covered by existing `IsSyncing()` plumbing).
 
@@ -244,10 +236,10 @@ Notes:
 
 | Piece | Round | Status | PR |
 |---|---|---|---|
-| 1.1 Packed header + slot primitives | 1 | done | — |
+| 1.1 Slot primitives | 1 | done | — |
 | 1.2 Link_buf ring | 1 | done | — |
 | 1.3 WAL serializer helper | 1 | done | — |
-| 1.4 Paired LSN-offset allocator | 1 | done | — |
+| 1.4 Paired LSN-offset advance (inlined under `wal_write_mutex_`) | 1 | done | — |
 | 1.5 Lockless prewrite helper | 1 | done | — |
 | 1.6 Feature flag (`use_group_commit`, default `true`) | 1 | done | — |
 | 2.1 WriteImplNoGroup | 2 | done | — |

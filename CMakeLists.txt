@@ -879,7 +879,6 @@ set(SOURCES
         util/dynamic_bloom.cc
         util/hash.cc
         util/link_buf.cc
-        util/lsn_offset_allocator.cc
         util/murmurhash.cc
         util/random.cc
         util/rate_limiter.cc
@@ -1433,7 +1432,6 @@ if(WITH_TESTS)
         util/hash_test.cc
         util/heap_test.cc
         util/link_buf_test.cc
-        util/lsn_offset_allocator_test.cc
         util/random_test.cc
         util/rate_limiter_test.cc
         util/repeatable_thread_test.cc

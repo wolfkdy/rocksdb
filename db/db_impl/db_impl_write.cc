@@ -617,14 +617,14 @@ Status DBImpl::WriteImpl(const WriteOptions& write_options,
 
   if (log_context.need_log_sync) {
     VersionEdit synced_wals;
-    log_write_mutex_.Lock();
+    wal_write_mutex_.Lock();
     if (status.ok()) {
       MarkLogsSynced(logfile_number_, log_context.need_log_dir_sync,
                      &synced_wals);
     } else {
       MarkLogsNotSynced(logfile_number_);
     }
-    log_write_mutex_.Unlock();
+    wal_write_mutex_.Unlock();
     if (status.ok() && synced_wals.IsWalAddition()) {
       InstrumentedMutexLock l(&mutex_);
       status = ApplyWALToManifest(&synced_wals);
@@ -778,7 +778,7 @@ Status DBImpl::PipelinedWriteImpl(const WriteOptions& write_options,
 
     VersionEdit synced_wals;
     if (log_context.need_log_sync) {
-      InstrumentedMutexLock l(&log_write_mutex_);
+      InstrumentedMutexLock l(&wal_write_mutex_);
       if (w.status.ok()) {
         MarkLogsSynced(logfile_number_, log_context.need_log_dir_sync,
                        &synced_wals);
@@ -1229,7 +1229,7 @@ Status DBImpl::PreprocessWrite(const WriteOptions& write_options,
       WriteBufferManagerStallWrites();
     }
   }
-  InstrumentedMutexLock l(&log_write_mutex_);
+  InstrumentedMutexLock l(&wal_write_mutex_);
   if (status.ok() && log_context->need_log_sync) {
     // Wait until the parallel syncs are finished. Any sync process has to sync
     // the front log too so it is enough to check the status of front()
@@ -1306,7 +1306,7 @@ Status DBImpl::MergeBatch(const WriteThread::WriteGroup& write_group,
 }
 
 // When two_write_queues_ is disabled, this function is called from the only
-// write thread. Otherwise this must be called holding log_write_mutex_.
+// write thread. Otherwise this must be called holding wal_write_mutex_.
 IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
                             log::Writer* log_writer, uint64_t* log_used,
                             uint64_t* log_size,
@@ -1322,7 +1322,7 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   }
   *log_size = log_entry.size();
   // When two_write_queues_ WriteToWAL has to be protected from concurretn calls
-  // from the two queues anyway and log_write_mutex_ is already held. Otherwise
+  // from the two queues anyway and wal_write_mutex_ is already held. Otherwise
   // if manual_wal_flush_ is enabled we need to protect log_writer->AddRecord
   // from possible concurrent calls via the FlushWAL by the application.
   // When nonblocking_wal_io_ is enabled, we need to protect AddRecord from
@@ -1330,11 +1330,11 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   const bool needs_locking =
       (manual_wal_flush_ && !two_write_queues_) || nonblocking_wal_io_;
   if (needs_locking) {
-    log_write_mutex_.Lock();
+    wal_write_mutex_.Lock();
   }
-  // Under log_write_mutex_, no SwapBuffer can be in progress, so flush_buf_
+  // Under wal_write_mutex_, no SwapBuffer can be in progress, so flush_buf_
   // must be empty — Append() and SwapBuffer() never overlap.
-  // flush_buf_ must be empty under log_write_mutex_ — otherwise we'd have
+  // flush_buf_ must be empty under wal_write_mutex_ — otherwise we'd have
   // concurrent writes to the same underlying file, risking WAL corruption.
   if (nonblocking_wal_io_ &&
       !static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file())
@@ -1346,7 +1346,7 @@ IOStatus DBImpl::WriteToWAL(const WriteBatch& merged_batch,
   size_t wal_buf_size = log_writer->file()->BufferSize();
 
   if (needs_locking) {
-    log_write_mutex_.Unlock();
+    wal_write_mutex_.Unlock();
   }
   if (nonblocking_wal_io_) {
     static constexpr size_t kWALBufferWarningSize = 100 << 20;  // 100MB
@@ -1418,14 +1418,14 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     //  - as long as other threads don't modify it, it's safe to read
     //    from std::deque from multiple threads concurrently.
     //
-    // Sync operation should work with locked log_write_mutex_, because:
+    // Sync operation should work with locked wal_write_mutex_, because:
     //   when DBOptions.manual_wal_flush_ is set,
     //   FlushWAL function will be invoked by another thread.
-    //   if without locked log_write_mutex_, the log file may get data
+    //   if without locked wal_write_mutex_, the log file may get data
     //   corruption
     const bool needs_locking = manual_wal_flush_ && !two_write_queues_;
     if (needs_locking) {
-      log_write_mutex_.Lock();
+      wal_write_mutex_.Lock();
     }
 
     for (auto& log : logs_) {
@@ -1436,7 +1436,7 @@ IOStatus DBImpl::WriteToWAL(const WriteThread::WriteGroup& write_group,
     }
 
     if (needs_locking) {
-      log_write_mutex_.Unlock();
+      wal_write_mutex_.Unlock();
     }
 
     if (io_s.ok() && need_log_dir_sync) {
@@ -1484,9 +1484,9 @@ IOStatus DBImpl::ConcurrentWriteToWAL(
     return io_s;
   }
 
-  // We need to lock log_write_mutex_ since logs_ and alive_log_files might be
+  // We need to lock wal_write_mutex_ since logs_ and alive_log_files might be
   // pushed back concurrently
-  log_write_mutex_.Lock();
+  wal_write_mutex_.Lock();
   if (merged_batch == write_group.leader->batch) {
     write_group.leader->log_used = logfile_number_;
   } else if (write_with_wal > 1) {
@@ -1511,7 +1511,7 @@ IOStatus DBImpl::ConcurrentWriteToWAL(
     cached_recoverable_state_ = *to_be_cached_state;
     cached_recoverable_state_empty_ = false;
   }
-  log_write_mutex_.Unlock();
+  wal_write_mutex_.Unlock();
 
   if (io_s.ok()) {
     const bool concurrent = true;
@@ -1532,7 +1532,7 @@ Status DBImpl::WriteRecoverableState() {
     bool dont_care_bool;
     SequenceNumber next_seq;
     if (two_write_queues_) {
-      log_write_mutex_.Lock();
+      wal_write_mutex_.Lock();
     }
     SequenceNumber seq;
     if (two_write_queues_) {
@@ -1553,7 +1553,7 @@ Status DBImpl::WriteRecoverableState() {
     }
     versions_->SetLastSequence(last_seq);
     if (two_write_queues_) {
-      log_write_mutex_.Unlock();
+      wal_write_mutex_.Unlock();
     }
     if (status.ok() && recoverable_state_pre_release_callback_) {
       const bool DISABLE_MEMTABLE = true;
@@ -2088,11 +2088,11 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   // Do this without holding the dbmutex lock.
   assert(versions_->prev_log_number() == 0);
   if (two_write_queues_) {
-    log_write_mutex_.Lock();
+    wal_write_mutex_.Lock();
   }
   bool creating_new_log = !log_empty_;
   if (two_write_queues_) {
-    log_write_mutex_.Unlock();
+    wal_write_mutex_.Unlock();
   }
   uint64_t recycle_log_number = 0;
   if (creating_new_log && immutable_db_options_.recycle_log_file_num &&
@@ -2150,12 +2150,12 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     log_recycle_files_.pop_front();
   }
   if (s.ok() && creating_new_log) {
-    InstrumentedMutexLock l(&log_write_mutex_);
+    InstrumentedMutexLock l(&wal_write_mutex_);
     assert(new_log != nullptr);
     if (!logs_.empty()) {
       // When nonblocking_wal_io_ is enabled, SyncWAL() may be
       // flushing the back log's swapped buffer (marked IsSyncing) without
-      // holding log_write_mutex_.  Wait for it to finish before calling
+      // holding wal_write_mutex_.  Wait for it to finish before calling
       // WriteBuffer() on the same file.
       if (nonblocking_wal_io_) {
         while (logs_.back().IsSyncing()) {

@@ -191,7 +191,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       log_dir_synced_(false),
       log_empty_(true),
       persist_stats_cf_handle_(nullptr),
-      log_sync_cv_(&log_write_mutex_),
+      log_sync_cv_(&wal_write_mutex_),
       total_log_size_(0),
       is_snapshot_supported_(true),
       write_buffer_manager_(immutable_db_options_.write_buffer_manager.get()),
@@ -654,7 +654,7 @@ Status DBImpl::CloseHelper() {
     mutex_.Lock();
   }
   {
-    InstrumentedMutexLock lock(&log_write_mutex_);
+    InstrumentedMutexLock lock(&wal_write_mutex_);
     for (auto l : logs_to_free_) {
       delete l;
     }
@@ -1433,8 +1433,8 @@ Status DBImpl::FlushWAL(bool sync) {
     assert(!nonblocking_wal_io_);
     IOStatus io_s;
     {
-      // We need to lock log_write_mutex_ since logs_ might change concurrently
-      InstrumentedMutexLock wl(&log_write_mutex_);
+      // We need to lock wal_write_mutex_ since logs_ might change concurrently
+      InstrumentedMutexLock wl(&wal_write_mutex_);
       log::Writer* cur_log_writer = logs_.back().writer;
       io_s = cur_log_writer->WriteBuffer();
     }
@@ -1471,7 +1471,7 @@ Status DBImpl::SyncWAL() {
   uint64_t current_log_number;
 
   {
-    InstrumentedMutexLock l(&log_write_mutex_);
+    InstrumentedMutexLock l(&wal_write_mutex_);
     assert(!logs_.empty());
 
     // This SyncWAL() call only cares about logs up to this number.
@@ -1560,7 +1560,7 @@ Status DBImpl::SyncWAL() {
   TEST_SYNC_POINT("DBImpl::SyncWAL:BeforeMarkLogsSynced:1");
   VersionEdit synced_wals;
   {
-    InstrumentedMutexLock l(&log_write_mutex_);
+    InstrumentedMutexLock l(&wal_write_mutex_);
     if (status.ok()) {
       MarkLogsSynced(current_log_number, need_log_dir_sync, &synced_wals);
     } else {
@@ -1590,10 +1590,10 @@ Status DBImpl::ApplyWALToManifest(VersionEdit* synced_wals) {
 }
 
 Status DBImpl::LockWAL() {
-  log_write_mutex_.Lock();
+  wal_write_mutex_.Lock();
   // When nonblocking_wal_io_ is enabled, SyncWAL() may be
   // flushing the back log's swapped buffer (marked IsSyncing) without holding
-  // log_write_mutex_.  We must wait for it to finish before calling
+  // wal_write_mutex_.  We must wait for it to finish before calling
   // WriteBuffer() on the same file, to avoid concurrent writable_file_->
   // Append() calls.
   if (nonblocking_wal_io_) {
@@ -1622,13 +1622,13 @@ Status DBImpl::LockWAL() {
 }
 
 Status DBImpl::UnlockWAL() {
-  log_write_mutex_.Unlock();
+  wal_write_mutex_.Unlock();
   return Status::OK();
 }
 
 void DBImpl::MarkLogsSynced(uint64_t up_to, bool synced_dir,
                             VersionEdit* synced_wals) {
-  log_write_mutex_.AssertHeld();
+  wal_write_mutex_.AssertHeld();
   if (synced_dir && logfile_number_ == up_to) {
     log_dir_synced_ = true;
   }
@@ -1662,7 +1662,7 @@ void DBImpl::MarkLogsSynced(uint64_t up_to, bool synced_dir,
 }
 
 void DBImpl::MarkLogsNotSynced(uint64_t up_to) {
-  log_write_mutex_.AssertHeld();
+  wal_write_mutex_.AssertHeld();
   for (auto it = logs_.begin(); it != logs_.end() && it->number <= up_to;
        ++it) {
     auto& wal = *it;

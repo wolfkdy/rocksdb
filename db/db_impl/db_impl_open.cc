@@ -747,7 +747,7 @@ Status DBImpl::Recover(
     const uint64_t next_lsn = versions_->LastSequence() + 1;
     link_buf_ = std::make_unique<LinkBuf>();
     link_buf_->Reset(next_lsn);
-    lsn_offset_allocator_ = std::make_unique<LsnOffsetAllocator>(next_lsn);
+    next_lsn_ = next_lsn;
   }
   return s;
 }
@@ -1897,7 +1897,7 @@ Status DBImpl::Open(const DBOptions& db_options, const std::string& dbname,
     s = impl->CreateWAL(new_log_number, 0 /*recycle_log_number*/,
                         preallocate_block_size, &new_log);
     if (s.ok()) {
-      InstrumentedMutexLock wl(&impl->log_write_mutex_);
+      InstrumentedMutexLock wl(&impl->wal_write_mutex_);
       impl->logfile_number_ = new_log_number;
       assert(new_log != nullptr);
       assert(impl->logs_.empty());

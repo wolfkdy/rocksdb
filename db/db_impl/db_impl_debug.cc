@@ -33,12 +33,12 @@ Status DBImpl::TEST_SwitchWAL() {
 
 bool DBImpl::TEST_WALBufferIsEmpty(bool lock) {
   if (lock) {
-    log_write_mutex_.Lock();
+    wal_write_mutex_.Lock();
   }
   log::Writer* cur_log_writer = logs_.back().writer;
   auto res = cur_log_writer->TEST_BufferIsEmpty();
   if (lock) {
-    log_write_mutex_.Unlock();
+    wal_write_mutex_.Unlock();
   }
   return res;
 }
@@ -223,7 +223,7 @@ void DBImpl::TEST_EndWrite(void* w) {
 }
 
 size_t DBImpl::TEST_LogsToFreeSize() {
-  InstrumentedMutexLock l(&log_write_mutex_);
+  InstrumentedMutexLock l(&wal_write_mutex_);
   return logs_to_free_.size();
 }
 

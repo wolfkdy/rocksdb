@@ -12,6 +12,7 @@
 #include "db/version_edit.h"
 #include "file/nonblocking_io_writable_file_writer.h"
 #include "logging/logging.h"
+#include "monitoring/instrumented_mutex.h"
 #include "monitoring/statistics.h"
 #include "rocksdb/io_status.h"
 #include "rocksdb/status.h"
@@ -25,21 +26,38 @@ Status DBImpl::SyncWALNoGroup() {
   assert(!immutable_db_options_.use_group_commit);
   assert(immutable_db_options_.nonblocking_wal_io);
 
-  // Snapshot the current log under log_write_mutex_.  For 2.2 scope there
-  // is no structural switch path yet, so logs_.size() == 1 is invariant
-  // (same Round-2 scope guard as WriteImplNoGroup — lifted when 2.3 lands).
+  // Single CS under wal_write_mutex_:
+  //  - if another switcher is already mid-sync (IsSyncing), wait for it
+  //    to finish and return — its FinishSync covers our entry-time
+  //    durability requirement;
+  //  - otherwise, snapshot the log::Writer / file_writer / log_dir_synced_,
+  //    publish B as the new active slot, and mark logs_.back() as syncing
+  //    so concurrent SyncWAL callers take the wait branch above.
+  // The mutex serializes claims (ClaimSlot also runs under it), so once
+  // we publish B no new writer can land in A.  Existing in-flight
+  // writers are drained outside the mutex by WaitDrain.
   log::Writer* log_writer;
   NonBlockingIOWritableFileWriter* file_writer;
+  NonBlockingIOWritableFileWriter::BufferSlot* A;
   uint64_t current_log_number;
   bool need_log_dir_sync;
   {
-    InstrumentedMutexLock l(&log_write_mutex_);
+    InstrumentedMutexLock l(&wal_write_mutex_);
+    // Round-2 scope guard: structural switch path is not yet built so
+    // logs_.size() is invariant 1.  Once structural switch lands, this
+    // becomes a walk to find the entry to sync.
     assert(logs_.size() == 1);
-    auto& log = logs_.back();
-    log_writer = log.writer;
-    file_writer =
-        static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file());
-    current_log_number = logfile_number_;
+
+    while (logs_.back().IsSyncing()) {
+      log_sync_cv_.Wait();
+    }
+    // Re-check after wake: another switcher's FinishSync may have made
+    // our entry-time bytes durable.  If logs_.back() advanced past us,
+    // we'd return here — Round-2 has only one log so the check is moot.
+
+    log_writer = logs_.back().writer;
+    file_writer = static_cast<NonBlockingIOWritableFileWriter*>(
+        log_writer->file());
     if (!log_writer->file()->writable_file()->IsSyncThreadSafe()) {
       return Status::NotSupported(
           "SyncWAL() is not supported for this implementation of WAL file",
@@ -47,44 +65,21 @@ Status DBImpl::SyncWALNoGroup() {
               ? "try setting Options::allow_mmap_writes to false"
               : Slice());
     }
+    current_log_number = log_writer->get_log_number();
     need_log_dir_sync = !log_dir_synced_;
-  }
 
-  // Race with other switchers (concurrent SyncWAL callers, and — once 2.3
-  // lands — structural switchers) via CloseDrainOpen's Phase-1 CAS.
-  NonBlockingIOWritableFileWriter::BufferSlot* A = file_writer->ActiveSlot();
-  NonBlockingIOWritableFileWriter::BufferSlot* B = file_writer->OtherSlot(A);
-  auto res = file_writer->CloseDrainOpen(A, B);
-
-  if (res == NonBlockingIOWritableFileWriter::SwitchResult::kNotSwitcher) {
-    // Another switcher already closed A.  Our durability requirement
-    // (everything visible at our entry must be on disk before we return)
-    // is satisfied as soon as the winner's FinishSync fires — it is the
-    // winner's responsibility to flush A's bytes and fsync.  Wait on
-    // log_sync_cv_ until IsSyncing() clears on this log (§3.4 + §4.4
-    // Case 4).  Directory sync is owned by the winner on the same path.
-    InstrumentedMutexLock l(&log_write_mutex_);
-    // logs_.size() == 1 in 2.2 scope — guard it (see 2.3 for the
-    // logs-iteration form that mirrors legacy SyncWAL).
-    assert(logs_.size() == 1);
-    while (logs_.back().IsSyncing()) {
-      log_sync_cv_.Wait();
-    }
-    TEST_SYNC_POINT("DBImpl::SyncWALNoGroup:NotSwitcherReturn");
-    return Status::OK();
-  }
-
-  // We are the switcher.  CloseDrainOpen has already published B as the
-  // active slot — new writers are landing in B.  Flush A's bytes and
-  // fsync; concurrent SyncWAL losers wait on log_sync_cv_.
-  {
-    InstrumentedMutexLock l(&log_write_mutex_);
-    assert(logs_.size() == 1);
+    A = file_writer->ActiveSlot();
+    NonBlockingIOWritableFileWriter::BufferSlot* B = file_writer->OtherSlot(A);
+    file_writer->SwitchActive(A, B);
     logs_.back().PrepareForSync();
   }
 
   TEST_SYNC_POINT("DBImpl::SyncWALNoGroup:AfterPrepareForSync");
   RecordTick(stats_, WAL_FILE_SYNCED);
+
+  // Drain in-flight writers that grabbed A before SwitchActive.  Done
+  // without the mutex so writers can complete and ReleaseSlot.
+  file_writer->WaitDrain(A);
 
   IOStatus io_s = file_writer->FlushSlotBytes(A);
   if (io_s.ok()) {
@@ -93,9 +88,9 @@ Status DBImpl::SyncWALNoGroup() {
   TEST_SYNC_POINT("DBImpl::SyncWALNoGroup:AfterFlushAndSync");
 
   if (!io_s.ok()) {
-    // §3.11: SyncWAL IO failure is unrecoverable.  Phase 3 has already
-    // published B, so returning an error would leave writers landing in
-    // a buffer whose predecessor is in an undefined on-disk state.
+    // §3.11: SyncWAL IO failure is unrecoverable.  B has already been
+    // published, so returning an error would leave writers landing in a
+    // buffer whose predecessor is in an undefined on-disk state.
     ROCKS_LOG_FATAL(immutable_db_options_.info_log,
                     "SyncWAL flush/fsync failed: %s. Aborting.",
                     io_s.ToString().c_str());
@@ -118,14 +113,12 @@ Status DBImpl::SyncWALNoGroup() {
   TEST_SYNC_POINT("DBImpl::SyncWAL:BeforeMarkLogsSynced:1");
   VersionEdit synced_wals;
   {
-    InstrumentedMutexLock l(&log_write_mutex_);
+    InstrumentedMutexLock l(&wal_write_mutex_);
     MarkLogsSynced(current_log_number, need_log_dir_sync, &synced_wals);
   }
-  // Recycle A as the next standby.  Must happen after MarkLogsSynced has
-  // cleared IsSyncing + signalled waiters so losers wake into a
-  // fully-consistent state; the FREE transition itself is independent of
-  // the sync flag and ordering between the two is loose.
-  file_writer->MarkBufferFree(A);
+  // Recycle A as the next standby.  Must happen after MarkLogsSynced
+  // signals log_sync_cv_ so waiters wake into a fully-consistent state.
+  file_writer->ResetDrainedSlot(A);
 
   if (synced_wals.IsWalAddition()) {
     InstrumentedMutexLock l(&mutex_);

@@ -85,7 +85,7 @@ bool DBImpl::RequestCompactionToken(ColumnFamilyData* cfd, bool force,
 IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
                                 VersionEdit* synced_wals) {
   TEST_SYNC_POINT("DBImpl::SyncClosedLogs:Start");
-  InstrumentedMutexLock l(&log_write_mutex_);
+  InstrumentedMutexLock l(&wal_write_mutex_);
   autovector<log::Writer*, 1> logs_to_sync;
   uint64_t current_log_number = logfile_number_;
   while (logs_.front().number < current_log_number &&
@@ -103,7 +103,7 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
   if (!logs_to_sync.empty()) {
     // When nonblocking_wal_io_ is enabled, Append() buffers data in memory
     // without I/O.  Closed logs must have their buffers already drained by
-    // SwitchMemtable's WriteBuffer() call (which runs under log_write_mutex_
+    // SwitchMemtable's WriteBuffer() call (which runs under wal_write_mutex_
     // while the single writer is performing the switch, so no concurrent
     // AddRecord can sneak in after the drain).
     if (nonblocking_wal_io_) {
@@ -113,7 +113,7 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
       }
     }
 
-    log_write_mutex_.Unlock();
+    wal_write_mutex_.Unlock();
 
     assert(job_context);
 
@@ -147,7 +147,7 @@ IOStatus DBImpl::SyncClosedLogs(JobContext* job_context,
 
     TEST_SYNC_POINT_CALLBACK("DBImpl::SyncClosedLogs:BeforeReLock",
                              /*arg=*/nullptr);
-    log_write_mutex_.Lock();
+    wal_write_mutex_.Lock();
 
     // "number <= current_log_number - 1" is equivalent to
     // "number < current_log_number".

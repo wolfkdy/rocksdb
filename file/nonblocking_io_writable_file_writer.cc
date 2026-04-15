@@ -71,7 +71,7 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSlotBytes(
   assert(!use_direct_io());
   assert(!buffered_data_with_checksum_);
 
-  // Caller must be the switcher post-Phase-2, so next_wal_offset is stable.
+  // Caller must be the switcher post-WaitDrain, so next_wal_offset is stable.
   const uint64_t nbytes = slot->next_wal_offset;
   IOStatus s;
   if (nbytes > 0) {
@@ -94,104 +94,58 @@ IOStatus NonBlockingIOWritableFileWriter::FlushSlotBytes(
 
 NonBlockingIOWritableFileWriter::BufferSlot*
 NonBlockingIOWritableFileWriter::ClaimSlot() {
-  // §3.5.2: loop until the single atomic CAS that simultaneously verifies
-  // state == ACTIVE and increments count succeeds.  While state is
-  // PENDING (switch in progress), spin via cpu_relax until the switcher
-  // publishes a new active slot.
-  for (;;) {
-    BufferSlot* A = active_buffer_ptr_.load(std::memory_order_acquire);
-    uint64_t h = A->header.load(std::memory_order_acquire);
-    if (HeaderState(h) != kBufferActive) {
-      port::AsmVolatilePause();
-      continue;
-    }
-    uint64_t new_h = MakeHeader(kBufferActive, HeaderCount(h) + 1);
-    if (A->header.compare_exchange_weak(h, new_h,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_acquire)) {
-      return A;
-    }
-    // CAS failed — either count changed (another writer claimed) or state
-    // changed (switcher closed A between load and CAS).  Retry the outer
-    // loop, which re-reads active_buffer_ptr_ and A.header.
-  }
+  // Caller holds wal_write_mutex_, which serializes against SwitchActive,
+  // so the active pointer cannot change under us.  Relaxed bumps are
+  // sufficient — pairing with WaitDrain's acquire load happens via the
+  // matching ReleaseSlot's release decrement.
+  BufferSlot* s = active_buffer_ptr_.load(std::memory_order_relaxed);
+  s->in_flight_count.fetch_add(1, std::memory_order_relaxed);
+  return s;
 }
 
 void NonBlockingIOWritableFileWriter::ReleaseSlot(BufferSlot* slot) {
   assert(slot != nullptr);
-  // §3.5.3: fetch_sub(1) decrements the low 48 bits only; count is always
-  // >= 1 when this is called so the subtraction does not borrow into the
-  // state bits at 48..49.
-  uint64_t prev = slot->header.fetch_sub(1, std::memory_order_release);
-  assert(HeaderCount(prev) >= 1);
+  // Release ordering so the slot bytes the writer wrote (and the
+  // AdvanceFileSize bump) happen-before WaitDrain's acquire load sees
+  // count reach zero.
+  uint64_t prev = slot->in_flight_count.fetch_sub(1, std::memory_order_release);
+  assert(prev >= 1);
   (void)prev;
 }
 
-NonBlockingIOWritableFileWriter::SwitchResult
-NonBlockingIOWritableFileWriter::CloseDrainOpen(BufferSlot* A, BufferSlot* B) {
+void NonBlockingIOWritableFileWriter::SwitchActive(BufferSlot* A,
+                                                   BufferSlot* B) {
   assert(A != nullptr && B != nullptr && A != B);
+  // Caller must hold wal_write_mutex_.  Under that lock, A is the
+  // current active and B has been drained (WaitDrain'd by the previous
+  // switcher and ResetDrainedSlot).
+  assert(active_buffer_ptr_.load(std::memory_order_relaxed) == A);
+  assert(B->in_flight_count.load(std::memory_order_relaxed) == 0);
+  assert(B->next_wal_offset == 0);
 
-  // ----- Phase 1: close A (CAS state ACTIVE -> PENDING) -----
-  for (;;) {
-    uint64_t h = A->header.load(std::memory_order_acquire);
-    if (HeaderState(h) != kBufferActive) {
-      // Lost the race: another switcher already closed A.  Wait for that
-      // switcher's Phase 3 (active_buffer_ptr_ publishes B), then return.
-      while (active_buffer_ptr_.load(std::memory_order_acquire) == A) {
-        port::AsmVolatilePause();
-      }
-      return SwitchResult::kNotSwitcher;
-    }
-    uint64_t new_h = MakeHeader(kBufferPending, HeaderCount(h));
-    if (A->header.compare_exchange_weak(h, new_h,
-                                        std::memory_order_acq_rel,
-                                        std::memory_order_acquire)) {
-      break;
-    }
-    // CAS failed — either count changed (another writer just claimed in A)
-    // or state changed (another switcher raced in).  The next iteration's
-    // state check handles the latter.
-  }
-
-  // ----- Phase 2: drain A (wait for count to reach 0) -----
-  while (HeaderCount(A->header.load(std::memory_order_acquire)) != 0) {
-    port::AsmVolatilePause();
-  }
-
-  // ----- Phase 3: prepare B and publish it as the new active slot -----
-  // Callers that need to do slow structural work (SwitchWAL /
-  // SwitchMemtable / ...) do so between Phase 2 and Phase 3.  In Round 1
-  // there are no such callers; the test-facing primitive just publishes B.
-  //
-  // B must be FREE with count 0 here.  If not, the A/B pairing logic
-  // upstream is wrong — no writer should have a slot in B, because B was
-  // the standby.
-  const uint64_t b_h = B->header.load(std::memory_order_acquire);
-  assert(HeaderState(b_h) == kBufferFree);
-  assert(HeaderCount(b_h) == 0);
-  (void)b_h;
-  // B's scratch region starts at the absolute file offset immediately
-  // after A's highest reserved byte.  A->next_wal_offset was frozen by
-  // Phase 2's drain — no writer may advance it after count reached 0.
-  // SerializeRecord uses (B->file_offset_start + writer_offset) to
-  // compute log-record block padding (§3.10).
-  B->next_wal_offset = 0;
+  // B's scratch region begins at the byte after A's last reserved byte.
+  // SerializeRecord uses `(B->file_offset_start + writer_offset)` for
+  // log-record block padding (§3.10).
   B->file_offset_start = A->file_offset_start + A->next_wal_offset;
-  B->header.store(MakeHeader(kBufferActive, 0), std::memory_order_release);
+  // Release-store so any thread that reads active_buffer_ptr_ outside
+  // the mutex (e.g. ActiveSlot() in tests) observes the offset writes.
   active_buffer_ptr_.store(B, std::memory_order_release);
-  return SwitchResult::kSwitcher;
 }
 
-void NonBlockingIOWritableFileWriter::MarkBufferFree(BufferSlot* slot) {
+void NonBlockingIOWritableFileWriter::WaitDrain(BufferSlot* slot) {
   assert(slot != nullptr);
-  // Caller must have been the switcher that closed this slot.  Header
-  // must currently be {PENDING, 0}.
-  const uint64_t h = slot->header.load(std::memory_order_acquire);
-  assert(HeaderState(h) == kBufferPending);
-  assert(HeaderCount(h) == 0);
-  (void)h;
+  // Switcher spins for in-flight writers (those between ClaimSlot and
+  // ReleaseSlot at the moment of SwitchActive) to finish.  Acquire load
+  // pairs with ReleaseSlot's release dec.
+  while (slot->in_flight_count.load(std::memory_order_acquire) != 0) {
+    port::AsmVolatilePause();
+  }
+}
+
+void NonBlockingIOWritableFileWriter::ResetDrainedSlot(BufferSlot* slot) {
+  assert(slot != nullptr);
+  assert(slot->in_flight_count.load(std::memory_order_relaxed) == 0);
   slot->next_wal_offset = 0;
-  slot->header.store(MakeHeader(kBufferFree, 0), std::memory_order_release);
 }
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -17,84 +17,46 @@ namespace ROCKSDB_NAMESPACE {
 // the nonblocking_wal_io mode (manual_wal_flush=false, two_write_queues=false).
 //
 // It suppresses all implicit I/O during Append() and provides double-buffering
-// so SyncWAL() can swap the write buffer under log_write_mutex_, then write to
+// so SyncWAL() can swap the write buffer under wal_write_mutex_, then write to
 // disk and fsync without holding it.
 //
-// Double-buffering protocol:
-//   1. Call SwapBuffer() while holding log_write_mutex_:
+// Double-buffering protocol (legacy WriteThread-leader path):
+//   1. Call SwapBuffer() while holding wal_write_mutex_:
 //      moves buf_ -> flush_buf_, resets buf_ for new Append()s.
-//   2. Call FlushSwappedBuffer() WITHOUT holding log_write_mutex_:
+//   2. Call FlushSwappedBuffer() WITHOUT holding wal_write_mutex_:
 //      writes flush_buf_ to the OS and issues Flush(); does not touch buf_.
 //
-// The caller (AddRecord via WriteToWAL) must hold log_write_mutex_ during
-// Append() to serialize with the buffer swap in SyncWAL().
-//
-// Slot / close-drain-open primitives (eliminate_group_commit path)
+// Slot primitives (eliminate_group_commit / leaderless write path)
 // ----------------------------------------------------------------
-// In addition to the buf_/flush_buf_ swap protocol above (used by the
-// existing WriteThread-leader path with nonblocking_wal_io=true), this class
-// carries the per-buffer packed header and next_wal_offset that the new
-// leaderless write path uses.  See eliminate_group_commit_design.md §3.5
-// for the full specification.
+// In addition to the buf_/flush_buf_ swap protocol above, this class
+// carries two BufferSlots used by the leaderless write path.  See
+// eliminate_group_commit_design.md §3.5.
 //
-// These new fields are a pure addition: they are initialized to benign
-// values (slot 0 ACTIVE, slot 1 FREE, counts and offsets zero) and are not
-// read or written by the existing SwapBuffer() / FlushSwappedBuffer() code
-// paths.  They only move when the new primitives (ClaimSlot, ReleaseSlot,
-// CloseDrainOpen) are invoked — which happens exclusively in the new write
-// path, gated by the eliminate_group_commit feature flag.
+// All claim/switch decisions are serialized by the DB-level
+// wal_write_mutex_, so the slot machinery uses a plain in_flight_count
+// (no packed state bits) and a relaxed fetch_add for ClaimSlot.  The
+// switcher's drain (WaitDrain) is the only step performed without the
+// mutex held.
 class NonBlockingIOWritableFileWriter : public WritableFileWriter {
  public:
-  // Per-buffer slot carrying the §3.5.1 packed header, the per-buffer
-  // next_wal_offset, and the absolute WAL file offset at which the slot's
-  // bytes start.
+  // Per-buffer slot.
   //
-  // Header layout (bits 0..63 of header_):
-  //   bits  0..47  in_flight_count
-  //   bits 48..49  state (see BufferState)
-  //   bits 50..63  reserved (zero)
+  // file_offset_start is the absolute offset in the WAL file that
+  // corresponds to byte 0 of this slot's scratch region.  Set by the
+  // switcher in SwitchActive() before publishing the slot, and stable
+  // for the lifetime of the slot's active cycle.  SerializeRecord needs
+  // this because log-record block padding depends on
+  // `(abs_file_offset % kBlockSize)`.  See design §3.2 / §3.10.
   //
-  // file_offset_start is the absolute offset in the WAL file that corresponds
-  // to byte 0 of this slot's scratch region.  It is set by the switcher in
-  // CloseDrainOpen() Phase 3 before the slot is published, and is stable for
-  // the lifetime of the slot's ACTIVE+PENDING cycle.  SerializeRecord needs
-  // this because log-record block padding depends on `(abs_file_offset %
-  // kBlockSize)`.  See design §3.2 / §3.10.
+  // in_flight_count tracks writers between ClaimSlot and ReleaseSlot.
+  // Writers fetch_add(1, relaxed) under wal_write_mutex_; releasers
+  // fetch_sub(1, release) lockless; the switcher's WaitDrain spins on
+  // a load(acquire) until the count returns to zero.
   struct BufferSlot {
-    std::atomic<uint64_t> header;
+    std::atomic<uint64_t> in_flight_count;
     uint64_t next_wal_offset;
     uint64_t file_offset_start;
   };
-
-  enum BufferState : uint64_t {
-    kBufferFree = 0,
-    kBufferActive = 1,
-    kBufferPending = 2,
-  };
-
-  enum class SwitchResult {
-    // Caller performed Phase-1 CAS; they own A and must flush it, then
-    // transition A back to FREE via MarkBufferFree().
-    kSwitcher,
-    // Another switcher raced in first and has already published B.
-    kNotSwitcher,
-  };
-
-  // Header packing helpers.  Public so tests and Round-2 call sites can
-  // reason about header state without re-deriving the bit layout.
-  static constexpr uint64_t kHeaderCountBits = 48;
-  static constexpr uint64_t kHeaderCountMask =
-      (uint64_t{1} << kHeaderCountBits) - 1;
-
-  static uint64_t MakeHeader(uint64_t state, uint64_t count) {
-    // Reserved bits (50..63) must stay zero; callers must not pack anything
-    // into them.
-    return (state << kHeaderCountBits) | (count & kHeaderCountMask);
-  }
-  static uint64_t HeaderState(uint64_t h) {
-    return (h >> kHeaderCountBits) & 0x3;
-  }
-  static uint64_t HeaderCount(uint64_t h) { return h & kHeaderCountMask; }
 
   // checksum handoff (perform_data_verification / buffered_data_with_checksum)
   // is rejected at DB open when nonblocking_wal_io is enabled, so those
@@ -138,14 +100,10 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
       flush_buf_.AllocateNewBuffer(kSlotBytesCapacity);
     }
 
-    // Initialize the slot machinery: slots_[0] is ACTIVE on construction,
-    // slots_[1] is FREE.  active_buffer_ptr_ names the current ACTIVE slot.
-    slots_[0].header.store(MakeHeader(kBufferActive, 0),
-                           std::memory_order_relaxed);
+    slots_[0].in_flight_count.store(0, std::memory_order_relaxed);
     slots_[0].next_wal_offset = 0;
     slots_[0].file_offset_start = 0;
-    slots_[1].header.store(MakeHeader(kBufferFree, 0),
-                           std::memory_order_relaxed);
+    slots_[1].in_flight_count.store(0, std::memory_order_relaxed);
     slots_[1].next_wal_offset = 0;
     slots_[1].file_offset_start = 0;
     active_buffer_ptr_.store(&slots_[0], std::memory_order_relaxed);
@@ -153,7 +111,7 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
 
   // Swap buf_ into flush_buf_ so that FlushSwappedBuffer() can write it to
   // disk without holding the mutex while Append()s continue into the fresh
-  // buf_. Must be called under log_write_mutex_.
+  // buf_. Must be called under wal_write_mutex_.
   void SwapBuffer();
 
   // Write flush_buf_ to the OS and issue Flush(). Safe to call without any
@@ -162,19 +120,17 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
       Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
   // Returns true when flush_buf_ is empty, i.e. no SwapBuffer() is pending
-  // flush.  Useful for invariant checks by callers holding log_write_mutex_.
+  // flush.  Useful for invariant checks by callers holding wal_write_mutex_.
   bool IsFlushBufEmpty() const { return flush_buf_.CurrentSize() == 0; }
 
   // ---- Slot primitives for the eliminate_group_commit write path ----
-  //
-  // These methods are completely independent of SwapBuffer() /
-  // FlushSwappedBuffer() above.  They coordinate the leaderless write path
-  // via a pair of BufferSlot objects; see §3.5 of the design doc.
 
-  // Returns the currently active slot.  Plain read — provided for tests and
-  // for callers that need to pick an (A, B) pair for CloseDrainOpen().
+  // Returns the currently active slot.  Caller must hold wal_write_mutex_
+  // — otherwise the active slot may change between this call and the
+  // next operation.  Tests may call without the mutex when there is only
+  // one thread.
   BufferSlot* ActiveSlot() {
-    return active_buffer_ptr_.load(std::memory_order_acquire);
+    return active_buffer_ptr_.load(std::memory_order_relaxed);
   }
   // The "other" slot — useful for selecting B given A.
   BufferSlot* OtherSlot(BufferSlot* s) {
@@ -199,48 +155,44 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   }
   size_t SlotBytesCapacity() const { return kSlotBytesCapacity; }
 
-  // §3.5.2 Writer claim protocol.  Increments the in-flight count on the
-  // active slot via a single CAS that simultaneously verifies state ==
-  // ACTIVE.  Spins via cpu_relax while a switch is in progress.  Returns
-  // the slot in which the caller now holds an in-flight reservation; the
-  // caller must later call ReleaseSlot() on the same pointer.
+  // Writer claim protocol.  Caller must hold wal_write_mutex_.  Returns
+  // the current active slot with in_flight_count already bumped; caller
+  // must later call ReleaseSlot() on the same pointer.
   BufferSlot* ClaimSlot();
 
-  // §3.5.3 Writer release protocol.  Decrements the in-flight count;
-  // state bits are unaffected.
+  // Writer release protocol.  Lockless decrement; pairs with ClaimSlot.
   void ReleaseSlot(BufferSlot* slot);
 
   // AdvanceFileSize(size_t n) is inherited from WritableFileWriter
   // (protected → exposed to the leaderless write path via `using` below).
 
-  // Flush `slot_bytes_[slot][0 .. slot->next_wal_offset]` to the OS.  The
-  // caller must be the switcher that won Phase 1 of CloseDrainOpen() on
-  // this slot, so `slot->next_wal_offset` is frozen for the duration of
-  // this call.  Does not update filesize_ (writers already advanced it via
-  // AdvanceFileSize()); flushed_size_ is updated inside WriteToFile().
-  // Safe to call without log_write_mutex_ — mirrors FlushSwappedBuffer().
+  // Flush bytes [0 .. slot->next_wal_offset) of `slot` to the OS.  The
+  // caller must have called SwitchActive(slot, ...) followed by
+  // WaitDrain(slot), so `slot->next_wal_offset` is frozen.  Does not
+  // update filesize_; flushed_size_ is updated inside WriteToFile().
+  // Safe to call without wal_write_mutex_.
   IOStatus FlushSlotBytes(
       BufferSlot* slot,
       Env::IOPriority op_rate_limiter_priority = Env::IO_TOTAL);
 
-  // §3.5.4 Close-drain-open primitive.  A is the slot we want to close;
-  // B is the other slot (must be FREE when Phase 3 runs).
-  //
-  // Returns kSwitcher if this thread's Phase-1 CAS succeeded.  The caller
-  // then owns A: they must flush A's bytes and, when done, call
-  // MarkBufferFree(A) to recycle A as the next standby.
-  //
-  // Returns kNotSwitcher if another switcher was already past Phase 1 on
-  // A.  In that case this method blocks until active_buffer_ptr_ moves
-  // off A (i.e., the winning switcher reached Phase 3), then returns.
-  // The caller does not own A.
-  SwitchResult CloseDrainOpen(BufferSlot* A, BufferSlot* B);
+  // Switch the active slot from A to B.  Caller must hold
+  // wal_write_mutex_ and must pass the current active as A.  Freezes A's
+  // offsets and publishes B as the new active slot; new writers' next
+  // ClaimSlot will land in B.  The caller then drops the mutex and calls
+  // WaitDrain(A) before flushing A.
+  void SwitchActive(BufferSlot* A, BufferSlot* B);
 
-  // Recycle a slot that a switcher has finished flushing.  Stores
-  // {state: FREE, count: 0} and resets next_wal_offset.  Must only be
-  // called by the switcher that previously got kSwitcher from
-  // CloseDrainOpen() on this slot.
-  void MarkBufferFree(BufferSlot* slot);
+  // Spin until A's in_flight_count returns to zero.  Caller must NOT
+  // hold wal_write_mutex_ (writers need to be able to acquire it to
+  // ReleaseSlot — though releases themselves are lockless, the mutex is
+  // serializing other claims that might pile up).  Must be called only
+  // after SwitchActive(A, ...) has published B as the new active.
+  void WaitDrain(BufferSlot* slot);
+
+  // Reset a fully-drained slot for reuse as the standby.  Resets
+  // next_wal_offset; in_flight_count is already zero by WaitDrain.
+  // Caller must own the slot post-flush.
+  void ResetDrainedSlot(BufferSlot* slot);
 
   // Expose the base-class protected helper so the leaderless write path
   // (WriteImplNoGroup) can advance filesize_ without going through Append.
@@ -282,10 +234,9 @@ class NonBlockingIOWritableFileWriter : public WritableFileWriter {
   // Non-empty only between SwapBuffer() and FlushSwappedBuffer() completing.
   AlignedBuffer flush_buf_;
 
-  // Two persistent slots for the eliminate_group_commit path.  These do
-  // NOT alias buf_ / flush_buf_; they are independent state used only by
-  // the new write path (see §3.5).  On construction slots_[0] is ACTIVE
-  // and slots_[1] is FREE.
+  // Two persistent slots for the eliminate_group_commit path.  In that
+  // mode they alias buf_ (slot 0) and flush_buf_ (slot 1) for serialize
+  // scratch.  On construction slot 0 is active.
   BufferSlot slots_[2];
   std::atomic<BufferSlot*> active_buffer_ptr_;
 
