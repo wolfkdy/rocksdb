@@ -1694,6 +1694,388 @@ TEST_F(DBWriteNoGroupCommitTest, SyncWALDurabilityAcrossReopen) {
   }
 }
 
+// 2.3: DeleteRange must be rejected at entry — the leaderless path
+// cannot safely insert range tombstones concurrently with
+// SwitchMemtable's ConstructFragmentedRangeTombstones (see §4.12).
+TEST_F(DBWriteNoGroupCommitTest, DeleteRangeRejected) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  WriteBatch batch;
+  ASSERT_OK(batch.Put("k1", "v1"));
+  ASSERT_OK(batch.DeleteRange("a", "z"));
+  Status s = dbfull()->Write(WriteOptions(), &batch);
+  ASSERT_TRUE(s.IsNotSupported()) << s.ToString();
+
+  // LSN must not have advanced (rejection is before ClaimSlot).
+  const SequenceNumber seq_before = dbfull()->GetLatestSequenceNumber();
+  ASSERT_OK(Put("k2", "v2"));
+  const SequenceNumber seq_after = dbfull()->GetLatestSequenceNumber();
+  ASSERT_EQ(seq_before + 1, seq_after);
+}
+
+// 2.3: a prewrite that sees flush_scheduler_ non-empty must route
+// through StructuralSwitchNoGroup.  Observed via a sync-point
+// callback on the winner entry — the presence of a winner proves
+// the flag-guarded handler section was entered.
+TEST_F(DBWriteNoGroupCommitTest, StructuralSwitchFiresOnFlushPending) {
+  Options options = NoGroupCommitOptions();
+  // 64 KB is the minimum (ColumnFamilyOptions clips lower values up).
+  options.write_buffer_size = 64 << 10;
+  DestroyAndReopen(options);
+
+  std::atomic<int> winners{0};
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::StructuralSwitchNoGroup:WinnerAfterClaim",
+      [&](void*) { winners.fetch_add(1); });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  // Three-step setup required by the concurrent memtable insert path
+  // (the one used by WriteImplNoGroup):
+  //   1. filler: oversized Put that fills the memtable.  Its per-key
+  //      Add under concurrent_memtable_writes=true does NOT call
+  //      UpdateFlushState (see memtable.cc's concurrent branch);
+  //      the state transition happens in PostProcess at the tail of
+  //      InsertInto, so flush_state_ becomes FLUSH_REQUESTED only
+  //      AFTER CheckMemtableFull has already run with the old state.
+  //   2. scheduler_populator: its CheckMemtableFull sees
+  //      FLUSH_REQUESTED (left by filler's PostProcess) and calls
+  //      flush_scheduler_->ScheduleWork.  flush_scheduler_ is now
+  //      non-empty.
+  //   3. trigger: its prewrite observes !flush_scheduler_.Empty()
+  //      and routes through StructuralSwitchNoGroup.
+  ASSERT_OK(Put("filler", std::string(96 << 10, 'x')));
+  ASSERT_OK(Put("scheduler_populator", "v"));
+  ASSERT_OK(Put("trigger", "v"));
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  EXPECT_GE(winners.load(), 1);
+  ASSERT_EQ("v", Get("trigger"));
+}
+
+// 2.3: when N writers simultaneously hit a structural trigger, only
+// ONE runs the handler section (winner); the rest wait on the
+// structural_switch_cv_ and return OK (losers).  Coordination:
+// winner's sync-point callback blocks on a test-local cv until all
+// N-1 losers have fired LoserAboutToWait.  Fully deterministic —
+// no sleeps, no wall-clock dependence.
+TEST_F(DBWriteNoGroupCommitTest, StructuralSwitchCoalesces) {
+  Options options = NoGroupCommitOptions();
+  // 64 KB is the minimum (ColumnFamilyOptions clips lower values up).
+  options.write_buffer_size = 64 << 10;
+  DestroyAndReopen(options);
+
+  // filler + scheduler_populator: see StructuralSwitchFiresOnFlushPending
+  // for the rationale (concurrent-insert path defers UpdateFlushState
+  // to PostProcess, so we need a second Put's CheckMemtableFull to
+  // actually call ScheduleWork).  After these two, flush_scheduler_
+  // is non-empty and every N-thread Put below sees kFlushPending.
+  ASSERT_OK(Put("filler", std::string(96 << 10, 'x')));
+  ASSERT_OK(Put("scheduler_populator", "v"));
+
+  constexpr int kThreads = 4;
+  std::mutex cv_mu;
+  std::condition_variable losers_cv;
+  int losers_arrived = 0;
+  int winners = 0;
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::StructuralSwitchNoGroup:WinnerAfterClaim", [&](void*) {
+        std::unique_lock<std::mutex> l(cv_mu);
+        winners++;
+        // Winner blocks here until N-1 losers have parked on the cv.
+        // This guarantees the coalescing path is exercised: every
+        // other thread that enters while the flag is held becomes a
+        // loser.
+        losers_cv.wait(l,
+                       [&] { return losers_arrived >= kThreads - 1; });
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::StructuralSwitchNoGroup:LoserAboutToWait", [&](void*) {
+        std::lock_guard<std::mutex> l(cv_mu);
+        losers_arrived++;
+        if (losers_arrived >= kThreads - 1) losers_cv.notify_all();
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  std::vector<port::Thread> threads;
+  threads.reserve(kThreads);
+  for (int t = 0; t < kThreads; ++t) {
+    threads.emplace_back([this, t]() {
+      ASSERT_OK(Put("coal" + std::to_string(t), "v"));
+    });
+  }
+  for (auto& th : threads) th.join();
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  // Coalescing contract: exactly one winner for the single "round"
+  // of triggers driven by the one primed flush_scheduler_ entry.
+  // All N-1 others observed the flag and became losers.
+  EXPECT_EQ(1, winners);
+  EXPECT_EQ(kThreads - 1, losers_arrived);
+
+  for (int t = 0; t < kThreads; ++t) {
+    ASSERT_EQ("v", Get("coal" + std::to_string(t)));
+  }
+}
+
+// 2.3: memtable-swap barrier — a writer that claims slot before
+// SwitchMemtable enters its leaderless branch must complete
+// InsertInto before the memtable swap.  Deterministic two-thread
+// interleaving via sync points:
+//   1. Writer parks at AfterClaimBeforeInsert (CS released, slot
+//      in-flight count still 1).
+//   2. Switcher reaches LeaderlessBeforeWaitDrain, then enters
+//      WaitDrain which spins on the writer's in-flight count.
+//   3. Main thread observes both parked; releases the writer.
+//   4. Writer finishes InsertInto + ReleaseSlot; switcher's
+//      WaitDrain returns; switcher completes the memtable swap.
+// If WaitDrain were missing, the switcher's swap could race with
+// the writer's InsertInto.  The barrier makes both orderings
+// observable and verifiable.
+TEST_F(DBWriteNoGroupCommitTest, MemtableSwapBarrier) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  std::mutex mu;
+  std::condition_variable cv;
+  bool writer_parked = false;
+  bool switcher_in_wait_drain = false;
+  bool release_writer = false;
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::WriteImplNoGroup:AfterClaimBeforeInsert", [&](void*) {
+        std::unique_lock<std::mutex> l(mu);
+        writer_parked = true;
+        cv.notify_all();
+        cv.wait(l, [&] { return release_writer; });
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SwitchMemtable:LeaderlessBeforeWaitDrain", [&](void*) {
+        std::lock_guard<std::mutex> l(mu);
+        switcher_in_wait_drain = true;
+        cv.notify_all();
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread writer([this]() { ASSERT_OK(Put("barrier_k", "v")); });
+  // Wait for writer to park after claiming the slot.
+  {
+    std::unique_lock<std::mutex> l(mu);
+    cv.wait(l, [&] { return writer_parked; });
+  }
+
+  // Now run switcher.  It will acquire wal_write_mutex_ (writer has
+  // released the CS), fire the sync point, then enter WaitDrain which
+  // blocks on the writer's in-flight count.
+  port::Thread switcher(
+      [this]() { ASSERT_OK(dbfull()->TEST_SwitchMemtable()); });
+  // Observe switcher reached the pre-WaitDrain sync point.  Since
+  // WaitDrain immediately follows, the switcher is now spinning on
+  // the writer's in-flight count.
+  {
+    std::unique_lock<std::mutex> l(mu);
+    cv.wait(l, [&] { return switcher_in_wait_drain; });
+  }
+
+  // Release the writer.  InsertInto + ReleaseSlot complete; switcher's
+  // WaitDrain returns; memtable swap runs.
+  {
+    std::lock_guard<std::mutex> l(mu);
+    release_writer = true;
+  }
+  cv.notify_all();
+
+  writer.join();
+  switcher.join();
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_EQ("v", Get("barrier_k"));
+}
+
+// 2.2: SyncWAL must walk the entire logs_ deque and fsync every
+// inactive entry (left behind by structural switches), then let
+// MarkLogsSynced erase them.  We force two switches so logs_.size()
+// grows to 3, then SyncWAL clears it back to 1.
+TEST_F(DBWriteNoGroupCommitTest, SyncWALErasesInactiveLogs) {
+  Options options = NoGroupCommitOptions();
+  options.max_total_wal_size = 1ULL << 30;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("a", "1"));
+  ASSERT_OK(dbfull()->TEST_SwitchMemtable());
+  ASSERT_OK(Put("b", "2"));
+  ASSERT_OK(dbfull()->TEST_SwitchMemtable());
+  ASSERT_OK(Put("c", "3"));
+
+  ASSERT_OK(dbfull()->SyncWAL());
+
+  ASSERT_EQ("1", Get("a"));
+  ASSERT_EQ("2", Get("b"));
+  ASSERT_EQ("3", Get("c"));
+
+  options.avoid_flush_during_shutdown = true;
+  Reopen(options);
+  ASSERT_EQ("1", Get("a"));
+  ASSERT_EQ("2", Get("b"));
+  ASSERT_EQ("3", Get("c"));
+}
+
+// 2.2: SyncWAL mid-flush must coexist with a concurrent
+// structural-switch arrival.  Deterministic two-thread interleaving
+// via sync points:
+//   1. Syncer pauses at AfterPrepareForSync (IsSyncing=true on the
+//      back log; wal_write_mutex_ released).
+//   2. Switcher's TEST_SwitchMemtable enters its wal_write_mutex_
+//      section and hits the `while (logs_.back().IsSyncing())` wait.
+//   3. Main thread releases the syncer; it runs flush+fsync,
+//      reacquires wal_write_mutex_, MarkLogsSynced signals the cv.
+//   4. Switcher wakes, finishes its section.
+// Verifies: no deadlock, both paths complete, data durable.
+TEST_F(DBWriteNoGroupCommitTest, SyncWALWaitsOutBySwitcher) {
+  Options options = NoGroupCommitOptions();
+  options.max_total_wal_size = 1ULL << 30;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("before", "sync"));
+
+  std::mutex mu;
+  std::condition_variable cv;
+  bool syncer_parked = false;
+  bool switcher_reached_wait = false;
+  bool release_syncer = false;
+
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SyncWALNoGroup:AfterPrepareForSync", [&](void*) {
+        std::unique_lock<std::mutex> l(mu);
+        syncer_parked = true;
+        cv.notify_all();
+        cv.wait(l, [&] { return release_syncer; });
+      });
+  SyncPoint::GetInstance()->SetCallBack(
+      "DBImpl::SwitchMemtable:NonblockingBeforeIsSyncingWait", [&](void*) {
+        std::lock_guard<std::mutex> l(mu);
+        switcher_reached_wait = true;
+        cv.notify_all();
+      });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  port::Thread syncer([this]() { ASSERT_OK(dbfull()->SyncWAL()); });
+  {
+    std::unique_lock<std::mutex> l(mu);
+    cv.wait(l, [&] { return syncer_parked; });
+  }
+
+  // Switcher runs while syncer is mid-flush (IsSyncing=true on the
+  // back log).  SwitchMemtable's wal_write_mutex_ section fires the
+  // sync point above immediately before the `while (IsSyncing())`
+  // wait.  We block on that sync-point callback to confirm the
+  // switcher has parked on the wait.
+  port::Thread switcher(
+      [this]() { ASSERT_OK(dbfull()->TEST_SwitchMemtable()); });
+  {
+    std::unique_lock<std::mutex> l(mu);
+    cv.wait(l, [&] { return switcher_reached_wait; });
+  }
+
+  {
+    std::lock_guard<std::mutex> l(mu);
+    release_syncer = true;
+  }
+  cv.notify_all();
+
+  syncer.join();
+  switcher.join();
+
+  SyncPoint::GetInstance()->DisableProcessing();
+  SyncPoint::GetInstance()->ClearAllCallBacks();
+
+  ASSERT_OK(Put("after", "switch"));
+  ASSERT_OK(dbfull()->SyncWAL());
+  ASSERT_EQ("sync", Get("before"));
+  ASSERT_EQ("switch", Get("after"));
+}
+
+// Fuzz: concurrent writers + one forced structural switch.  Bounded
+// so the imm list stays well under max_write_buffer_number (no tuning
+// of that option needed).  Deterministic property coverage for the
+// barrier is in MemtableSwapBarrier above — this is a smoke test.
+TEST_F(DBWriteNoGroupCommitTest, FuzzConcurrentWritesAcrossOneSwitch) {
+  Options options = NoGroupCommitOptions();
+  DestroyAndReopen(options);
+
+  constexpr int kWriters = 4;
+  constexpr int kPerWriter = 50;
+
+  std::vector<port::Thread> writers;
+  writers.reserve(kWriters);
+  for (int t = 0; t < kWriters; ++t) {
+    writers.emplace_back([this, t]() {
+      for (int i = 0; i < kPerWriter; ++i) {
+        std::string k = "w" + std::to_string(t) + "_" + std::to_string(i);
+        ASSERT_OK(Put(k, "v"));
+      }
+    });
+  }
+  ASSERT_OK(dbfull()->TEST_SwitchMemtable());
+  for (auto& w : writers) w.join();
+
+  for (int t = 0; t < kWriters; ++t) {
+    for (int i = 0; i < kPerWriter; ++i) {
+      std::string k = "w" + std::to_string(t) + "_" + std::to_string(i);
+      ASSERT_EQ("v", Get(k)) << k;
+    }
+  }
+}
+
+// Fuzz: SyncWAL + writes all concurrent (serialization of SyncWAL
+// callers via sync_wal_in_progress_ is exercised).  Bounded to stay
+// under stall-path triggers.
+TEST_F(DBWriteNoGroupCommitTest, FuzzSyncWALWithConcurrentWrites) {
+  Options options = NoGroupCommitOptions();
+  options.max_total_wal_size = 1ULL << 30;
+  DestroyAndReopen(options);
+
+  constexpr int kWriters = 3;
+  constexpr int kSyncers = 3;
+  constexpr int kPerWriter = 50;
+
+  std::vector<port::Thread> threads;
+  threads.reserve(kWriters + kSyncers);
+  std::atomic<bool> stop_syncers{false};
+
+  for (int t = 0; t < kWriters; ++t) {
+    threads.emplace_back([this, t]() {
+      for (int i = 0; i < kPerWriter; ++i) {
+        std::string k = "w" + std::to_string(t) + "_" + std::to_string(i);
+        ASSERT_OK(Put(k, "v"));
+      }
+    });
+  }
+  for (int t = 0; t < kSyncers; ++t) {
+    threads.emplace_back([this, &stop_syncers]() {
+      while (!stop_syncers.load()) ASSERT_OK(dbfull()->SyncWAL());
+    });
+  }
+  for (int i = 0; i < kWriters; ++i) threads[i].join();
+  stop_syncers.store(true);
+  for (int i = kWriters; i < kWriters + kSyncers; ++i) threads[i].join();
+
+  ASSERT_OK(dbfull()->SyncWAL());
+  for (int t = 0; t < kWriters; ++t) {
+    for (int i = 0; i < kPerWriter; ++i) {
+      std::string k = "w" + std::to_string(t) + "_" + std::to_string(i);
+      ASSERT_EQ("v", Get(k)) << k;
+    }
+  }
+}
+
 }  // namespace ROCKSDB_NAMESPACE
 
 int main(int argc, char** argv) {

@@ -1,6 +1,6 @@
 # Eliminate Group Commit — Design Notes
 
-**Status:** Design discussion in progress. Last updated 2026-04-15.
+**Status:** Describes the current in-tree design. Code lives on branch `work-from-7.7.fb` on top of the `nonblocking_wal_io` feature.
 **Branch context:** Builds on `work-from-7.7.fb`, on top of the `nonblocking_wal_io` feature (NonBlockingIOWritableFileWriter with ping-pong buffers, commits `3e20b442f`..`3efbf64da`).
 **Document purpose:** Capture every decision made so far, plus all open items, in enough detail that a fresh session can resume the discussion without re-deriving context.
 
@@ -36,7 +36,7 @@ This new path is for `manual_wal_flush=false` (nonblocking_wal_io's domain). `ma
 
 ### 3.1 Independent writer pipeline
 
-*Implementation note (2026-04-15):* live in `db/db_impl/db_impl_write_no_group.cc :: DBImpl::WriteImplNoGroup`. Dispatched from `WriteImpl()` when `use_group_commit=false`. Reader visibility is published via `VersionSet::SetLastSequenceAtLeast(Link_buf::AdvanceWatermark() - 1)` — a CAS-max loop driven by the monotonic watermark return (§3.6), not by `SetLastSequence` (which asserts monotone input that out-of-order writer completion would violate).
+*Implementation:* `db/db_impl/db_impl_write_no_group.cc :: DBImpl::WriteImplNoGroup`, dispatched from `WriteImpl()` when `use_group_commit=false`. Reader visibility is published via `VersionSet::SetLastSequenceAtLeast(Link_buf::AdvanceWatermark() - 1)` — a CAS-max loop driven by the monotonic watermark return (§3.6), not by `SetLastSequence` (which asserts monotone input that out-of-order writer completion would violate).
 
 Each writer thread executes the following sequence with no leader and no group:
 
@@ -128,52 +128,73 @@ Therefore: at the moment the first `B`-writer advances `next_lsn_`, every advanc
 
 ### 3.4 SyncWAL protocol
 
-*Implementation note (2026-04-15):* live in `db/db_impl/db_impl_sync_wal_no_group.cc :: DBImpl::SyncWALNoGroup`. Dispatched from `SyncWAL()` when `use_group_commit=false`. The on-disk flush uses `NonBlockingIOWritableFileWriter::FlushSlotBytes(A)` — `A.bytes` is the AlignedBuffer aliased as `slot_bytes_[0]` or `slot_bytes_[1]` (§4.4 Case 4). IO failure on the switcher path aborts the process per §3.11 (Phase 3 has already published `B`, so returning an error would leave `A`'s on-disk state undefined).
+*Implementation:* `db/db_impl/db_impl_sync_wal_no_group.cc :: DBImpl::SyncWALNoGroup`, dispatched from `SyncWAL()` when `use_group_commit=false`. On-disk flush of the back log's active slot uses `NonBlockingIOWritableFileWriter::FlushSlotBytes(A)` (§4.4 Case 4). IO failure on any path aborts per §3.11.
 
-SyncWAL uses `SwitchActive` + `WaitDrain` to close the active slot, then flushes and fsyncs it. The difference from a structural switch (§3.9.1) is that SyncWAL does **not** run `SwitchWAL` / `SwitchMemtable` / `TrimMemtableHistory` / `ScheduleFlushes`. Concurrent SyncWAL callers serialize at entry via the existing `IsSyncing()` + `log_sync_cv_` machinery (db/db_impl/db_impl.cc:1494, db/db_impl/db_impl.h:2413).
+SyncWAL is the **sole fsync authority** for the leaderless path. Structural switches (§3.9.1) push bytes into the OS via `FlushSlotBytes` but do **not** fsync — matching legacy `SwitchMemtable`'s `WriteBuffer` semantics (`PosixWritableFile::Flush` is a no-op; `Fsync`/`Fdatasync` only happens on the SyncWAL path). Consequently, when `SyncWAL` runs and `logs_` contains inactive entries from recent structural switches, it walks the whole deque and fsyncs each entry, exactly like legacy `DBImpl::SyncWAL` (db_impl.cc:1491-1506).
+
+Concurrent SyncWAL callers serialize at entry via `IsSyncing()` + `log_sync_cv_`.
 
 ```
 SyncWAL():
   InstrumentedMutexLock l(&wal_write_mutex_);
-  // Round-2 scope guard; becomes a walk over logs_ once structural switch lands.
-  assert(logs_.size() == 1);
 
-  // Loser path: if another switcher is mid-sync, wait for its FinishSync to
-  // cover our entry-time durability requirement.  On wake, logs_.back() may
-  // have advanced; the Round-3 version will walk logs_ and return if ours
-  // is already covered.
-  while (logs_.back().IsSyncing())
+  // Loser path: wait until NO log in logs_ is mid-sync.  A prior
+  // SyncWAL may be fsyncing a subset of logs right now — we can't
+  // start a new cycle until it clears IsSyncing via MarkLogsSynced.
+  while (some log in logs_ has IsSyncing == true)
     log_sync_cv_.Wait();
 
-  log_writer  = logs_.back().writer;
-  file_writer = static_cast<NonBlockingIOWritableFileWriter*>(log_writer->file());
-  // IsSyncThreadSafe check, capture current_log_number / need_log_dir_sync ...
+  // Capture the back log + its active slot (writable).
+  back = logs_.back();
+  back_fw = NonBlockingIOWritableFileWriter of back.writer->file();
+  current_log_number = back.number;
+  need_log_dir_sync = !log_dir_synced_;
+  A = back_fw->ActiveSlot();
+  B = back_fw->OtherSlot(A);
+  back_fw->SwitchActive(A, B);                  // freeze A on back_fw; new writers land in B
+  back.PrepareForSync();                        // IsSyncing = true
 
-  A = file_writer->ActiveSlot();
-  B = file_writer->OtherSlot(A);
-  file_writer->SwitchActive(A, B);              // publishes B, freezes A's offsets
-  logs_.back().PrepareForSync();                // IsSyncing = true
-  l.Unlock();  // end of CS
+  // For every INACTIVE entry (all of logs_ except back):
+  //   PrepareForSync.  Its bytes are already in the file (structural
+  //   switch did FlushSlotBytes under wal_write_mutex_ when it rotated
+  //   the WAL); we need only to fsync outside the CS.
+  //   Collect file_writer pointers for the post-CS loop; pointers stay
+  //   valid because IsSyncing=true prevents MarkLogsSynced erasures.
+  inactive_fws = []
+  for each log in logs_ except back:
+    log.PrepareForSync()
+    inactive_fws.append(log.writer->file())
 
-  file_writer->WaitDrain(A);                    // spin on A->in_flight_count == 0
+  l.Unlock();
 
-  io_s = file_writer->FlushSlotBytes(A);        // write A's bytes to OS
-  if io_s.ok():
-    io_s = file_writer->SyncWithoutFlush(use_fsync);
-  if !io_s.ok():
-    std::abort();                               // §3.11 — B is already published
+  // Back log: drain A (memtable-swap barrier is not at stake here, but
+  // we still need A's bytes stable before FlushSlotBytes), then push
+  // the bytes to OS, then fsync.
+  back_fw->WaitDrain(A)
+  io_s = back_fw->FlushSlotBytes(A)
+  if io_s.ok(): io_s = back_fw->SyncWithoutFlush(use_fsync)
+  if !io_s.ok(): std::abort()
+
+  // Inactive logs: bytes are already in OS cache; just fsync.
+  for fw in inactive_fws:
+    io_s = fw->SyncWithoutFlush(use_fsync)
+    if !io_s.ok(): std::abort()
 
   if need_log_dir_sync:
-    dir_s = directories_.GetWalDir()->FsyncWithDirOptions(...);
-    if !dir_s.ok(): std::abort();
+    dir_s = directories_.GetWalDir()->FsyncWithDirOptions(...)
+    if !dir_s.ok(): std::abort()
 
   InstrumentedMutexLock l2(&wal_write_mutex_);
+  // MarkLogsSynced walks logs_ up_to current_log_number.  For each
+  // inactive log, pre_sync_size == GetFlushedSize (no bytes added
+  // between PrepareForSync and here), so it takes the "fully synced"
+  // branch and erases the entry.  For the back log, pre_sync_size <
+  // GetFlushedSize (FlushSlotBytes added A's bytes), so MarkLogsSynced
+  // takes the "Active WAL" branch and just FinishSyncs.
   MarkLogsSynced(current_log_number, need_log_dir_sync, &synced_wals);
-  // (MarkLogsSynced signals log_sync_cv_ and clears IsSyncing.)
   l2.Unlock();
 
-  file_writer->ResetDrainedSlot(A);             // next_wal_offset = 0, ready as standby
-  // (done after MarkLogsSynced so waiters wake into a fully-consistent state)
+  back_fw->ResetDrainedSlot(A)                  // recycle A as next standby
 
   if synced_wals.IsWalAddition():
     InstrumentedMutexLock ml(&mutex_);
@@ -189,26 +210,30 @@ SyncWAL():
 
 - **No `DBImpl::mutex_` on the fast path.** SyncWAL takes only `wal_write_mutex_` (twice — once for the switch+PrepareForSync, once for MarkLogsSynced). `DBImpl::mutex_` is only touched on the manifest-update tail (`ApplyWALToManifest`), same as today's baseline.
 
-- **Switch publishes B before the flush.** New writers can claim in `B` while the switcher is still appending `A`'s bytes to the WAL file. The flush of `A` and the writes into `B` proceed concurrently.
+- **Switch publishes B before the flush.** On the back log, new writers can claim in `B` while the switcher is still appending `A`'s bytes to the WAL file. The flush of `A` and the writes into `B` proceed concurrently.
+
+- **Multi-log sync is fsync-only.** Inactive logs never need `FlushSlotBytes` in SyncWAL (structural switch already did it); they need only `SyncWithoutFlush`. This keeps the per-log cost of many-inactive-logs cases bounded to N fsyncs.
 
 #### 3.4.2 Concurrent SyncWAL callers collapse
 
 If two threads call SyncWAL concurrently:
 
-1. T1 acquires `wal_write_mutex_`, sees `IsSyncing()==false`, calls `SwitchActive(A,B)` + `PrepareForSync()`, releases the mutex, and proceeds with `WaitDrain` / flush / fsync.
-2. T2 acquires `wal_write_mutex_`, sees `IsSyncing()==true`, waits on `log_sync_cv_` inside the CS.
-3. T1 finishes the IO, re-takes the mutex for `MarkLogsSynced` (which signals `log_sync_cv_` and clears `IsSyncing`).
-4. T2 wakes, re-checks the condition — covered by T1's FinishSync — and returns success.
+1. T1 acquires `wal_write_mutex_`, sees no log IsSyncing, calls `SwitchActive(A,B)` + `PrepareForSync()` on back and on every inactive log, releases the mutex, and proceeds with drain + flush + fsync.
+2. T2 acquires `wal_write_mutex_`, sees some log IsSyncing, waits on `log_sync_cv_` inside the CS.
+3. T1 finishes the IO, re-takes the mutex for `MarkLogsSynced` (which signals `log_sync_cv_` and clears IsSyncing on every entry up to current_log_number).
+4. T2 wakes, re-checks the condition — covered by T1's FinishSync — and returns success after running through its own (now mostly trivial) cycle.
 
-T2's success guarantees everything T2 could have wanted synced is durable, because T2's own writes must have completed before T2's SyncWAL call, and T1's switch+sync covers the slot they landed in.
+T2's success guarantees everything T2 could have wanted synced is durable, because T2's own writes must have completed before T2's SyncWAL call, and T1's sync covered their log(s).
 
-**Sub-optimization (deferred):** in this scheme T2 is correct but wasteful — if more than two threads pile up, every one after T2 will do its own switch+sync once it wakes, even though T1's sync already covered them. A free-riding optimization (snapshot a "pending sync covers up to LSN X" marker, let waiters return without their own switch) is straightforward but not yet implemented.
+**Sub-optimization (deferred):** T2's "mostly trivial" cycle still does a SwitchActive on the back log and one fsync of its own bytes. If many callers pile up, they serialize through that cycle even when T1's work covered them. A free-riding optimization (snapshot a "pending sync covers up to LSN X" marker, let waiters return without their own switch) is straightforward but not yet implemented.
 
 #### 3.4.3 Interaction with structural switch (§3.9.1)
 
-Both SyncWAL and the structural switch path call `SwitchActive` under `wal_write_mutex_`. Because the mutex serializes the call, only one runs at a time. If a SyncWAL caller arrives mid-structural-switch (or vice versa), the second waits on `log_sync_cv_` via the `IsSyncing()` gate at entry — the same wait T2 takes in §3.4.2.
+Structural switch takes `wal_write_mutex_` inside `SwitchMemtable` to run `WaitDrain + FlushSlotBytes + emplace_back(new_log)`. It does NOT call `PrepareForSync` on the old log — the old log stays in `logs_` with IsSyncing=false, bytes in OS cache but not fsynced.
 
-A structural switcher's flush of A also makes A durable (it runs through the same `PrepareForSync → FlushSlotBytes → SyncWithoutFlush → FinishSync` sequence), so a SyncWAL caller losing the race to a structural switch is correctly served. Conversely, SyncWAL does no structural work, so a structural condition that fired in prewrite remains set after SyncWAL returns — the prewrite-triggered writer will re-enter prewrite and run the structural switch on its next pass.
+SyncWAL picks up those inactive entries on its next run: they appear in `logs_` at indices 0..size-2, SyncWAL calls PrepareForSync + SyncWithoutFlush on each, and MarkLogsSynced erases them on the way out.
+
+Serialization between the two paths is via `wal_write_mutex_` for the brief CSs (claims, SwitchActive, emplace_back) and via `IsSyncing` + `log_sync_cv_` for the longer-running drain/flush phase of SyncWAL. A SyncWAL caller mid-fsync blocks a concurrent structural switcher's `nonblocking_wal_io_` `IsSyncing` wait in `SwitchMemtable`; the structural switcher proceeds once MarkLogsSynced signals.
 
 ### 3.5 Slot primitives
 
@@ -377,22 +402,27 @@ Each writer runs the equivalent of `DBImpl::PreprocessWrite`'s checks **per-thre
 
 All condition tests in current `PreprocessWrite` (db/db_impl/db_impl_write.cc:1114) are lockless atomic / concurrent reads:
 
-| Check | Test | Lockless? |
-|---|---|---|
-| DB stopped | `error_handler_.IsDBStopped()` | yes |
-| WAL too big | `total_log_size_ > GetMaxTotalWalSize()` | yes |
-| WBM should flush | `write_buffer_manager_->ShouldFlush()` | yes |
-| TrimHistory pending | `!trim_history_scheduler_.Empty()` | yes (concurrent queue) |
-| Pending flushes | `!flush_scheduler_.Empty()` | yes (concurrent queue) |
-| Stall / delay | `write_controller_.IsStopped() \|\| NeedsDelay()` | yes |
-| WBM should stall | `write_buffer_manager_->ShouldStall()` | yes |
-| `need_log_sync` | local field | yes |
+| Check | Test | Lockless? | Live trigger? |
+|---|---|---|---|
+| DB stopped | `error_handler_.IsDBStopped()` | yes | yes |
+| WAL too big | `total_log_size_ > GetMaxTotalWalSize()` | yes | **NO** — see note |
+| WBM should flush | `write_buffer_manager_->ShouldFlush()` | yes | yes |
+| TrimHistory pending | `!trim_history_scheduler_.Empty()` | yes (concurrent queue) | yes |
+| Pending flushes | `!flush_scheduler_.Empty()` | yes (concurrent queue) | yes |
+| Stall / delay | `write_controller_.IsStopped() \|\| NeedsDelay()` | yes | yes (§3.9.2) |
+| WBM should stall | `write_buffer_manager_->ShouldStall()` | yes | yes (§3.9.2) |
+| `need_log_sync` | local field | yes | unused (§3.8 note below) |
 
-Additionally, prewrite rejects batches that exceed the Link_buf ring capacity (§3.6.4 Check 1):
+**`wal_too_big` is disabled as a live trigger.** `PreprocessWriteLockless` hard-wires `cond.wal_too_big = false`. `total_log_size_` does not drop when `SwitchWAL` runs (only when the old WAL is deleted by background file-cleanup), so making it a retry trigger would livelock and making it a one-shot trigger would diverge from the self-resolving model of the other three structural reasons. It is handled by opportunistic piggy-backing inside `StructuralSwitchNoGroup` when the handler section is entered for another reason. The edge case where `wal_too_big` is the *only* active signal is a known deferred gap — see §4.11.
+
+**`need_log_sync` is unused.** `WriteImplNoGroup` rejects `WriteOptions::sync=true` and always passes `need_log_sync=false` to `PreprocessWriteLockless`. Durability is the caller's responsibility, via `DBImpl::SyncWAL()`.
+
+Additionally, prewrite rejects batches that exceed the Link_buf ring capacity (§3.6.4 Check 1) and corrupt batches (§4.5):
 
 | Check | Test | Lockless? |
 |---|---|---|
 | Batch too large for Link_buf | `batch_count >= kCapacity` | yes |
+| Batch `VerifyChecksum` failed | per-batch checksum walk | yes |
 
 When **none** of the conditions fire (the common case), prewrite is a sequence of atomic reads with no locks. The writer falls through directly to §3.2.
 
@@ -404,60 +434,136 @@ Prewrite failures split into **two disjoint slow paths** depending on what the f
 
 #### 3.9.1 Structural switch path (drain required)
 
-Triggered by: WAL too big, WBM should flush, non-empty trim_history, non-empty flush_scheduler. These handlers mutate memtable/WAL structure (`SwitchWAL` rewires the WAL file pointer; `SwitchMemtable` makes the current memtable immutable and installs a new one; etc.) and must not run concurrently with in-flight writers that are still writing into the old memtable / old WAL buffer.
+*Implementation:* `db/db_impl/db_impl_write_no_group.cc :: DBImpl::StructuralSwitchNoGroup`, plus a leaderless branch in `DBImpl::SwitchMemtable` (`db/db_impl/db_impl_write.cc`). `SwitchMemtable` does `WaitDrain + FlushSlotBytes` under `wal_write_mutex_` inline — **no fsync** — matching legacy `SwitchMemtable`'s `WriteBuffer` semantics (`PosixWritableFile::Flush` is a no-op; `Fsync`/`Fdatasync` only happens on the SyncWAL path). Durability is deferred to the next `SyncWAL`, which walks `logs_` and fsyncs every covered entry (§3.4).
 
-The structural switch reuses the same `SwitchActive` + `WaitDrain` primitives as SyncWAL, with the structural rewire interposed between the publish and the flush. Sequencing:
+**Triggers.** Only three structural reasons reach this path:
+
+- `kWbmShouldFlush` — `WriteBufferManager::ShouldFlush()` returned true.
+- `kTrimHistoryPending` — `!trim_history_scheduler_.Empty()`.
+- `kFlushPending` — `!flush_scheduler_.Empty()`.
+
+**`kWalTooBig` is NOT a prewrite trigger.** `PreprocessWriteLockless` hard-wires `cond.wal_too_big = false` (see `db/preprocess_write_lockless.cc`). Rationale:
+
+- `total_log_size_` does NOT drop when `SwitchWAL` runs — `SwitchWAL` only marks the oldest log `getting_flushed=true`. The counter drops when the old WAL file is deleted by `FindObsoleteFiles` / `PurgeObsoleteFiles`, 10s of ms to seconds later.
+- Returning `kWalTooBig` and retrying prewrite would livelock: every retry sees the same condition.
+- Making `kWalTooBig` one-shot while the others retry is a divergent special case.
+
+**Instead**, the structural handler piggy-backs a `SwitchWAL` call whenever it is entered for another reason and `total_log_size_ > GetMaxTotalWalSize()`. Repeat entries coalesce cheaply: `SwitchWAL` early-returns once `getting_flushed=true`. The edge case it cannot catch is a DB whose ONLY slow-path signal is `wal_too_big` — see §4.11 for the deferred cleanup.
+
+##### Sequencing
+
+`StructuralSwitchNoGroup` carries no I/O of its own — it is the coalescing + handler-dispatch wrapper. All leaderless WAL work (drain + flush) happens inline inside `SwitchMemtable` under `wal_write_mutex_`.
 
 ```
-structural_switch_path():
-  InstrumentedMutexLock l(&wal_write_mutex_);
-  // Loser at entry: another switcher (SyncWAL or structural) holds the log mid-sync.
-  while (logs_.back().IsSyncing())
-    log_sync_cv_.Wait();
+StructuralSwitchNoGroup():                           // no lock held at entry
+  // ---- Entry: winner / loser decision (flag + cv under mutex_) ----
+  acquire mutex_
+    if (structural_switch_in_progress_):
+      while (structural_switch_in_progress_):
+        structural_switch_cv_.Wait()                 // releases mutex_ while sleeping
+      release mutex_
+      return OK                                      // loser: caller retries prewrite
+    structural_switch_in_progress_ = true
+  release mutex_
 
-  log_writer  = logs_.back().writer;
-  file_writer = NonBlockingIOWritableFileWriter cast of log_writer->file();
-  A = file_writer->ActiveSlot();
-  B = file_writer->OtherSlot(A);
+  // RAII: StructuralSwitchFlagGuard destructor re-takes mutex_, clears
+  // the flag, and structural_switch_cv_.SignalAll() on scope exit.
 
-  // ----- Structural work, under DBImpl::mutex_, BEFORE we publish B -----
-  // (Round 3 work — wired this way so B-writers only commit against the new
-  // memtable + new WAL.)
-  acquire DBImpl::mutex_
-    if WAL too big:            SwitchWAL(...)
-    if WBM should flush:       HandleWriteBufferManagerFlush(...)
-    if !trim_history.Empty():  TrimMemtableHistory(...)
-    if !flush_sched.Empty():   ScheduleFlushes(...)
-  release DBImpl::mutex_
+  // ---- Winner: run handlers under mutex_ (single CS) ----
+  acquire mutex_
+    if error_handler_.IsDBStopped():  status = GetBGError()
+    // Piggy-backed wal_too_big check (§3.9.1 header above).
+    if status.ok() and total_log_size_ > GetMaxTotalWalSize() and num_cfs > 1:
+      status = SwitchWAL(&write_context)             // early-returns if already flushing
+    if status.ok() and WBM.ShouldFlush():
+      status = HandleWriteBufferManagerFlush(&write_context)
+    if status.ok() and !trim_history_scheduler_.Empty():
+      status = TrimMemtableHistory(&write_context)
+    if status.ok() and !flush_scheduler_.Empty():
+      status = ScheduleFlushes(&write_context)
+  release mutex_
 
-  // After SwitchWAL, logs_.back() is the NEW writer — but A still belongs to
-  // the OLD writer.  Capture A's log pointer here so the async flush below
-  // targets the right file.
-  log_for_A = log_writer;
-  file_writer->SwitchActive(A, B);              // publishes B
-  logs_for(A).PrepareForSync();                 // marks A's log syncing
-  l.Unlock();
-
-  // ----- Async flush of A, targeting the OLD log -----
-  // Same sequence as SyncWAL §3.4:
-  //   WaitDrain(A), FlushSlotBytes(A), SyncWithoutFlush, dir fsync if needed,
-  //   {wal_write_mutex_} MarkLogsSynced + cv signal, ResetDrainedSlot(A).
-  // Run on a background task so the triggering writer can re-enter prewrite.
-
-  return RETRY_PREWRITE
+  return status                                      // guard destructor clears flag
 ```
 
-**Sequencing rationale.** The structural rewire must run before `SwitchActive` (so B-writers commit against the new memtable / new WAL), but the entry-time `IsSyncing()` wait already serializes us against any in-flight A-flush. Because all of (read A, structural rewire, SwitchActive) happen under `wal_write_mutex_`, no writer can land in B before B is published, and no writer can race the structural handlers.
+There is NO outside-the-lock flush, no `MarkLogsSynced`, no `ResetDrainedSlot` in `StructuralSwitchNoGroup`. Everything WAL-related happens inside `SwitchMemtable`.
 
-**Async flush of A targets the OLD WAL file.** A's bytes were accumulated against the old log; the flush must append there. Since we capture `log_for_A` before SwitchWAL re-points `logs_.back()`, the async task uses the right writer.
+##### SwitchMemtable modifications (leaderless branch)
 
-**Coalescing.** Multiple structural handlers share one entry, one drain, and one slot roll. Triggered conditions handled in one pass.
+Legacy `SwitchMemtable`'s `wal_write_mutex_` section calls `cur_log_writer->WriteBuffer()`, which bottoms out at `WritableFileWriter::WriteBuffered` (the `write()` syscall) followed by `PosixWritableFile::Flush` (no-op). **No fsync.** Durability is deferred to `SyncWAL`.
 
-**Multiple writers racing to switch.** Serialized by `wal_write_mutex_` and the entry-time `IsSyncing()` wait — only one runs the structural work. Loss is correct: the loser re-enters prewrite, sees its trigger resolved (or not), and proceeds.
+The leaderless branch mirrors that contract with slot-aware primitives:
 
-**Spin window for new writers.** Adaptive `wal_write_mutex_` blocks new claims during the structural CS. They take the mutex once it is released and land in B. The new writers do not see any in-between state: there is none.
+```cpp
+// Inside SwitchMemtable's `if (s.ok() && creating_new_log)` wal_write_mutex_ section:
+if (!use_group_commit_) {
+  // Unchanged from the existing nonblocking_wal_io_ guard:
+  while (logs_.back().IsSyncing()) log_sync_cv_.Wait();
 
-**Note on `WaitForPendingWrites`.** The existing function `DBImpl::WaitForPendingWrites` is a **literal no-op** when `unordered_write=false && enable_pipelined_write=false` (verified at db/db_impl/db_impl.h:1926). The drain in `WaitDrain` is a **new** mechanism, not a replacement of `WaitForPendingWrites`. The new drain is needed because the new path **removes the WriteThread leader/group serialization** that previously made no-drain safe.
+  auto* old_fw = static_cast<NonBlockingIOWritableFileWriter*>(
+      logs_.back().writer->file());
+  auto* A = old_fw->ActiveSlot();
+  old_fw->WaitDrain(A);                  // (1) memtable-swap barrier — §3.9.1a
+  io_s = old_fw->FlushSlotBytes(A);      // (2) leaderless equivalent of WriteBuffer
+  if (!io_s.ok()) std::abort();          // §3.11
+} else {
+  cur_log_writer->WriteBuffer();         // legacy path, unchanged
+}
+
+// After the branch, unchanged for both paths:
+logs_.emplace_back(new_log_number, new_log);
+log_empty_ = true; log_dir_synced_ = false;
+alive_log_files_.push_back(...);
+```
+
+Key points:
+
+- **`WaitDrain(A)` is the only genuinely new step** vs. legacy. It exists for the memtable-swap barrier (§3.9.1a) — legacy doesn't need this because the leader's WriteThread ownership already serializes inserts vs. `SwitchMemtable`. Running `WaitDrain` under `wal_write_mutex_` is deadlock-free: in-flight writers' `InsertInto` / `SerializeRecord` / `AdvanceFileSize` / `ReleaseSlot` are all lockless.
+
+- **`FlushSlotBytes(A)` replaces `WriteBuffer()`.** `WriteBuffer()` can't work in the leaderless path:
+  - It reads `buf_.CurrentSize()` — always 0 here because leaderless writers use raw memcpy via `SlotBytesStart(slot) + offset`, never `Append`.
+  - It only touches `buf_` — wrong when the active slot is slot 1, which aliases `flush_buf_`.
+
+  `FlushSlotBytes(slot)` reads the length from `slot->next_wal_offset` and picks `buf_` or `flush_buf_` based on the slot pointer. Same underlying `WriteToFile` as legacy; different length source.
+
+- **No `SwitchActive` on the old file_writer.** `logs_.emplace_back(new_log)` below makes the old file_writer unreachable to future writers (they read `logs_.back().writer->file()` — the new file_writer — under `wal_write_mutex_`). Redirecting `active_buffer_ptr_` on the old file_writer would be dead work.
+
+- **No `PrepareForSync`, no `MarkLogsSynced`, no fsync.** The old log keeps `IsSyncing=false` and sits in `logs_` as an inactive entry with its bytes in OS cache. `SyncWALNoGroup` (§3.4) walks `logs_` on its next run and fsyncs every inactive entry alongside the back log — same as legacy.
+
+- **All of this runs under `wal_write_mutex_`.** New writers are briefly blocked during WaitDrain + FlushSlotBytes, matching the legacy behavior of holding the lock across `WriteBuffer()`. No async orchestration, no cross-function `WriteContext` handoff.
+
+##### 3.9.1a Memtable-swap correctness: why WaitDrain must run inside SwitchMemtable
+
+Without an explicit drain, this race is possible:
+
+1. Writer W claims on slot A under `wal_write_mutex_`, allocates LSN N, releases the mutex.
+2. Structural switcher enters, runs `SwitchMemtable`. In the leaderless path, inside the `wal_write_mutex_` section it calls WaitDrain + FlushSlotBytes + `emplace_back(new_log)`, then releases the mutex and proceeds to the memtable swap (`cfd->imm()->Add(cfd->mem(), ...)`, `cfd->SetMemtable(new_mem)`).
+3. (Hypothetical — what would happen *without* WaitDrain in step 2): W has not yet called `InsertInto`. `ColumnFamilyMemTablesImpl::Seek` re-reads `cfd->mem()` — after step 2's swap, this is the NEW memtable. W's entry ends up in the OLD WAL (SerializeRecord writes to slot A's bytes) AND the NEW memtable.
+
+The failure mode: once the OLD memtable flushes to SST, `OldestLogToKeep()` no longer pins the OLD WAL — it gets deleted. If we crash before the NEW memtable flushes, W's entry is lost (its only copies were in the deleted OLD WAL and the unflushed NEW memtable).
+
+The fix is a hard barrier between "writers claim on A" and "memtable swap": the switcher drains A (via `WaitDrain`, acquire-load spin paired with `ReleaseSlot`'s release-decrement) immediately when it enters the `wal_write_mutex_` section, and before `FlushSlotBytes` (so the flush sees a stable `A->next_wal_offset`). `WaitDrain` returning zero proves every A-writer has run `InsertInto` *on the OLD memtable* (InsertInto precedes ReleaseSlot). Only after the drain does `SwitchMemtable` proceed to the flush, release the mutex, and do the memtable swap.
+
+`WaitDrain` runs under `wal_write_mutex_`, the only lock held at that point. In-flight A-writers' `InsertInto`, `SerializeRecord`, `AdvanceFileSize`, and Link_buf operations are all lockless, so the drain does not deadlock. New writers that want to claim on the old file_writer will be briefly blocked by our `wal_write_mutex_`; after we release, they see `logs_.back()` == the new log and claim on the new file_writer instead. The spin is typically microseconds.
+
+##### 3.9.1b Coalescing: the `structural_switch_in_progress_` flag
+
+Concurrent switchers cannot be serialized via `wal_write_mutex_` alone. `SwitchMemtable` releases `mutex_` to call `CreateWAL` (file I/O) and re-acquires afterward. If a second writer enters `StructuralSwitchNoGroup` during that window, it captures `creating_new_log = !log_empty_` *before* the first writer updates `log_empty_ = true` inside the `wal_write_mutex_` section it has not yet reached. Both writers then allocate fresh log numbers and create new WAL files concurrently — the result is an orphan WAL file (correct on disk, but wasteful).
+
+The fix is a DB-level flag `structural_switch_in_progress_` + cv `structural_switch_cv_`, both associated with `mutex_`. The winner holds the flag across the handler-section CS; losers `Wait()` on the cv and return OK on wake, letting the caller retry prewrite. `StructuralSwitchFlagGuard` (nested private class of `DBImpl`, defined in `db_impl_write_no_group.cc`) clears the flag and `SignalAll`s on scope exit — covers every non-abort return path. Abort paths (`std::abort()` on IO failure per §3.11) skip the destructor; a crashing process has no waiters worth signaling.
+
+The flag only needs to cover the handler-section CS — the flush happens inline inside `SwitchMemtable`, so there is no post-handler phase for the flag to guard.
+
+##### 3.9.1c Retry vs one-shot
+
+The outer `WriteImplNoGroup` loop treats structural reasons as **retry** (`continue`) rather than one-shot (`break`). Safe because all three remaining triggers (`kWbmShouldFlush`, `kTrimHistoryPending`, `kFlushPending`) are self-resolving after one switch:
+
+- `ShouldFlush()` flips to false as soon as `MemTable::MarkImmutable()` → `AllocTracker::DoneAllocating()` → `WriteBufferManager::ScheduleFreeMem()` drops `memory_active_` below `mutable_limit_` (happens inside `SwitchMemtable` regardless of whether a new WAL was created).
+- `trim_history_scheduler_` / `flush_scheduler_` are drained by `TakeNextColumnFamily`.
+
+Retry terminates in at most one extra prewrite call. `kWalTooBig`, which does NOT self-resolve, is explicitly excluded from the trigger set (§3.9.1 header above).
+
+**Note on `WaitForPendingWrites`.** `DBImpl::WaitForPendingWrites` is a no-op in our config (`unordered_write=false && enable_pipelined_write=false`, db_impl.h:1926). The drain that provides memtable-swap correctness (§3.9.1a) is a *new* mechanism provided by `WaitDrain` inside `SwitchMemtable`, not a replacement of `WaitForPendingWrites`. It is needed because the leaderless path removes the WriteThread leader/group serialization that previously made no-drain safe.
 
 #### 3.9.2 Stall / wait path (no drain)
 
@@ -487,7 +593,7 @@ stall_path():
 
 - Any IO error encountered after `ClaimSlot` (steps 4–9 of the §3.1 pipeline: ring guard, memtable insert, SerializeRecord, AdvanceFileSize, Link_buf completion, ReleaseSlot) → process abort. Once the writer leaves the §3.1 step-3 critical section the write is committed; there is no rollback path.
 - Any IO error in `SyncWAL`'s flush (§3.4) → process abort.
-- Any IO error in the structural switch path's async flush of A (§3.9.1) → process abort.
+- Any IO error in the structural switch path's inline `FlushSlotBytes` (§3.9.1) → process abort.
 - This eliminates the "user was told success but later sync failed" semantic regression that the asynchronous flush model would otherwise create.
 - Consistent with the existing nonblocking_wal_io durability model, which already accepts ~100ms data loss on process crash.
 
@@ -497,19 +603,15 @@ stall_path():
 
 Items 4.1, 4.2, 4.4 (all cases), 4.5, 4.6, 4.7, 4.8 are resolved. Items 4.3 and 4.9 are deferred to v2. Item 4.10 is the remaining work — the component breakdown for the implementation pass.
 
-### 4.1 Stall handling — RESOLVED
+### 4.1 Stall handling
 
-**Decision:** stalls stay in a **separate wait zone** from the structural switch path. Stall path acquires `mutex_`, sleeps on the stall cv, and retries prewrite — no in-flight drain, no interaction with the switch path. `TrimMemtableHistory` is treated as a structural handler (it mutates memtable history) and runs under the switch path, not the stall path.
+Stalls stay in a **separate wait zone** from the structural switch path. Stall path acquires `mutex_`, sleeps on the stall cv, and retries prewrite — no in-flight drain, no interaction with the switch path. `TrimMemtableHistory` is treated as a structural handler (it mutates memtable history) and runs under the switch path, not the stall path.
 
-Detailed in §3.9.1 (switch path, with drain) and §3.9.2 (stall path, no drain). Open sub-question on ordering when both stall and switch conditions fire in the same prewrite pass: resolved as "handle switch first, then retry prewrite."
+Detailed in §3.9.1 (switch path, with drain) and §3.9.2 (stall path, no drain). Ordering when both stall and switch conditions fire in the same prewrite pass: handle switch first, then retry prewrite.
 
-**Status:** resolved 2026-04-10.
+### 4.2 Claim/switch race
 
-### 4.2 Claim/switch race — RESOLVED
-
-**Resolution.** Claim and switch are both serialized by `wal_write_mutex_` (adaptive `InstrumentedMutex`); no separate flag, no CAS race. The slot's only field is `std::atomic<uint64_t> in_flight_count`. See §3.5 for the protocol and §3.5.7 for why one mutex is enough.
-
-**Status:** resolved 2026-04-15.
+Claim and switch are both serialized by `wal_write_mutex_` (adaptive `InstrumentedMutex`); no separate flag, no CAS race. The slot's only field is `std::atomic<uint64_t> in_flight_count`. See §3.5 for the protocol and §3.5.7 for why one mutex is enough.
 
 ### 4.3 v2 — WAL buffer overflow handling
 
@@ -519,54 +621,50 @@ v1 uses infinite-cap. v2 needs:
 - **Coordination model:** writer-triggered swap (the writer that detects overflow becomes responsible for swapping) vs. SyncWAL-only swap (which would require frequent SyncWAL calls).
 - Tentative: writer-triggered swap, mirroring how prewrite-driven WAL switch works.
 
-**Status:** explicitly deferred to v2.
+Deferred to v2.
 
 ### 4.4 Recovery audit — WAL file order
 
-**Current analysis:** WAL records are guaranteed to be in monotonic LSN order in the WAL file, on two levels:
+WAL records are guaranteed to be in monotonic LSN order in the WAL file, on two levels:
 
 - **Within a single buffer:** the partial-order invariant (§3.2.3) ensures that, for any two writers in the same buffer, lsn ordering matches in-buffer offset ordering. So when the buffer's bytes are appended to the WAL file (in offset order), they are also in lsn order.
 - **Across a buffer boundary (A → B):** the close-drain-open sequence in §3.5.4 ensures that all `A`-writers complete their lsn advance before `B` is published as the new active buffer. By the time the first `B`-writer claims, every advance of `next_lsn` by an `A`-writer has already happened. Therefore `max(lsn in A) < min(lsn in B)`. See §3.2.4 for the full argument.
 
 The WAL file flush order is also `A` then `B` (the §3.5.4 `SWITCHER` caller flushes `A` after publishing `B`; `B` is only flushed in some later switch). Combined, recovery sees a WAL file that is monotonic in lsn end-to-end.
 
-**Status:** analysis complete on the core invariants. Four edge cases audited below, all resolved.
+Four edge cases audited below.
 
-#### Case 2 — Partial buffer flush on crash — RESOLVED
+#### Case 2 — Partial buffer flush on crash
 
 RocksDB's existing `log::Reader` already handles torn WAL tails via per-record CRC framing; `wal_recovery_mode` (default `kPointInTimeRecovery`) stops replay at the last valid record. Nothing about this assumes *how* the bytes were appended — one big `Append(A.bytes)` vs. many `AddRecord` calls is indistinguishable to the reader.
 
 **Correctness obligation the new path inherits:** each writer's memcpy into `A.bytes[]` must produce bytes that are wire-format identical to what `log::Writer::AddRecord` would emit — same 7-byte header, same CRC, same 32KB-block fragmentation (FIRST/MIDDLE/LAST splits). That requires the per-writer serializer to know its absolute WAL-file offset (`file_offset_at_A_start + A_offset_for_this_writer`), not just its offset within `A.bytes[]`, so block-boundary splits land on the right boundaries. This is an implementation detail for §3.10 / §4.10, not a design change.
 
-#### Case 3 — SwitchMemtable quiescence vs. a background flush of a prior buffer — RESOLVED
+#### Case 3 — SwitchMemtable quiescence vs. a background flush of a prior buffer
 
-The existing coordination flag `LogWriterNumber::getting_synced` (exposed as `IsSyncing()`) is set by `PrepareForSync()` before `SwapBuffer()` and cleared by `FinishSync()` after `SyncWithoutFlush()`. `SwitchMemtable` (db/db_impl/db_impl_write.cc:2132-2143), `LockWAL` (db/db_impl/db_impl.cc:1595-1607), `SyncClosedLogs` (db/db_impl/db_impl_compaction_flush.cc:92-93), and `FindObsoleteFiles` (db/db_impl/db_impl_files.cc:315-316) all wait on `IsSyncing()` before touching the log::Writer's `buf_`.
+The coordination flag `LogWriterNumber::getting_synced` (exposed as `IsSyncing()`) is set by `PrepareForSync()` and cleared by `FinishSync()`. `SwitchMemtable` (db/db_impl/db_impl_write.cc), `LockWAL` (db/db_impl/db_impl.cc), `SyncClosedLogs` (db/db_impl/db_impl_compaction_flush.cc), and `FindObsoleteFiles` (db/db_impl/db_impl_files.cc) all wait on `IsSyncing()` before touching the log::Writer's buffer.
 
-The new path's async flush of `A` runs through the same `PrepareForSync → FlushSwappedBuffer-equivalent → SyncWithoutFlush → FinishSync + SignalAll` sequence. Every existing waiter therefore covers the new path's async flush for free — no new flag, no new cv, no new code paths in compaction/file-cleanup. §3.9.1's `schedule_async_flush` pseudocode makes this explicit.
+`SyncWALNoGroup` runs through the same `PrepareForSync → {flush per log} → SyncWithoutFlush → MarkLogsSynced → FinishSync + SignalAll` sequence on every entry in `logs_`. Every existing waiter therefore covers the leaderless path's fsync for free — no new flag, no new cv, no new code paths in compaction/file-cleanup.
 
-#### Case 4 — Layering on `NonBlockingIOWritableFileWriter` — RESOLVED
+Structural switch (§3.9.1) flushes bytes to the OS inline under `wal_write_mutex_` without touching `IsSyncing`. Existing `IsSyncing` waiters are not affected because the inactive log produced by a structural switch has `IsSyncing=false` until the next `SyncWAL` runs.
 
-The new design has its own WAL-record-level ping-pong (buffers A, B with `A.bytes[]`). `NonBlockingIOWritableFileWriter` also has a ping-pong (`buf_` ↔ `flush_buf_`). Stacking both is redundant and creates two points where unflushed bytes can live.
+#### Case 4 — Layering on `NonBlockingIOWritableFileWriter`
 
-**Decision:** modify `NonBlockingIOWritableFileWriter` **in place** for now. The existing `buf_` / `flush_buf_` pair *becomes* the A/B pair; we extend the class with the packed `{state, in_flight_count}` header (§3.5.1), the `next_wal_offset` per buffer, and the close-drain-open-aware swap. No subclass, no separate new-path-only writer. Once the implementation stabilizes (interfaces are clean, tests are in place, no churn), we can revisit: either extract a subclass for the eliminate-group-commit mode, or keep the merged class if it generalizes cleanly. Deferring the refactor avoids designing an interface against an unsettled implementation.
+The leaderless design needs WAL-record-level slot scratch regions; `NonBlockingIOWritableFileWriter` already carries a `buf_` / `flush_buf_` ping-pong. Stacking a second ping-pong on top would create two places unflushed bytes can live.
 
-**Why this works.** `NonBlockingIOWritableFileWriter` today is small (~100 lines across `.h` and `.cc`) with two public primitives (`SwapBuffer`, `FlushSwappedBuffer`) and a well-understood invariant (`flush_buf_` non-empty only between swap and flush-complete). The new path needs: (a) per-buffer state machine, (b) per-buffer offset, (c) writer-claim CAS, (d) drain. All of these are additions on top of the existing fields; none conflict with the existing contract. The existing SyncWAL/LockWAL/SwitchMemtable waiters on `IsSyncing()` continue to work unchanged — our async flush calls `PrepareForSync()` / `FinishSync()` just like today's SyncWAL does.
+**Decision:** modify `NonBlockingIOWritableFileWriter` in place. The existing `buf_` / `flush_buf_` pair *aliases* the two slots in leaderless mode; the class is extended with `BufferSlot` state (in_flight_count, next_wal_offset, file_offset_start) and the `active_buffer_ptr_` pointer. No subclass, no separate new-path-only writer.
 
-**Contract the modification must preserve.** In the default mode (`nonblocking_wal_io=true` but `use_group_commit=true`, still going through the WriteThread leader), `NonBlockingIOWritableFileWriter` must behave exactly as today. The slot fields default to benign values (in_flight_count=0, next_wal_offset=0, file_offset_start=0) that the legacy ping-pong path simply does not read. The constructor's `use_group_commit` parameter selects between the legacy small-flush_buf preallocation and the slot-aliased pre-grown buffers. Tests for `nonblocking_wal_io` on master must continue to pass unchanged.
+**Contract the modification preserves.** In legacy mode (`use_group_commit=true`, with or without `nonblocking_wal_io`), `NonBlockingIOWritableFileWriter` behaves exactly as before. Slot fields default to benign values (in_flight_count=0, next_wal_offset=0, file_offset_start=0) that the legacy ping-pong path does not read. The constructor's `use_group_commit` parameter selects between the legacy small-flush_buf preallocation and the slot-aliased pre-grown buffers.
 
-**Status:** resolved 2026-04-14 — modify in place, revisit after stabilization.
+#### Case 1 — SyncWAL + structural switch race on the same buffer
 
-#### Case 1 — SyncWAL + structural switch race on the same buffer — RESOLVED (conditional on Case 4 decision)
+SyncWAL (§3.4) closes the active slot with `SwitchActive` under `wal_write_mutex_`. Structural switch (§3.9.1) redirects future claims to the new log via `logs_.emplace_back(new_log)` *without* calling `SwitchActive` on the old file_writer. Serialization details:
 
-SyncWAL (§3.4) and structural switch (§3.9.1) both call `SwitchActive` under `wal_write_mutex_`. Mutex serialization makes the slot-level race trivial. The log::Writer-level interaction reuses the existing `IsSyncing()` + `log_sync_cv_` machinery:
+- `IsSyncing` + `log_sync_cv_` serializes concurrent SyncWAL callers on the same log (one `IsSyncing==true` per entry at a time; late arrivers queue via `log_sync_cv_` at entry). This is the same serialization the `nonblocking_wal_io` baseline already uses for concurrent `SyncWAL` callers (db/db_write_test.cc exercises it).
+- Structural switch's `while (logs_.back().IsSyncing()) log_sync_cv_.Wait()` inside `SwitchMemtable` blocks a switcher from running while a SyncWAL is mid-flush on the current back log.
+- Concurrent structural switchers are additionally coalesced via `structural_switch_in_progress_` + `structural_switch_cv_` (§3.9.1b), so at most one structural switch runs the handler section at a time.
 
-- Both paths drive `PrepareForSync()` / `FlushSlotBytes()` / `SyncWithoutFlush()` / `FinishSync()` on the underlying `NonBlockingIOWritableFileWriter`. Only one can hold `IsSyncing==true` at a time; concurrent callers queue via `log_sync_cv_` at entry. This is the same serialization the `nonblocking_wal_io` baseline already uses for concurrent `SyncWAL` callers (db/db_write_test.cc:859 exercises this).
-- A SyncWAL caller that arrives mid-flush waits on `log_sync_cv_` inside the `wal_write_mutex_` CS until `IsSyncing()` clears on `logs_.back()` — covered by the in-progress flush.
-- Across a log::Writer boundary (a structural switcher did `SwitchWAL`, the new log is now current), a SyncWAL caller that wanted bytes from the **old** log must walk `logs_` the way today's SyncWAL does (db/db_impl/db_impl.cc:1491-1506 iterates all logs with `number <= current_log_number`). §3.4's new protocol must adopt this iteration rather than assuming a single-log shortcut.
-
-**Status:** resolved 2026-04-15. `DBImpl::SyncWALNoGroup` waits on `log_sync_cv_` inside the `wal_write_mutex_` CS until `IsSyncing()` clears on `logs_.back()`. Iteration over multiple logs is deferred to Round 3; the scope guard `assert(logs_.size() == 1)` holds until the structural-switch path lands.
-
-### 4.5 WriteBatch validation timing — RESOLVED
+### 4.5 WriteBatch validation timing
 
 **Where validation lives today.** Two places on the leader's side of the group-commit path:
 
@@ -584,23 +682,17 @@ Both are lockless, per-thread atomic/concurrent reads — they fit §3.8 trivial
 
 **What the implementation must guarantee.** No side effects before `ClaimSlot`: validation must not advance `next_lsn_`, must not touch any slot's `in_flight_count` or scratch bytes, must not write to the Link_buf ring. On failure, the writer returns the status and the caller sees exactly what it sees today on a validation failure.
 
-**Status:** resolved 2026-04-14.
+### 4.6 `min_non_hole_lsn` — concrete slot encoding
 
-### 4.6 `min_non_hole_lsn` — concrete slot encoding — RESOLVED
+Per-thread slots replaced by a Link_buf (§3.6). Each slot in the circular ring stores the end LSN of the completed batch at that position. No per-thread encoding needed — the ring is indexed by LSN, not by thread.
 
-**Resolution:** per-thread slots replaced by a Link_buf (§3.6). Each slot in the circular ring stores the end LSN of the completed batch at that position. No per-thread encoding needed — the ring is indexed by LSN, not by thread.
+### 4.7 Per-thread slot registry — lifetime and allocation
 
-**Status:** resolved 2026-04-10.
+Eliminated. The Link_buf (§3.6) requires no per-thread registration, no thread lifetime management, and no slot allocation. Writers store into the ring at their LSN index; the watermark advance is lock-free and opportunistic. Works with any threading model (thread pools, dynamic threads, fibers).
 
-### 4.7 Per-thread slot registry — lifetime and allocation — RESOLVED
+### 4.8 `WriteController` interaction with per-thread prewrite
 
-**Resolution:** eliminated. The Link_buf (§3.6) requires no per-thread registration, no thread lifetime management, and no slot allocation. Writers store into the ring at their LSN index; the watermark advance is lock-free and opportunistic. Works with any threading model (thread pools, dynamic threads, fibers).
-
-**Status:** resolved 2026-04-10.
-
-### 4.8 `WriteController` interaction with per-thread prewrite — RESOLVED
-
-**Decision:** the stall path (§3.9.2) is acceptable as-is. `WriteController::IsStopped()` and `NeedsDelay()` are atomic and lockless, so the fast-path check in prewrite does not contend. When a writer actually stalls, it falls into the slow path and serializes through `DBImpl::mutex_` + the stall cv. That serialization is acceptable because stall is an already-degraded mode — throughput is not the concern; correctness and liveness are.
+The stall path (§3.9.2) is acceptable as-is. `WriteController::IsStopped()` and `NeedsDelay()` are atomic and lockless, so the fast-path check in prewrite does not contend. When a writer actually stalls, it falls into the slow path and serializes through `DBImpl::mutex_` + the stall cv. That serialization is acceptable because stall is an already-degraded mode — throughput is not the concern; correctness and liveness are.
 
 **Correctness contract the implementation must uphold:**
 
@@ -611,7 +703,7 @@ Both are lockless, per-thread atomic/concurrent reads — they fit §3.8 trivial
 **Unit tests required:**
 
 1. **Stall does not deadlock the fast path.** Put N writers into the stall path (e.g., force `WriteBufferManager::ShouldStall()` to return true), while M other writers are on the fast path. The fast-path writers must complete. The stalled writers must wake and complete after the stall condition clears.
-2. **Stall + concurrent switcher.** Trigger a structural switch (WAL rotate) while writers are stalled. The switcher must be able to complete SwitchActive + WaitDrain + flush of `A` without needing the stalled writers to wake.
+2. **Stall + concurrent switcher.** Trigger a structural switch (WAL rotate) while writers are stalled. The switcher must be able to complete `PrepareForSync` + WaitDrain + flush of the old slot (without `SwitchActive` — redirection is via `emplace_back(new_log)`; see §3.9.1) while stalled writers are asleep.
 3. **Stall + concurrent SyncWAL.** A SyncWAL caller must complete (SwitchActive + WaitDrain + flush) while stalled writers are asleep on the cv. Stalled writers never held a slot, so drain is trivially satisfied; the test pins this assumption.
 4. **Stall then switch condition.** A writer that wakes from stall and, on retry, sees a switch condition must correctly route through §3.9.1 — no crash, no double-claim.
 5. **Many stalled writers wake simultaneously.** On broadcast, all N wake, re-run prewrite concurrently, and either claim slots (fast path) or re-stall. Verify no crashes, no lost wakeups, no Link_buf corruption.
@@ -619,20 +711,85 @@ Both are lockless, per-thread atomic/concurrent reads — they fit §3.8 trivial
 
 These tests must live in the new-path-specific test file and be run under TSAN.
 
-**Status:** resolved 2026-04-14.
-
 ### 4.9 Soft cap on infinite buffer (v1 contract)
 
 If the application stops calling SyncWAL (bug, deadlock, slow consumer), the active buffer grows unbounded.
 
-**Decision (v1):** accepted. "App must call SyncWAL regularly" is part of the v1 contract.
+**v1 contract:** "App must call SyncWAL regularly" is part of the v1 contract.
 **v2:** add an internal SyncWAL trigger when the buffer crosses a soft threshold.
-
-**Status:** v1 stance confirmed; v2 mechanism not specified.
 
 ### 4.10 Components to add / modify — see companion doc
 
 The implementation ordering, component breakdown, and PR sequencing live in `eliminate_group_commit_impl_plan.md` (Round 1 independent building blocks, Round 2 integration with the core write path). That doc cross-references each section of this design.
+
+### 4.11 `wal_too_big`-alone edge case — deferred
+
+`StructuralSwitchNoGroup` piggy-backs `SwitchWAL` when entered for another reason and `total_log_size_ > GetMaxTotalWalSize()` (see §3.9.1). It does NOT cover the case where `wal_too_big` is the *only* slow-path signal — e.g., a multi-CF DB whose per-CF mutable memtables stay below their size thresholds but whose accumulated immutable memtables pin many WAL files. In the legacy path, every write call pays a no-op `SwitchWAL` (early-returns once `getting_flushed=true`) which still forces the first-write real switch that unpins the oldest WAL. The leaderless path has no such per-write check.
+
+**Why deferred:** resurrecting `kWalTooBig` as a prewrite trigger requires either bounded retry semantics (break out after N attempts) or a distinct one-shot branch in the outer loop — both diverge from the clean "all structural reasons self-resolve, retry is livelock-free" model we adopted. The edge case is rare in practice (requires write_buffer_size >> max_total_wal_size / num_cfs) and its legacy handling is marginal anyway (repeated no-op calls).
+
+**Follow-up:** revisit alongside the Round-3 stall / backpressure work (impl plan 2.5+), which will need to think about per-condition retry semantics in general.
+
+### 4.12 Range tombstone rejection — implementation constraint
+
+`WriteImplNoGroup` rejects any batch with `WriteBatch::HasDeleteRange()` as `Status::NotSupported`. Rationale:
+
+- `SwitchMemtable` calls `MemTable::ConstructFragmentedRangeTombstones()` on the about-to-be-immutable memtable between the `wal_write_mutex_` section and the memtable swap.
+- In the legacy path, the leader's write-queue ownership makes this race-free — no concurrent writer can touch the memtable.
+- In the leaderless path, concurrent writers may still be inserting regular keys at that moment. `ConstructFragmentedRangeTombstones` is a no-op when `is_range_del_table_empty_==true`, and regular-key inserts don't touch range-del state, so the concurrent-insert window is safe *for regular keys alone*.
+- Allowing range tombstones would create a genuine data race on the range-del table between in-flight writers and the switcher.
+
+Rejecting at entry keeps `is_range_del_table_empty_` always true for leaderless-written memtables, preserving the no-op invariant. Lifting the restriction would require either serializing range-tombstone inserts through the switcher or replacing `ConstructFragmentedRangeTombstones` with a lazy build.
+
+### 4.13 `log_empty_` synchronization — deferred, chosen direction: force `creating_new_log=true` in leaderless
+
+**Current state.** `log_empty_` is a plain `bool` on `DBImpl`.
+
+| Site | Value | Lock held |
+|---|---|---|
+| `DBImpl` ctor | `true` | — |
+| `DBImpl::Recover` | `false` | `mutex_` |
+| `WriteToWAL` (legacy) | `false` | `wal_write_mutex_` |
+| `SwitchMemtable` (after new log pushed) | `true` | `wal_write_mutex_` |
+| `WriteImplNoGroup` (leaderless, added in 2.3) | `false` | `wal_write_mutex_` |
+| `SwitchMemtable` read `creating_new_log = !log_empty_` | — | `wal_write_mutex_` iff `two_write_queues_` else **no lock** |
+
+**The race.** In the leaderless path `two_write_queues_` is false, so `SwitchMemtable`'s read of `log_empty_` is not under any lock synchronized with `WriteImplNoGroup`'s write. They are concurrent on different locks (switcher holds `mutex_`; writer holds `wal_write_mutex_`) and the pre-leaderless comment at `db_impl.h:2386-2391` — "it is currently updated/read only in write_thread_, it can be accessed without any locks" — is no longer true in the leaderless path (no write_thread_; many writers update `log_empty_` concurrently via `wal_write_mutex_`).
+
+Formally a data race on a non-atomic `bool`. Practically the window is tiny — `wal_write_mutex_` release and `mutex_` acquire both imply full memory barriers on common hardware — but the correctness argument depends on implementation details rather than the C++ memory model.
+
+**Consequence if the race fires — narrower than it first appears.** If `SwitchMemtable` reads stale `true` when the writer has just set `false`:
+- `creating_new_log = false`.
+- The whole `if (s.ok() && creating_new_log)` block — including `WaitDrain(A)` + `FlushSlotBytes(A)` + `emplace_back(new_log)` — is skipped.
+- The memtable swap at the tail of `SwitchMemtable` still runs.
+- In-flight writers that claimed on the old slot continue landing in the OLD WAL and race with the memtable swap.
+
+However, the §3.9.1a data-loss scenario (OLD WAL deleted because OLD memtable flushed while W's entry lives in NEW memtable) requires `creating_new_log=true`, i.e. OLD and NEW memtables pointing to **different** WALs. The stale-read bug produces `creating_new_log=false`, which keeps `logfile_number_` unchanged: OLD and NEW memtables share the same WAL, so that WAL stays pinned until both flush. W's record, whether its in-memory copy ends up in OLD or NEW memtable, is replayable from the (single) WAL.
+
+So the leaked race is formal C++ UB but not a data-loss bug. Still worth eliminating for TSAN cleanliness and to stop depending on "the race is narrow in practice" reasoning.
+
+**Chosen direction (deferred): Option 3 — force `creating_new_log=true` in the leaderless path.**
+
+`SwitchMemtable` unconditionally takes the new-log branch when `!use_group_commit_`. Specifically:
+
+- The read `bool creating_new_log = !log_empty_` is bypassed; leaderless substitutes `true`.
+- A fresh `new_log_number` is always allocated and `CreateWAL` always runs.
+- The `wal_write_mutex_` block at db_impl_write.cc:2157-2252 always executes, so `WaitDrain(A)` + `FlushSlotBytes(A)` + `emplace_back(new_log)` always run.
+- `logfile_number_` always advances; `log_empty_=true` is always set inside the `wal_write_mutex_` block (same as today's `creating_new_log=true` branch).
+- The "log is empty — reuse the file" optimization is given up for the leaderless path.
+
+**Why Option 3 over Options 1/2.**
+
+Options considered:
+1. *Read `log_empty_` under `wal_write_mutex_` when `!use_group_commit_`.* Minimal patch but only fixes the bool read. New writers arriving between the read and the `wal_write_mutex_` block still land in the old slot; the design continues to rely on "the narrow-window analysis above is benign" rather than eliminating the decision.
+2. *Make `log_empty_` atomic.* Same theoretical coverage as Option 1, more churn across the legacy path, same residual window.
+3. *Force `creating_new_log=true` in leaderless.* **Chosen.** Removes the log_empty_ read from the leaderless decision path entirely, so neither the bool race nor the "writer arrives after the read" window exists. The memtable-swap barrier (WaitDrain) is then guaranteed to run on every leaderless `SwitchMemtable`, without needing to reason about which branch was taken.
+
+Cost: in the rare back-to-back `SwitchMemtable`-without-writes case (e.g. multiple CFs queued by `flush_scheduler_` in the same pass), we allocate a fresh file number and create an empty WAL file that obsolete-file cleanup will delete later. `SwitchMemtable` is not hot-path, so the cost is a few extra file numbers and an empty WAL file per back-to-back switch — acceptable.
+
+**Open question still worth auditing alongside.** `alive_log_files_` and `logfile_number_` carry the same "protected by `wal_write_mutex_` only when `two_write_queues_`, otherwise by `mutex_` + write_thread_" pattern per the header comments. `WriteImplNoGroup` updates `alive_log_files_.back().AddSize(byte_count)` under `wal_write_mutex_`. Option 3 removes the `log_empty_` read from the leaderless path but does **not** automatically fix reads of `alive_log_files_`/`logfile_number_` elsewhere — any leaderless reader that inherited the legacy "no lock needed without two_write_queues" doctrine is still racy. Needs its own audit.
+
+**Status.** Discussion point, not yet implemented. Track with §4.13 when the Round 2 work resumes.
 
 ---
 
@@ -646,6 +803,9 @@ The implementation ordering, component breakdown, and PR sequencing live in `eli
 - Coexistence with `unordered_write`
 - Coexistence with `enable_pipelined_write`
 - WriteBatch retry / error recovery (we abort on IO error)
+- `WriteBatch::HasDeleteRange()` (range tombstones) — see §4.12
+- `wal_too_big` as a standalone prewrite trigger — see §4.11
+- Merge operator (`WriteBatch::HasMerge()`) — requires read-before-write, conflicts with concurrent memtable inserts
 
 ---
 

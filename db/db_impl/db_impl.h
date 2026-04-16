@@ -1464,6 +1464,40 @@ class DBImpl : public DB {
   // waits on log_sync_cv_ until the winner's FinishSync fires.
   Status SyncWALNoGroup();
 
+  // Structural slow-path handler for the leaderless write path
+  // (design §3.9.1).  Runs the same WAL/memtable/flush-scheduler
+  // handlers as PreprocessWrite (SwitchWAL, HandleWriteBufferManagerFlush,
+  // TrimMemtableHistory, ScheduleFlushes), then drains the frozen old
+  // slot captured by SwitchMemtable and flush+fsync's its bytes before
+  // returning to the writer that triggered the switch.
+  //
+  // Must be called without holding mutex_ or wal_write_mutex_.  On
+  // success, the writer should retry the fast path (a fresh slot on the
+  // new WAL is already available).  On IO failure in the drain/flush
+  // step the process aborts (§3.11) — the new WAL has already been
+  // published and writers are landing in it, so a partial-sync of the
+  // old WAL is not recoverable.
+  Status StructuralSwitchNoGroup();
+
+ private:
+  // RAII guard for the winner's structural_switch_in_progress_ flag.
+  // Declared as a nested private class so the destructor can touch
+  // mutex_, structural_switch_in_progress_, and structural_switch_cv_
+  // without needing a friend declaration.  Definitions live in
+  // db_impl_write_no_group.cc.
+  class StructuralSwitchFlagGuard {
+   public:
+    explicit StructuralSwitchFlagGuard(DBImpl* db);
+    ~StructuralSwitchFlagGuard();
+    StructuralSwitchFlagGuard(const StructuralSwitchFlagGuard&) = delete;
+    StructuralSwitchFlagGuard& operator=(
+        const StructuralSwitchFlagGuard&) = delete;
+
+   private:
+    DBImpl* const db_;
+  };
+ public:
+
   // Write only to memtables without joining any write queue
   Status UnorderedWriteMemtable(const WriteOptions& write_options,
                                 WriteBatch* my_batch, WriteCallback* callback,
@@ -2349,12 +2383,14 @@ class DBImpl : public DB {
   std::deque<uint64_t> log_recycle_files_;
   // Protected by wal_write_mutex_.
   bool log_dir_synced_;
-  // Without two_write_queues, read and writes to log_empty_ are protected by
-  // mutex_. Since it is currently updated/read only in write_thread_, it can be
-  // accessed from the same write_thread_ without any locks. With
-  // two_write_queues writes, where it can be updated in different threads,
-  // read and writes are protected by wal_write_mutex_ instead. This is to avoid
-  // expensive mutex_ lock during WAL write, which update log_empty_.
+  // Synchronization rules:
+  //   - Legacy (use_group_commit=true) without two_write_queues: updated and
+  //     read only on the write_thread_ leader, so no lock is needed.
+  //   - Legacy with two_write_queues: read/write under wal_write_mutex_.
+  //   - Leaderless (use_group_commit=false, §4.13): neither read nor written
+  //     on the write path.  SwitchMemtable forces creating_new_log=true
+  //     unconditionally so the read is bypassed; WriteImplNoGroup does not
+  //     write it either since nothing on this path consumes the value.
   bool log_empty_;
 
   ColumnFamilyHandleImpl* persist_stats_cf_handle_;
@@ -2450,6 +2486,26 @@ class DBImpl : public DB {
 
   // Signaled when getting_synced becomes false for some of the logs_.
   InstrumentedCondVar log_sync_cv_;
+
+  // Leaderless write path coalescing (§3.9.1).  Only one writer at a
+  // time runs the StructuralSwitchNoGroup handler+flush sequence; other
+  // writers that see the flag set block on structural_switch_cv_ until
+  // the winner clears it, then return OK and let their outer loop
+  // retry PreprocessWriteLockless.  Both the flag and the cv are
+  // associated with mutex_.  Dormant (false / unused) when
+  // use_group_commit_=true.
+  bool structural_switch_in_progress_ = false;
+  InstrumentedCondVar structural_switch_cv_;
+
+  // Leaderless SyncWAL serialization (§3.4.2, no-free-ride model).
+  // Only one SyncWALNoGroup caller runs the sync body at a time;
+  // other callers wait on log_sync_cv_ until the flag clears, then
+  // claim it themselves.  Per-log concurrent sync (the earlier
+  // front-only IsSyncing wait) was abandoned because a concurrent
+  // MarkLogsSynced by another caller could erase logs beneath the
+  // waiter's current_log_number snapshot.  Protected by
+  // wal_write_mutex_; dormant when use_group_commit_=true.
+  bool sync_wal_in_progress_ = false;
   // This is the app-level state that is written to the WAL but will be used
   // only during recovery. Using this feature enables not writing the state to
   // memtable on normal writes and hence improving the throughput. Each new

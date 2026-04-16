@@ -2094,6 +2094,16 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
   if (two_write_queues_) {
     wal_write_mutex_.Unlock();
   }
+  // §4.13: In the leaderless path, reading log_empty_ without
+  // wal_write_mutex_ would be a data race against WriteImplNoGroup's
+  // log_empty_=false write.  Force a new log unconditionally instead:
+  // removes the read entirely, and guarantees the memtable-swap barrier
+  // (WaitDrain + FlushSlotBytes + emplace_back) always runs.  Cost is a
+  // wasted file number + empty WAL per back-to-back SwitchMemtable
+  // without writes; SwitchMemtable is not hot-path.
+  if (!immutable_db_options_.use_group_commit) {
+    creating_new_log = true;
+  }
   uint64_t recycle_log_number = 0;
   if (creating_new_log && immutable_db_options_.recycle_log_file_num &&
       !log_recycle_files_.empty()) {
@@ -2137,7 +2147,12 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
                  ". Immutable memtables: %d.\n",
                  cfd->GetName().c_str(), new_log_number, num_imm_unflushed);
   // There should be no concurrent write as the thread is at the front of
-  // writer queue
+  // writer queue.  Leaderless path safety: WriteImplNoGroup rejects
+  // range-tombstone batches (WriteBatch::HasDeleteRange()) at entry, so
+  // the memtable's range-del table is guaranteed empty and this call
+  // is a no-op — no race with in-flight leaderless writers (which may
+  // still be inserting regular keys at this point; those paths do not
+  // touch range-del state).
   cfd->mem()->ConstructFragmentedRangeTombstones();
 
   mutex_.Lock();
@@ -2153,39 +2168,92 @@ Status DBImpl::SwitchMemtable(ColumnFamilyData* cfd, WriteContext* context) {
     InstrumentedMutexLock l(&wal_write_mutex_);
     assert(new_log != nullptr);
     if (!logs_.empty()) {
-      // When nonblocking_wal_io_ is enabled, SyncWAL() may be
-      // flushing the back log's swapped buffer (marked IsSyncing) without
-      // holding wal_write_mutex_.  Wait for it to finish before calling
-      // WriteBuffer() on the same file.
+      // When nonblocking_wal_io_ is enabled, SyncWAL() may be flushing
+      // the back log (marked IsSyncing) without holding
+      // wal_write_mutex_.  Wait for it to finish before touching the
+      // same file.
       if (nonblocking_wal_io_) {
+        TEST_SYNC_POINT(
+            "DBImpl::SwitchMemtable:NonblockingBeforeIsSyncingWait");
         while (logs_.back().IsSyncing()) {
           log_sync_cv_.Wait();
         }
-        // After IsSyncing clears, SyncWAL has finished FlushSwappedBuffer,
-        // so flush_buf_ must be empty — otherwise WriteBuffer() below would
-        // race with FlushSwappedBuffer() on the same file.
-        if (!static_cast<NonBlockingIOWritableFileWriter*>(
-                 logs_.back().writer->file())
-                 ->IsFlushBufEmpty()) {
-          abort();
+        if (immutable_db_options_.use_group_commit) {
+          // Legacy path only: WriteBuffer() below races with
+          // FlushSwappedBuffer() if flush_buf_ is non-empty.  The
+          // leaderless path aliases flush_buf_ as slot 1's scratch and
+          // never runs SwapBuffer(), so CurrentSize() stays 0
+          // regardless; no such check is needed.
+          if (!static_cast<NonBlockingIOWritableFileWriter*>(
+                   logs_.back().writer->file())
+                   ->IsFlushBufEmpty()) {
+            abort();
+          }
         }
       }
-      // Alway flush the buffer of the last log before switching to a new one
-      log::Writer* cur_log_writer = logs_.back().writer;
-      if (error_handler_.IsRecoveryInProgress()) {
-        // In recovery path, we force another try of writing WAL buffer.
-        cur_log_writer->file()->reset_seen_error();
-      }
-      io_s = cur_log_writer->WriteBuffer();
-      if (s.ok()) {
-        s = io_s;
-      }
-      if (!s.ok()) {
-        ROCKS_LOG_WARN(immutable_db_options_.info_log,
-                       "[%s] Failed to switch from #%" PRIu64 " to #%" PRIu64
-                       "  WAL file\n",
-                       cfd->GetName().c_str(), cur_log_writer->get_log_number(),
-                       new_log_number);
+      if (!immutable_db_options_.use_group_commit) {
+        // Leaderless path (§3.9.1): mirror the legacy WAL-rotation
+        // contract.  Legacy SwitchMemtable calls log::Writer::WriteBuffer
+        // which bottoms out at PosixWritableFile::Flush — a literal
+        // write() syscall (app buf -> kernel page cache), NO fsync.
+        // Durability for the old log is deferred to the next SyncWAL,
+        // which is the same model nonblocking_wal_io has always used.
+        //
+        // The leaderless equivalent of WriteBuffer is FlushSlotBytes on
+        // the old active slot.  We must WaitDrain first because the
+        // memtable swap later in SwitchMemtable would otherwise race
+        // with in-flight writers whose InsertInto re-reads cfd->mem()
+        // (§3.9.1a).  WaitDrain under wal_write_mutex_ is deadlock-
+        // free: in-flight writers need no lock to reach ReleaseSlot.
+        //
+        // No SwitchActive on the old file_writer: redirecting future
+        // claims is unnecessary because `logs_.emplace_back(new_log)`
+        // below re-points `logs_.back()` to the new log, so every
+        // subsequent WriteImplNoGroup reads a DIFFERENT file_writer's
+        // active_buffer_ptr_.  The old file_writer is effectively
+        // retired by this emplace_back.
+        //
+        // No PrepareForSync / MarkLogsSynced here: the old log keeps
+        // IsSyncing=false and sits in logs_ as an inactive entry.
+        // SyncWALNoGroup walks logs_ and fsync's each inactive entry
+        // alongside the current (back) log.
+        auto* old_fw = static_cast<NonBlockingIOWritableFileWriter*>(
+            logs_.back().writer->file());
+        auto* A = old_fw->ActiveSlot();
+        TEST_SYNC_POINT(
+            "DBImpl::SwitchMemtable:LeaderlessBeforeWaitDrain");
+        old_fw->WaitDrain(A);
+        io_s = old_fw->FlushSlotBytes(A);
+        if (!io_s.ok()) {
+          // §3.11: the new WAL is about to be published and writers
+          // will land there; leaving the old WAL in an undefined
+          // on-disk state would be a silent durability regression.
+          ROCKS_LOG_FATAL(immutable_db_options_.info_log,
+                          "[%s] FlushSlotBytes on old WAL #%" PRIu64
+                          " failed during switch: %s. Aborting.",
+                          cfd->GetName().c_str(),
+                          logs_.back().writer->get_log_number(),
+                          io_s.ToString().c_str());
+          std::abort();
+        }
+      } else {
+        // Legacy path: flush the buffer of the last log before switching.
+        log::Writer* cur_log_writer = logs_.back().writer;
+        if (error_handler_.IsRecoveryInProgress()) {
+          // In recovery path, we force another try of writing WAL buffer.
+          cur_log_writer->file()->reset_seen_error();
+        }
+        io_s = cur_log_writer->WriteBuffer();
+        if (s.ok()) {
+          s = io_s;
+        }
+        if (!s.ok()) {
+          ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                         "[%s] Failed to switch from #%" PRIu64 " to #%" PRIu64
+                         "  WAL file\n",
+                         cfd->GetName().c_str(),
+                         cur_log_writer->get_log_number(), new_log_number);
+        }
       }
     }
     if (s.ok()) {

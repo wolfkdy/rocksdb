@@ -62,9 +62,21 @@ PrewriteResult PreprocessWriteLockless(DBImpl* db,
 
   PrewriteConditions cond;
   cond.db_stopped = db->error_handler_.IsDBStopped();
-  cond.wal_too_big =
-      db->total_log_size_.load(std::memory_order_relaxed) >
-      db->GetMaxTotalWalSize();
+  // wal_too_big intentionally left at its default (false) for the
+  // leaderless write path.  Rationale: total_log_size_ does NOT drop
+  // when SwitchWAL() runs — it only drops when the old WAL is actually
+  // deleted by background flush + file-deletion, which can lag by 10s
+  // of ms to seconds.  Returning kWalTooBig from prewrite would either
+  // (a) livelock a retry loop (every retry sees the same condition),
+  // or (b) force one-shot semantics that diverge from the other
+  // structural reasons.  Instead, StructuralSwitchNoGroup re-checks
+  // total_log_size_ and piggy-backs SwitchWAL when entered for some
+  // other (self-resolving) reason.  The cost is that a DB whose ONLY
+  // slow-path signal is wal_too_big (e.g. many CFs pinning small
+  // immutable memtables) won't autonomously roll its oldest WAL —
+  // legacy PreprocessWrite does, through repeated no-op SwitchWAL
+  // calls.  Accepted for now; revisit alongside the Round-3 stall /
+  // backpressure work (eliminate_group_commit impl plan 2.5+).
   cond.wbm_should_flush =
       db->write_buffer_manager_ != nullptr &&
       db->write_buffer_manager_->ShouldFlush();

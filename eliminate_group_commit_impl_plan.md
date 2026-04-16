@@ -2,7 +2,7 @@
 
 **Companion to:** `eliminate_group_commit_design.md`. This doc tracks the "how and in what order"; the design doc tracks the "what and why". Each piece below cross-references the specific design section it implements.
 
-**Last updated:** 2026-04-15.
+**Last updated:** 2026-04-16 (2.3 landed).
 
 ---
 
@@ -120,7 +120,7 @@ Rationale for the split: Round 1 lets us build and unit-test every primitive in 
 **Design ref:** §2.
 
 **Scope:**
-- Add `DBOptions::use_group_commit` (default `true` — i.e., leaderless path is opt-in via `use_group_commit=false`; this is the opposite polarity of the original sketch but reads better as "the traditional mode is the default").
+- Add `DBOptions::use_group_commit` (default `true`; leaderless path is opt-in via `use_group_commit=false`).
 - Add OpenDB-time validation that all §2 conditions hold when the flag is set to `false` (`nonblocking_wal_io=true`, `!two_write_queues`, `!unordered_write`, `!enable_pipelined_write`). `ColumnFamilyOptions::CheckConcurrentWritesSupported` is also required.
 - Add per-write rejection for `WriteOptions::disableWAL=true`, `WriteOptions::sync=true`, and `WriteBatch::HasMerge()` when the flag is off.
 
@@ -148,7 +148,7 @@ Starts only after every Round 1 piece is merged. Pieces in this round are NOT in
 
 Key implementation decisions beyond the design doc:
 - Visibility is published via `VersionSet::SetLastSequenceAtLeast(new_watermark - 1)` — a CAS-max loop driven by `Link_buf::AdvanceWatermark()`'s return value. `SetLastSequence` would regress last_sequence_ under out-of-order writer completion.
-- The single CS at the top of the function holds `wal_write_mutex_` (adaptive `InstrumentedMutex`) and covers: snapshot of `logs_.back()`, `ClaimSlot`, paired `(next_lsn_, slot->next_wal_offset)` advance via `log::ComputeSerializedRecordSize`. Round-2 scope guard `assert(logs_.size() == 1)`.
+- The single CS at the top of the function holds `wal_write_mutex_` (adaptive `InstrumentedMutex`) and covers: snapshot of `logs_.back()`, `ClaimSlot`, paired `(next_lsn_, slot->next_wal_offset)` advance via `log::ComputeSerializedRecordSize`.
 - Any post-claim failure (memtable insert, serialize size mismatch, slot-bytes overflow) aborts the process per §3.11 — the LSN space has advanced, and returning an error would leave a hole.
 - `NonBlockingIOWritableFileWriter::AdvanceFileSize()` is called after every successful serialize so `GetFileSize()` stays honest for downstream observers (§3.9.1 WAL-too-big check, `FlushSwappedBuffer` invariant).
 **PR:** —
@@ -159,30 +159,40 @@ Key implementation decisions beyond the design doc:
 
 **Design ref:** §3.4.
 
-**Scope:** branches on the flag; new variant uses `SwitchActive` + `WaitDrain` + `PrepareForSync` / `FinishSync` / `log_sync_cv_` per §3.4. Concurrent SyncWAL serialization is via the entry-time `IsSyncing()` wait inside `wal_write_mutex_`.
+**Scope:** `SyncWAL()` dispatches to `SyncWALNoGroup` when `use_group_commit=false`. The shape mirrors legacy `SyncWAL` (db_impl.cc:1464): PrepareForSync on every covered entry, per-log flush + fsync outside the CS, MarkLogsSynced in a second CS. The only primitives that differ from legacy are `SwitchActive` + `WaitDrain` + `FlushSlotBytes` on the back log (leaderless analogues of SwapBuffer + FlushSwappedBuffer); inactive logs do SyncWithoutFlush only (their bytes were pushed to the OS inline by `SwitchMemtable`).
 
 **Tests:** concurrent-SyncWAL collapse, SyncWAL + writes interleaving, SyncWAL + structural-switch race.
 
-**Status:** done (structural-switch-race test deferred until 2.3).
+**Status:** done; dedicated tests pending.
 **PR:** —
 
 Notes:
 - Aliased `slot_bytes_[0/1]` onto `buf_`/`flush_buf_` per §4.4 Case 4 — one 128 MB/WAL allocation serves both roles; legacy mode (default) keeps the old small pre-alloc.
-- Ctor now takes `use_group_commit` explicitly; DB-open threads `immutable_db_options_.use_group_commit` through.
-- SyncWAL IO failure aborts the process (§3.11): Phase-3 has already published B, so returning an error would leave A's on-disk state undefined.
-- Round-2 scope guard: `assert(logs_.size() == 1)` — lifted in 2.3 once the structural switch path can grow `logs_`.
+- Ctor takes `use_group_commit` explicitly; DB-open threads `immutable_db_options_.use_group_commit` through.
+- SyncWAL IO failure aborts the process (§3.11).
 
 ---
 
 ### 2.3 Structural switch path
 
-**Design ref:** §3.9.1.
+**Design ref:** §3.9.1 (structural switch path), §3.9.1a (memtable-swap barrier), §3.9.1b (flag coalescing), §3.9.1c (retry semantics), §4.11 (wal_too_big deferral), §4.12 (range-tombstone rejection), §3.4 (multi-log SyncWAL).
 
-**Scope:** implements the full §3.9.1 sequence under `wal_write_mutex_`: entry-time `IsSyncing()` wait → `mutex_` for `SwitchWAL` / `SwitchMemtable` / `TrimMemtableHistory` / `ScheduleFlushes` → `SwitchActive(A,B)` → `PrepareForSync` on A's log → release the mutex → schedule async flush of A (`WaitDrain` → `FlushSlotBytes` → `SyncWithoutFlush` → `MarkLogsSynced` + cv signal → `ResetDrainedSlot`).
+**Scope:**
 
-**Tests:** each triggering condition, coalescing of multiple conditions, async-flush-of-A vs. concurrent SwitchMemtable race (covered by existing `IsSyncing()` plumbing).
+- `DBImpl::StructuralSwitchNoGroup` in `db/db_impl/db_impl_write_no_group.cc`. The coalescing wrapper — flag check + winner runs the four handlers (`SwitchWAL`, `HandleWriteBufferManagerFlush`, `TrimMemtableHistory`, `ScheduleFlushes`) under `mutex_` alone. No outside-the-lock I/O; all WAL work is inline in `SwitchMemtable`.
+- Leaderless branch in `DBImpl::SwitchMemtable` (`db/db_impl/db_impl_write.cc`'s `creating_new_log` block), under `wal_write_mutex_`:
+  - `WaitDrain(A)` — memtable-swap barrier (§3.9.1a).
+  - `FlushSlotBytes(A)` — leaderless equivalent of legacy `WriteBuffer()`. No fsync.
+  - Abort on IO error (§3.11).
+- `DBImpl::structural_switch_in_progress_` + `structural_switch_cv_` (both associated with `mutex_`). Winner sets the flag; losers Wait on the cv and return OK, letting the caller retry prewrite.
+- Nested private class `DBImpl::StructuralSwitchFlagGuard` (declared in `db_impl.h`, defined in `db_impl_write_no_group.cc`) owns the flag lifecycle via RAII.
+- `WriteImplNoGroup` outer loop: `kWbmShouldFlush` / `kTrimHistoryPending` / `kFlushPending` → `StructuralSwitchNoGroup()` then `continue` (retry prewrite; all three self-resolve). `kWalTooBig` is disabled in `PreprocessWriteLockless` (§4.11). `HasDeleteRange()` batches are rejected at `WriteImplNoGroup` entry (§4.12).
+- `WriteImplNoGroup` CS also does per-writer `alive_log_files_.back().AddSize(byte_count)` + `total_log_size_ += byte_count` (relaxed, outside the CS), matching the legacy `WriteToWAL` bookkeeping. `log_empty_` is intentionally not written here: §4.13 Option 3 bypasses `SwitchMemtable`'s read, and no other reader in this path consumes it.
+- `SyncWALNoGroup` walks `logs_` and fsyncs every entry up to `current_log_number` (shape matches legacy `SyncWAL`). Structural switch no longer fsyncs, so the fsync authority lives entirely on the SyncWAL path — same as legacy.
 
-**Status:** not started.
+**Tests (still to write):** each triggering condition, coalescing of concurrent switchers via the flag, memtable-swap barrier correctness (a writer that claims before the switch but InsertIntos after must land in the OLD memtable), range-tombstone rejection, multi-log SyncWAL (inactive logs get fsynced + erased via MarkLogsSynced).
+
+**Status:** landed; dedicated tests pending (existing `DBWriteNoGroupCommitTest` + `DBUseGroupCommitFlagTest` suites pass unchanged).
 **PR:** —
 
 ---
@@ -243,8 +253,8 @@ Notes:
 | 1.5 Lockless prewrite helper | 1 | done | — |
 | 1.6 Feature flag (`use_group_commit`, default `true`) | 1 | done | — |
 | 2.1 WriteImplNoGroup | 2 | done | — |
-| 2.2 SyncWAL variant | 2 | done (structural-switch race test deferred to 2.3) | — |
-| 2.3 Structural switch path | 2 | not started | — |
+| 2.2 SyncWAL variant | 2 | extended in 2.3 to walk logs_ (multi-log fsync); dedicated tests pending | — |
+| 2.3 Structural switch path | 2 | done; dedicated tests pending | — |
 | 2.4 GetSnapshot / iterator wait | 2 | not started | — |
 | 2.5 Stall path + tests | 2 | not started | — |
 | 2.6 End-to-end + stress | 2 | blocked on 2.3, 2.4, 2.5 | — |
